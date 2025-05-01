@@ -1,0 +1,11 @@
+说明文件：环境写在env里 log存放的是训练过程中的损失值，通过tensorboard --logdir=地址可以绘制曲线   模型在PPO_model里。需要在里边的Config设置模型的参数 包括输入状态，输出动作的维度等 save里是每次模型训练保存的模型，在Run里Load_able=True
+可以读取上次训练保存的模型继续训练。
+
+PPO模型的输出动作分布是伯努利分布，其采样输出的是0,1独热编码。目前项目里应该就是0,1
+
+
+目前的这个版本还没有添加udp通讯，先跑通之后可以添加。
+
+Run_CartPole_test.py中是一个平衡杆的测试环境，后边可以根据咱们自己写的环境来替换对应位置的代码。最好符合Run_CartPole_test.py里env调用的函数命名 比如reset和step等 返回值也都符合Run_CartPole_test.py里的
+
+已经通过平衡杆测试算法模型是正确的
