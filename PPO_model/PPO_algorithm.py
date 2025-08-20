@@ -3,6 +3,9 @@
 # @Author:  Zeming M
 # @File:    PPO_algorithm
 # @IDE:     PyCharm
+import os
+import re
+
 import numpy as np
 import torch
 
@@ -11,7 +14,7 @@ from PPO_model.Critic import *
 from PPO_model.Buffer import *
 
 class PPO_discrete(object):
-    def __init__(self,load_able = False):
+    def __init__(self, load_able):
         '''
 
         :param load_able: 是否加载已经储存的模型
@@ -23,14 +26,56 @@ class PPO_discrete(object):
         self.gamma = AGENTPARA.gamma
         self.gae_lambda = AGENTPARA.lamda
         self.ppo_epoch = AGENTPARA.ppo_epoch
+        self.total_steps = 0
+        # if load_able:
+        #     for net in ['Actor', 'Critic']:
+        #         try:
+        #             getattr(self, net).load_state_dict(
+        #                 torch.load("save/" + net + '.pkl', weights_only=True))
+        #         except:
+        #             print("load error")
+        #     pass
+
         if load_able:
+            self.load_model_from_save_folder()
+
+    def load_model_from_save_folder(self):
+        save_dir = "test"
+        files = os.listdir(save_dir)
+
+        # 找唯一的 *_Actor.pkl 文件
+        # ------- 情况 1：查找 *_Actor.pkl 文件 -------
+        actor_files = [f for f in files if f.endswith("_Actor.pkl")]
+        if len(actor_files) == 1:
+            match = re.match(r"(.+)_Actor\.pkl", actor_files[0])
+            if not match:
+                print("文件名格式错误")
+                return
+            prefix = match.group(1)
             for net in ['Actor', 'Critic']:
                 try:
-                    getattr(self, net).load_state_dict(
-                        torch.load("save/" + net + '.pkl', weights_only=True))
-                except:
-                    print("load error")
-            pass
+                    filename = os.path.join(save_dir, f"{prefix}_{net}.pkl")
+                    getattr(self, net).load_state_dict(torch.load(filename, weights_only=True))
+                    print(f"成功加载模型: {filename}")
+                except Exception as e:
+                    print(f"加载失败: {filename}，原因: {e}")
+            return  # 成功加载后退出
+
+        # ------- 情况 2：查找老格式 Actor.pkl 和 Critic.pkl -------
+        elif "Actor.pkl" in files and "Critic.pkl" in files:
+            for net in ['Actor', 'Critic']:
+                try:
+                    filename = os.path.join(save_dir, f"{net}.pkl")
+                    getattr(self, net).load_state_dict(torch.load(filename, weights_only=True))
+                    print(f"成功加载旧格式模型: {filename}")
+                except Exception as e:
+                    print(f"加载失败: {filename}，原因: {e}")
+            return  # 成功加载后退出
+
+        # ------- 都不符合，报错 -------
+        else:
+            print("模型加载错误：未找到符合要求的模型文件，请确保 save/ 中存在一对 Actor/Critic 模型")
+            return
     def store_experience(self, state, action, probs, value, reward, done):
         '''
         储存经验到经验池
@@ -102,7 +147,7 @@ class PPO_discrete(object):
                 action = check(action).to(**ACTOR_PARA.tpdv)
                 old_value = check(old_value).to(**ACTOR_PARA.tpdv)
                 old_prob = check(old_prob).to(**ACTOR_PARA.tpdv)
-                advantage = check(advantage).to(**ACTOR_PARA.tpdv)
+                advantage = check(advantage).to(**ACTOR_PARA.tpdv).unsqueeze(-1)
 
                 #########################################Actor训练############################################
                 dist = self.Actor(state)               #获得策略分布
@@ -119,7 +164,7 @@ class PPO_discrete(object):
                 actor_loss.mean().backward()
                 self.Actor.optim.step()
                 #######################################Critic训练##############################################
-                return_ = advantage.unsqueeze(-1) + old_value   #目标值
+                return_ = advantage + old_value   #目标值
                 new_value = self.Critic(state)
 
 
@@ -129,6 +174,12 @@ class PPO_discrete(object):
                 self.Critic.optim.zero_grad()
                 critic_loss.backward()
                 self.Critic.optim.step()
+
+                # 学习率调度
+                # self.Actor.actor_scheduler.step()
+                # self.Critic.critic_scheduler.step()
+                # self.total_steps += 1
+
                 ##############################################################################################
                 train_info['critic_loss'].append(critic_loss.mean().cpu().detach().numpy())
                 train_info['actor_loss'] = [actor_loss.mean().cpu().detach().numpy()]
@@ -141,7 +192,10 @@ class PPO_discrete(object):
         train_info['dist_entropy'] = np.array(train_info['dist_entropy']).mean()
         train_info['adv_targ'] = np.array(train_info['adv_targ']).mean()
         train_info['ratio'] = np.array(train_info['ratio']).mean()
-        self.save()
+
+        train_info['actor_lr'] = self.Actor.optim.param_groups[0]['lr']
+        train_info['critic_lr'] = self.Critic.optim.param_groups[0]['lr']
+        # self.save()
         return  train_info
 
     def prep_training_rl(self):
@@ -160,14 +214,22 @@ class PPO_discrete(object):
         self.Actor.eval()
         self.Critic.eval()
 
-    def save(self):
+    # def save(self):
+    #     for net in ['Actor', 'Critic']:
+    #         try:
+    #             torch.save(getattr(self, net).state_dict(), "save/" + net  + ".pkl")
+    #         except:
+    #             print("write_error")
+    #
+    #     pass
+    def save(self, prefix=""):
         for net in ['Actor', 'Critic']:
             try:
-                torch.save(getattr(self, net).state_dict(), "save/" + net  + ".pkl")
+                filename = f"save/{prefix}_{net}.pkl" if prefix else f"save/{net}.pkl"
+                torch.save(getattr(self, net).state_dict(), filename)
             except:
                 print("write_error")
 
-        pass
 
 
 

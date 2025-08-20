@@ -7,7 +7,7 @@ import torch
 from torch.nn import *
 from torch.distributions import Categorical
 from PPO_model.Config import *
-
+from torch.optim import lr_scheduler
 
 class Critic(Module):
     '''
@@ -20,6 +20,15 @@ class Critic(Module):
         self.output_dim = CRITIC_PARA.output_dim
         self.init_model()
         self.optim = torch.optim.Adam(self.parameters(), CRITIC_PARA.lr)
+
+        # 初始化 LinearLR 学习率调度器
+        self.critic_scheduler = lr_scheduler.LinearLR(
+            self.optim,
+            start_factor=1.0,
+            end_factor=AGENTPARA.mini_lr / CRITIC_PARA.lr,
+            total_iters=AGENTPARA.MAX_EXE_NUM
+        )
+
         self.to(CRITIC_PARA.device)
 
     def init_model(self):

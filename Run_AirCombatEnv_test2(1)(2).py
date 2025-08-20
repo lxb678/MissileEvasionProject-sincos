@@ -66,7 +66,7 @@ for i_episode in range(episodes):
                 action_eval = (dist.mean >= 0.5).float()
                 action_eval = action_eval.cpu().detach().numpy()
                 # action_eval = [0 , 1]
-                # action_eval = [action_eval[0], 0]
+                action_eval = [action_eval[0], 0]
 
 
                 # #随机动作
