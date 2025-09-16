@@ -474,7 +474,6 @@ class AirCombatEnv:
                 self.run_one_step(self.dt, nx, nz, phi2, release_flare)
         # print("self.x_missile_now", self.x_missile_now)
         # print("self.x_target_now", self.x_target_now)
-        ##todo:输入状态
 
         R_vec = self.x_target_now[0:3] - self.x_missile_now[3:6]
         R_rel = np.linalg.norm(R_vec)

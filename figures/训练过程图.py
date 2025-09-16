@@ -151,7 +151,7 @@ plt.legend(
 # === 5. 保存图片 (最佳实践) ===
 
 # 定义保存图片的文件夹和文件名
-output_dir = "figures"  # 在当前脚本目录下创建一个名为 'figures' 的文件夹
+output_dir = ""  # 在当前脚本目录下创建一个名为 'figures' 的文件夹
 output_filename = "Survival Rate.png"
 
 # 检查文件夹是否存在，如果不存在则创建

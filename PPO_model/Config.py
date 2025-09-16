@@ -19,7 +19,7 @@ class AGENTPARA:
     ppo_epoch =每次训练的代数
     '''
     OBS_DIM=8
-    ACTION_DIM=2
+    ACTION_DIM=4
     MAX_EXE_NUM=5e5
     RANDOM_SEED=1
     epsilon=0.2
@@ -27,7 +27,7 @@ class AGENTPARA:
     lamda=0.98
     entropy=0.001
     mini_lr=5e-6
-    ppo_epoch = 4
+    ppo_epoch = 5
 
 class BUFFERPARA:
     '''
@@ -64,13 +64,13 @@ def check(input):
 ACTOR_PARA = MODELPARA()
 ACTOR_PARA.input_dim = AGENTPARA.OBS_DIM
 ACTOR_PARA.model_layer_dim = [256,128,64,32]
-# ACTOR_PARA.model_layer_dim = [512,256,128,64,32]
+# ACTOR_PARA.model_layer_dim = [512,256,128,64]
 ACTOR_PARA.output_dim = AGENTPARA.ACTION_DIM   #多维的动作 每一维的动作输出0/1
-ACTOR_PARA.lr = 1e-3
+ACTOR_PARA.lr = 3e-4
 
 CRITIC_PARA = MODELPARA()
 CRITIC_PARA.input_dim = AGENTPARA.OBS_DIM
 CRITIC_PARA.model_layer_dim = [256,128,64,32]
-# CRITIC_PARA.model_layer_dim = [512,256,128,64,32]
+# CRITIC_PARA.model_layer_dim = [512,256,128,64]
 CRITIC_PARA.output_dim = 1
-CRITIC_PARA.lr = 5e-3
+CRITIC_PARA.lr = 1e-3
