@@ -24,7 +24,7 @@ class AGENTPARA:
     RANDOM_SEED=1
     epsilon=0.2
     gamma=0.99
-    lamda=0.95
+    lamda=0.90#0.95
     entropy= 0.01 #0.001 #0.01 #0.0001 #0.001 #0.001
     mini_lr=5e-6
     ppo_epoch = 5
@@ -67,7 +67,7 @@ ACTOR_PARA.model_layer_dim = [256,128,64,32]
 # ACTOR_PARA.model_layer_dim = [256,256]
 # ACTOR_PARA.model_layer_dim = [512,256,128,64]
 ACTOR_PARA.output_dim = AGENTPARA.ACTION_DIM   #多维的动作 每一维的动作输出0/1
-ACTOR_PARA.lr = 3e-4 #3e-4 #5e-4 #3e-4  #1e-5
+ACTOR_PARA.lr = 3e-5#3e-4 #3e-4 #5e-4 #3e-4  #1e-5
 
 CRITIC_PARA = MODELPARA()
 CRITIC_PARA.input_dim = AGENTPARA.OBS_DIM
@@ -75,4 +75,4 @@ CRITIC_PARA.model_layer_dim = [256,128,64,32]
 # CRITIC_PARA.model_layer_dim = [256,256]
 # CRITIC_PARA.model_layer_dim = [512,256,128,64]
 CRITIC_PARA.output_dim = 1
-CRITIC_PARA.lr = 1e-3
+CRITIC_PARA.lr = 1e-4 #1e-3

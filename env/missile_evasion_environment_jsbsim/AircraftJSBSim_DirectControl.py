@@ -1,0 +1,187 @@
+# 文件: AircraftJSBSim_DirectControl.py
+import jsbsim
+import numpy as np
+
+# --- 单位转换常量 ---
+M_TO_FT  = 3.28084
+MPS_TO_KTS = 1.94384
+RAD_TO_DEG = 180.0 / np.pi
+FT_TO_M   = 0.3048
+FPS_TO_MPS = 0.3048
+
+class Aircraft:
+    """
+    使用 JSBSim 作为飞行动力学模型的适配器类。
+    向外暴露统一的标准单位 (米、米/秒、弧度)。
+    """
+    def __init__(self, dt: float, initial_state: np.ndarray):
+        self.dt = dt
+        self.state = np.zeros(8, dtype=float)  # [x,y,z,Vt,theta,psi,phi,p_real]
+
+        # --- 1. 创建并初始化 FDM 实例 ---
+        self.fdm = jsbsim.FGFDMExec(None)   # 只创建一次
+        self.fdm.set_debug_level(0)         # 关闭后续调试输出
+
+        if not self.fdm.load_model('f16'):
+            raise RuntimeError("未能加载 JSBSim 飞机模型: f16")
+
+        self.fdm.set_dt(dt)
+        # 初始化一次
+        self.reset(initial_state)
+
+    # ------------------------------------------------------------------
+    def reset(self, initial_state: np.ndarray):
+        """
+        重新加载初始条件，而不重新创建 FDM。
+        可以在环境的 reset() 中调用。
+        """
+        self.state[:] = np.array(initial_state, dtype=float)
+
+        x_m, y_m, z_m, vt_mps, theta_rad, psi_rad, phi_rad, p_rad_s = initial_state
+        self.fdm['ic/h-sl-ft']       = y_m * M_TO_FT
+        self.fdm['ic/vc-kts']        = vt_mps * MPS_TO_KTS
+        self.fdm['ic/theta-deg']     = theta_rad * RAD_TO_DEG
+        self.fdm['ic/psi-true-deg']  = psi_rad * RAD_TO_DEG
+        self.fdm['ic/phi-deg']       = phi_rad * RAD_TO_DEG
+
+        # 关键步骤：run_ic() 构建发动机/气动面等内部模型
+        if not self.fdm.run_ic():
+            raise RuntimeError("JSBSim run_ic() 失败，请检查初始条件。")
+
+        # 启动发动机
+        self.fdm['propulsion/engine[0]/set-running'] = 1
+
+        return self.state
+
+    # ------------------------------------------------------------------
+    def update(self, action: list):
+        """
+        根据 AI 动作更新飞机状态。
+        action: [throttle, elevator, aileron, rudder]
+        """
+        throttle, elevator, aileron, rudder = action
+        self.fdm['fcs/throttle-cmd-norm'] = np.clip(throttle, 0.0, 1.0)
+        self.fdm['fcs/elevator-cmd-norm'] = np.clip(elevator, -1.0, 1.0)
+        self.fdm['fcs/aileron-cmd-norm']  = np.clip(aileron, -1.0, 1.0)
+        self.fdm['fcs/rudder-cmd-norm']   = np.clip(rudder, -1.0, 1.0)
+
+        # 运行一步 JSBSim
+        self.fdm.run()
+
+        # 更新状态向量
+        self._update_state_from_jsbsim()
+
+    # ------------------------------------------------------------------
+    def _update_state_from_jsbsim(self):
+        """
+        从 JSBSim 提取数据，更新标准单位状态向量。
+        """
+        vel_nue = self._get_velocity_vector_from_jsbsim()
+        self.state[0:3] += vel_nue * self.dt
+
+        self.state[3] = self.fdm['velocities/vt-fps'] * FPS_TO_MPS
+        self.state[4] = self.fdm['attitude/theta-rad']
+        self.state[5] = self.fdm['attitude/psi-rad']
+        self.state[6] = self.fdm['attitude/phi-rad']
+        self.state[7] = self.fdm['velocities/p-rad_sec']
+
+    # ------------------------------------------------------------------
+    def _get_velocity_vector_from_jsbsim(self):
+        """
+        从JSBSim直接获取速度向量(世界坐标NUE)，单位 m/s。
+        """
+        u = self.fdm['velocities/u-fps'] * FPS_TO_MPS
+        v = self.fdm['velocities/v-fps'] * FPS_TO_MPS
+        w = self.fdm['velocities/w-fps'] * FPS_TO_MPS
+        phi = self.fdm['attitude/phi-rad']
+        theta = self.fdm['attitude/theta-rad']
+        psi = self.fdm['attitude/psi-rad']
+
+        cphi, sphi = np.cos(phi), np.sin(phi)
+        cth,  sth  = np.cos(theta), np.sin(theta)
+        cpsi, spsi = np.cos(psi), np.sin(psi)
+
+        R_b2i = np.array([
+            [cth*cpsi, sphi*sth*cpsi - cphi*spsi, cphi*sth*cpsi + sphi*spsi],
+            [cth*spsi, sphi*sth*spsi + cphi*cpsi, cphi*sth*spsi - sphi*cpsi],
+            [-sth,    sphi*cth,                  cphi*cth]
+        ])
+        v_ned = R_b2i @ np.array([u, v, w])
+        # NED → NUE
+        return np.array([v_ned[0], -v_ned[2], v_ned[1]])
+
+    # --- 属性访问器 (对环境暴露标准单位) ---
+    @property
+    def state_vector(self) -> np.ndarray:
+        """返回完整的、使用标准单位的状态向量"""
+        return self.state
+
+    @property
+    def pos(self) -> np.ndarray:
+        """返回飞机的位置向量 [x, y, z] (北, 天, 东)，单位：米"""
+        return self.state[:3]
+
+    @property
+    def velocity(self) -> float:
+        """返回飞机的总速度大小 (Vt)，单位：米/秒"""
+        return self.state[3]
+
+    @property
+    def roll_rate_rad_s(self) -> float:
+        """返回飞机的实际滚转角速度 (p_real)，单位：弧度/秒"""
+        return self.state[7]
+
+    @property
+    def attitude_rad(self) -> tuple:
+        """返回飞机的姿态（theta, psi, phi），单位：弧度"""
+        return self.state[4], self.state[5], self.state[6]
+
+    @property
+    def nz(self) -> float:
+        """返回飞行员感受到的法向G过载 (无单位)"""
+        return self.fdm["accelerations/nz-pilot-g's"]
+
+    # --- (新增) 辅助方法 ---
+    def get_velocity_vector(self) -> np.ndarray:
+        """
+        计算并返回飞机在世界坐标系(NUE)下的速度矢量，单位：米/秒。
+        这个方法现在基于我们自己维护的、单位正确的 state 向量。
+        """
+        Vt, theta, psi = self.state[3], self.state[4], self.state[5]
+        vx = Vt * np.cos(theta) * np.cos(psi)  # 北向速度 (m/s)
+        vy = Vt * np.sin(theta)  # 天向速度 (m/s)
+        vz = Vt * np.cos(theta) * np.sin(psi)  # 东向速度 (m/s)
+        return np.array([vx, vy, vz])
+
+    def get_velocity_vector_from_jsbsim(self) -> np.ndarray:
+        """
+        一个内部辅助函数，直接从JSBSim获取速度矢量并转换为NUE(m/s)。
+        主要用于 _update_state_from_jsbsim 中的位置积分。
+        """
+        # JSBSim 的机体速度分量 (前, 右, 下), 单位：英尺/秒
+        u_fps = self.fdm['velocities/u-fps']
+        v_fps = self.fdm['velocities/v-fps']
+        w_fps = self.fdm['velocities/w-fps']
+
+        # 转换为 m/s
+        u, v, w = u_fps * 0.3048, v_fps * 0.3048, w_fps * 0.3048
+
+        # 获取姿态角 (弧度)
+        phi, theta, psi = self.fdm['attitude/phi-rad'], self.fdm['attitude/theta-rad'], self.fdm['attitude/psi-rad']
+
+        # 从机体坐标系 (FRD) 到惯性系 (NED) 的旋转矩阵
+        c_psi, s_psi = np.cos(psi), np.sin(psi)
+        c_th, s_th = np.cos(theta), np.sin(theta)
+        c_phi, s_phi = np.cos(phi), np.sin(phi)
+
+        R_b_to_i = np.array([
+            [c_th * c_psi, s_phi * s_th * c_psi - c_phi * s_psi, c_phi * s_th * c_psi + s_phi * s_psi],
+            [c_th * s_psi, s_phi * s_th * s_psi + c_phi * c_psi, c_phi * s_th * s_psi - s_phi * c_psi],
+            [-s_th, s_phi * c_th, c_phi * c_th]
+        ])
+
+        v_ned = R_b_to_i @ np.array([u, v, w])  # (北, 东, 地) in m/s
+
+        # 从 NED (北-东-地) 转换到 NUE (北-天-东)
+        v_nue = np.array([v_ned[0], -v_ned[2], v_ned[1]])
+        return v_nue

@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
-import gym
-import torch
-import numpy as np
 import random
 import time
-import matplotlib.pyplot as plt
-from env.AirCombatEnv6 import *
+from Interference_code.env.oldenv.AirCombatEnv6 import *
 from PPO_model.Config import *
 
 LOAD_ABLE = False  # 不使用 PPO 模型

@@ -3,11 +3,14 @@ import gym
 import torch
 import numpy as np
 import random
-from PPO_model.PPO_Continuous import *
+from PPO_model.Hybrid_PPO_不修正 import *
+from PPO_model.Hybrid_PPO_jsbsim import *
 from PPO_model.Config import *
 from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
-from env.AirCombatEnv6_maneuver_flare import *
+# from env.AirCombatEnv6_maneuver_flare import *
+from env.missile_evasion_environment.missile_evasion_environment import *
+from env.missile_evasion_environment_jsbsim.Vec_missile_evasion_environment_jsbsim import *
 import time
 import matplotlib.pyplot as plt
 
@@ -45,7 +48,7 @@ for i_episode in range(episodes):
 
     with torch.no_grad():
         done_eval = False
-        observation_eval = np.array(env.reset())  # 自己写的环境可以改为 env.reset()   这个函数返回初始化时的观测状态
+        observation_eval,_ = env.reset(seed=AGENTPARA.RANDOM_SEED)  # 自己写的环境可以改为 env.reset()   这个函数返回初始化时的观测状态
         reward_sum = 0
         t = 0
         step = 0
@@ -54,47 +57,17 @@ for i_episode in range(episodes):
         reward_4 = 0
 
         while (not done_eval):
-            if t % (round(env.dt_dec/env.dt_normal)) == 0:
-                # dist = agent.Actor(observation_eval)     #在验证时采用确定的策略，而不是采样
-                # action_eval_tanh = dist.mean
-                # action_eval = agent.scale_action(action_eval_tanh)
-                # action_eval = action_eval.cpu().detach().numpy()
-                # action_eval = action_eval[0]
-                action_eval,_,_ = agent.choose_action(observation_eval,deterministic=True)
-                # print("动作：",action_eval)
-
-
-                # #随机动作
-                # action_eval = np.zeros(2, dtype=float)
-                # if env.o_ir > 0:
-                #     action_eval[0] = np.random.choice([0, 1])
-                # else:
-                #     action_eval[0] = 0
-                # action_eval[1] = np.random.choice([0, 1])
-
-                # action_list.append(np.array([round(env.t_now, 2), action_eval[0], action_eval[1]]))
-
-                reward_sum += reward_eval+reward_4
-
-                # print("激光定向干扰奖励：",env.reward3)
-                # print(reward_eval + reward_4)
-
-                observation_eval, reward_eval, done_eval, reward_4, _ = env.step(action_eval)
-                # reward_sum += reward_eval
-                t += 1
-                step += 1
-            else:
-                action_eval1 = np.array([0, action_eval[1]])
-                observation_eval, reward_eval, done_eval, info, _ = env.step(action_eval1)
-                # reward_sum += reward_eval
-                t += 1
+            action_eval,action_tanh, prob = agent.choose_action(observation_eval, deterministic=True)
+            observation_eval, reward_eval, done_eval, _, info = env.step(action_eval)
+            reward_sum += reward_eval
+            t += 1
+            step += 1
             if done_eval:
                 episode_time = time.time() - episode_start_time  # 计算单个 episode 用时
                 episode_times.append(episode_time)  # 保存用时
                 print("Episode {} finished after {} timesteps, 仿真时间 t = {}s, 用时 {:.2f}s".format(
-                    i_episode + 1, step + 1, round(env.t_now, 2), episode_time))
-                # print("Episode {} finished after {} timesteps,仿真时间t = {}s".format(i_episode + 1, step + 1,
-                #                                                                       round(env.t_now, 2)))
+                    i_episode + 1, step, round(env.t_now, 2), episode_time))
+                print("奖励：", reward_sum)
                 if env.success:
                     success_num += 1
                 # if (i_episode + 1) % 100 == 0:

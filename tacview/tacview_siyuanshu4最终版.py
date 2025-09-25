@@ -61,6 +61,69 @@ def quaternion_to_continuous_euler(q):
     return phi, theta, psi
 
 
+# (中文) 在 AirCombatEnv 类中，使用这个修正了数值的 v2 版本
+def get_simplified_total_drag_coefficient(Ma):
+    """
+    (最简化模型 v2 - 已修正数值)
+    根据马赫数(Ma)，直接估算一个“中等强度机动”状态下的总阻力系数(C_D)。
+    """
+    if Ma < 0.9:
+        # 亚音速机动状态，升致阻力已经比较显著
+        C_D = 0.10
+    elif Ma < 1.2:
+        # 跨声速区域，激波阻力叠加升致阻力，达到峰值
+        # (线性插值到一个很高的峰值，例如 0.30)
+        C_D = 0.10 + (0.16 - 0.10) * ((Ma - 0.9) / 0.3)
+    elif Ma < 2.0:
+        # 超声速区域，虽然升力效率变差，但阻力仍然很高
+        C_D = 0.16 + (0.30 - 0.16) * ((Ma - 1.2) / 0.8)
+    else:
+        # 高超声速区域，阻力稳定在一个较高的水平
+        C_D = 0.30
+
+    return C_D
+
+# def get_advanced_drag_coefficient(Ma, nz, q_dyn, m, S, stores_drag_level=2):
+#     """
+#     (可调战斗模型 v2)
+#     在高级模型基础上，增加了一个“挂载阻力等级”参数。
+#
+#     Args:
+#         ...
+#         stores_drag_level (int): 挂载阻力等级。
+#             - 0: 干净外形 (飞行表演/测试)
+#             - 1: 轻型空优挂载 (2-4枚空空弹)
+#             - 2: 标准空优挂载 (4-6枚空空弹 + 挂架) [默认值]
+#             - 3: 对地攻击挂载 (炸弹 + 副油箱)
+#     """
+#     # 1. 基础零升阻力 C_D0 (干净外形)
+#     if Ma < 0.9:
+#         C_D0_clean = 0.02
+#     elif Ma < 1.2:
+#         C_D0_clean = 0.02 + (0.045 - 0.02) * ((Ma - 0.9) / 0.3)
+#     else:
+#         C_D0_clean = 0.045
+#
+#     # 2. 根据挂载等级，增加额外的零升阻力
+#     # 这个数值是经验值，可以根据手感进行微调
+#     delta_CD0_per_level = 0.008
+#     C_D0_combat = C_D0_clean + stores_drag_level * delta_CD0_per_level
+#
+#     # 3. 计算升力系数 C_L
+#     g = 9.81
+#     if q_dyn < 1e-3:
+#         return C_D0_combat
+#     C_L = (nz * m * g) / (q_dyn * S)
+#
+#     # 4. 估算诱导阻力因子 K
+#     K = 0.12
+#
+#     # 5. 计算总阻力系数 C_D
+#     C_D_total = C_D0_combat + K * (C_L ** 2)
+#
+#     return C_D_total
+
+
 # ================== Tacview 接口 (无变化) ==================
 class Tacview(object):
     def __init__(self):
@@ -95,8 +158,8 @@ tacview_show = True
 tacview = Tacview() if tacview_show else None
 g = 9.81
 dt = 0.02
-t_total = 60.0
-m = 1.0
+t_total = 600.0
+m = 15000.0
 
 # MODIFIED: 状态向量定义更新为 北-天-东 (NUE)
 # 状态向量: [x(北), y(上), z(东), Vt, theta(俯仰), psi(偏航), phi(滚转)]
@@ -120,7 +183,7 @@ for step in range(int(t_total / dt)):
         lat = 39.0 + state[0] / 110574.0  # state[0] is North
         alt = state[1]  # state[1] is Up (Altitude)
         data = f"#{t:.2f}\n001,T={lon:.6f}|{lat:.6f}|{alt:.1f}|{np.rad2deg(phi):.2f}|{np.rad2deg(theta):.2f}|{np.rad2deg(psi):.2f},Name=F16_NUE_State,Color=Blue\n"
-        print(data)
+        # print(data)
         tacview.send(data)
         time.sleep(0.01)
 
@@ -149,16 +212,106 @@ for step in range(int(t_total / dt)):
     nz_cmd = 1.0  # 法向过载指令
 
     # 'shift' / 'ctrl' 控制切向过载 (推背感)
-    if keyboard.is_pressed('shift'): nx_cmd = 2.0  # 2g 加速
-    if keyboard.is_pressed('ctrl'):  nx_cmd = -2.0  # 2g 减速
+    if keyboard.is_pressed('shift'): nx_cmd = 1.0  # 2g 加速
+    if keyboard.is_pressed('ctrl'):  nx_cmd = -1.0  # 2g 减速
 
     # 'w' / 's' 控制法向过载 (拉杆/推杆)
     if keyboard.is_pressed('w'):     nz_cmd = 9.0  # 拉 9g
-    if keyboard.is_pressed('s'):     nz_cmd = -2.0  # 推 -2g
+    if keyboard.is_pressed('s'):     nz_cmd = -5.0  # 推 -2g
 
     # --- 将过载指令转换为力 ---
-    thrust_minus_drag = nx_cmd * m * g
+    # thrust_minus_drag = nx_cmd * m * g
+    # lift = nz_cmd * m * g
+    # a) 计算当前飞行环境参数
+    H = y_nue  # 高度 (米)
+    Temper = 15.0
+    T_H = 273 + Temper - 0.6 * H / 100
+    P_H = (1 - H / 44300) ** 5.256
+    rho = 1.293 * P_H * (273 / T_H)
+    Ma = Vt / 340  # 简化马赫数计算
+    q = 0.5 * rho * Vt ** 2  # 动压
+
+    # b) 定义飞机气动参数 (这些是F-16的典型估算值，可以调整)
+    S = 27.87  # F-16机翼参考面积 (m^2)
+    C_D0 = 0.02  # F-16的典型零升阻力系数 (亚音速、干净外形)
+    K = 0.12  # F-16的典型升致阻力系数 (与展弦比等有关)
+
+    # c) 计算升力 (Lift) 和 升力系数 (C_L)
+    # 这里的 lift 是AI指令产生的总升力
     lift = nz_cmd * m * g
+
+    # --- (中文) 核心修改：直接调用新方法计算总阻力系数 C_D ---
+    C_D = get_simplified_total_drag_coefficient(Ma)
+
+    # C_D = get_advanced_drag_coefficient(Ma, nz_cmd, q, m, S)
+
+    # d) 计算总阻力 (Drag)
+    drag = q * S * C_D
+
+    # --- 将过载指令和计算出的阻力转换为力 ---
+
+    # # 现在的 nx_cmd 代表的是 "推力过载" (Thrust-to-Weight Ratio)
+    # # 我们需要计算出实际的推力
+    # thrust = nx_cmd * m * g
+    # --- 将过载指令和计算出的阻力转换为力 ---
+    # 现在的 nx_cmd 代表的是 "推力过载" (Thrust-to-Weight Ratio)
+    # 我们需要计算出实际的推力
+    # if nx_cmd >= 0:
+    #     # --- 推力计算 ---
+    #     # 将 nx_cmd (0 to 1) 映射到推力百分比 (0 to 1)
+    #     # 这里的映射关系可以更复杂，但线性映射是一个好的开始
+    #     # 假设 nx_cmd=1 对应最大推力
+    #     max_thrust = 1.2 * m * g
+    #     thrust = max_thrust * nx_cmd
+    # else:
+    #     # --- 减速板阻力计算 ---
+    #     # 将 nx_cmd (-1 to 0) 映射到减速板开启程度 (1 to 0)
+    #     # 减速板会增加一个巨大的额外阻力
+    #     thrust = nx_cmd * 0.8 * m * g
+    MAX_TWR = 1.2
+    SEA_LEVEL_STATIC_THRUST = MAX_TWR * (m) * g  # 海平面最大静推力 (N)
+    RHO_0 = 1.225  # 海平面标准大气密度 (kg/m^3)
+    # 经验系数, 用于模拟推力随高度和马赫数的变化
+    THRUST_ALT_EXP = 0.6  # 推力随密度变化的指数 (alpha)
+    THRUST_MACH_K1 = 0.6  # 马赫数一次项系数 (用于模拟冲压效应)
+    THRUST_MACH_K2 = 0.16  # 马赫数二次项系数 (用于模拟高马赫数下的损失)
+
+    # --- 推力计算 (更真实的模型) ---
+    # 1. 计算海平面标准密度与当前高度密度的比值
+    density_ratio = rho / RHO_0
+
+    # 2. 根据高度和马赫数计算最大可用推力的修正系数
+    #    这个公式是一个经验模型，模拟了冲压效应和高空/高速损失
+    thrust_correction_factor = (density_ratio ** THRUST_ALT_EXP) * \
+                               (1 + THRUST_MACH_K1 * Ma - THRUST_MACH_K2 * Ma ** 2)
+    # 保证系数不为负
+    thrust_correction_factor = max(0, thrust_correction_factor)
+
+    # 3. 计算当前条件下的最大可用推力
+    max_available_thrust = SEA_LEVEL_STATIC_THRUST * thrust_correction_factor
+
+    thrust = 0.0
+    if nx_cmd >= 0:
+        # 实际推力 = 油门指令(0-1) * 当前最大可用推力
+        thrust = max_available_thrust * nx_cmd
+    else:  # nx < 0, 对应减速板
+        # 减速板逻辑可以保持不变，它增加阻力，不产生推力
+        # 为了更清晰，我们明确推力为0，额外阻力在后面计算
+        thrust = 0
+        # 额外阻力可以加到 drag 上，或者像您一样用一个负推力等效
+        # 这里我们采用您的负推力等效方式，但注意这只是一个效果模拟
+        thrust = nx_cmd * 0.5 * m * g  # 这里的模型也可以再细化，但暂时保持
+
+
+
+    # (中文) 核心修改：净前向力 = 推力 - 阻力
+    # 这取代了旧的 thrust_minus_drag
+    thrust_minus_drag = thrust - drag
+    print(f"thrust_minus_drag: {thrust_minus_drag}",
+          f"thrust: {thrust}",
+          f"drag: {drag}",
+          f"rho: {rho}")
+
 
     # 对升力进行限制，模拟飞机结构极限
     lift = np.clip(lift, -3.0 * m * g, 9.0 * m * g)

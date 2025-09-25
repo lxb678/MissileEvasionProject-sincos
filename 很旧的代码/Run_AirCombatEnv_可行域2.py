@@ -1,15 +1,8 @@
 # -*- coding: utf-8 -*-
-import os
 
-import csv
-
-import gym
-import torch
-import numpy as np
 import random
 import time
-import matplotlib.pyplot as plt
-from env.AirCombatEnv可行域 import *
+from Interference_code.env.oldenv.AirCombatEnv可行域 import *
 # from env.AirCombatEnv可行域_pianyou import *
 from PPO_model.Config import *
 
@@ -248,11 +241,11 @@ import os
 from datetime import datetime
 
 # 创建文件夹
-os.makedirs("Excel", exist_ok=True)
+os.makedirs("../Excel", exist_ok=True)
 
 # 当前时间作为文件名
 now_str = datetime.now().strftime("%Y%m%d_%H_%M_%S")
-excel_filename = os.path.join("Excel", f"simulation_results_{now_str}.xlsx")
+excel_filename = os.path.join("../Excel", f"simulation_results_{now_str}.xlsx")
 
 # 用 pandas 保存 Excel
 df = pd.DataFrame(records)  # 你的 records 列表是字典组成的，适合直接转换为 DataFrame

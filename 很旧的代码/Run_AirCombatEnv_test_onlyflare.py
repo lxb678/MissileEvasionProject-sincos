@@ -8,17 +8,12 @@
 # @Author:  Zeming M
 # @File:    env
 # @IDE:     PyCharm
-import gym
-import torch
-import numpy as np
 import random
 from PPO_model.PPO_algorithm import *
 from PPO_model.Config import *
-from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
-from env.AirCombatEnv6_onlyflare import *
+from Interference_code.env.oldenv.AirCombatEnv6_onlyflare import *
 import time
-import matplotlib.pyplot as plt
 
 LOAD_ABLE = True  #是否使用save文件夹中的模型
 

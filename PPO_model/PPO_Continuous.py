@@ -319,18 +319,28 @@ class PPO_continuous(object):
         value = self.Critic(state)
         return  value
 
-    def cal_gae(self,states, values, actions, probs, rewards, dones):
+    # def cal_gae(self,states, values, actions, probs, rewards, dones):
+    #     advantage = np.zeros(len(rewards), dtype=np.float32)
+    #     gae = 0  # 初始化 GAE
+    #
+    #     # 从后往前计算 GAE
+    #     for t in reversed(range(len(rewards) - 1)):
+    #         delta = rewards[t] + self.gamma * values[t + 1] * (1 - int(dones[t])) - values[t]
+    #         gae = delta + self.gamma * self.gae_lambda * (1 - int(dones[t])) * gae
+    #         advantage[t] = gae
+    #
+    #     return advantage
+    def cal_gae(self, states, values, actions, probs, rewards, dones):
         advantage = np.zeros(len(rewards), dtype=np.float32)
-        gae = 0  # 初始化 GAE
-
-        # 从后往前计算 GAE
-        for t in reversed(range(len(rewards) - 1)):
-            delta = rewards[t] + self.gamma * values[t + 1] * (1 - int(dones[t])) - values[t]
+        gae = 0
+        for t in reversed(range(len(rewards))):  # 注意这里不减 1
+            next_value = values[t + 1] if t < len(rewards) - 1 else 0
+            delta = rewards[t] + self.gamma * next_value * (1 - int(dones[t])) - values[t]
             gae = delta + self.gamma * self.gae_lambda * (1 - int(dones[t])) * gae
             advantage[t] = gae
-
+        # 标准化优势
+        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         return advantage
-
 
     def learn(self):
         '''
@@ -342,10 +352,6 @@ class PPO_continuous(object):
 
         states, values, actions_tanh, old_probs, rewards, dones = (self.buffer.sample())  #获得经验池中全部的经验
         advantages = self.cal_gae(states, values, actions_tanh, old_probs, rewards, dones)
-
-        # <<<--- 在这里加入优势标准化 ---<<<
-        # advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
-        # 1e-8 是为了防止除以零
 
         train_info = {}   #记录训练相关信息，后边使用tensorboard可以查看训练曲线
         train_info['critic_loss'] = []

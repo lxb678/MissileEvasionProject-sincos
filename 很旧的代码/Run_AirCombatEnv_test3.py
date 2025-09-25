@@ -8,18 +8,13 @@
 # @Author:  Zeming M
 # @File:    env
 # @IDE:     PyCharm
-import gym
-import torch
-import numpy as np
 import random
 from PPO_model.PPO_algorithm import *
 from PPO_model.Config import *
-from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
-from env.AirCombatEnv6 import *
-import time
+from Interference_code.env.oldenv.AirCombatEnv4 import *
 
-LOAD_ABLE = True  #是否使用save文件夹中的模型
+LOAD_ABLE = False  #是否使用save文件夹中的模型
 
 
 def set_seed(env, seed=AGENTPARA.RANDOM_SEED):
@@ -51,35 +46,21 @@ for i_episode in range(100):
         t = 0
         step = 0
         reward_eval = 0
-        action_list = []
-        reward_4 = 0
-
         for t in range(10000):
             if t % (round(env.dt_dec/env.dt_normal)) == 0:
-                # print(observation_eval[0])
                 dist = agent.Actor(observation_eval)     #在验证时采用确定的策略，而不是采样
-                action_eval = (dist.mean >= 0.5).float()
-                action_eval = action_eval.cpu().detach().numpy()
-                # action_eval = np.array([0, 0])
-
-                action_list.append(np.array([round(env.t_now, 2), action_eval[0], action_eval[1]]))
-                #
-                # reward = (reward_eval + reward_4 + 10.0) / 20.0
-                # reward_sum += reward
-                # print(reward)
-                reward_sum += reward_eval + reward_4
-                # print(reward_eval + reward_4)
-
-                observation_eval, reward_eval, done_eval, reward_4, _ = env.step(action_eval)
+                # action_eval = (dist.mean >= 0.5).float()
+                # action_eval = action_eval.cpu().detach().numpy()
+                action_eval = np.array([0, 0])
+                reward_sum += reward_eval
+                observation_eval, reward_eval, done_eval, info, _ = env.step(action_eval)
                 # reward_sum += reward_eval
                 step += 1
             else:
                 action_eval1 = np.array([0, action_eval[1]])
                 observation_eval, reward_eval, done_eval, info, _ = env.step(action_eval1)
                 # reward_sum += reward_eval
-            # reward_eval += reward_4
             if done_eval:
-                reward_sum += reward_eval
                 print("Episode {} finished after {} timesteps,仿真时间t = {}s".format(i_episode + 1, step + 1,
                                                                                       round(env.t_now, 2)))
                 if env.success:
@@ -87,9 +68,11 @@ for i_episode in range(100):
                 if (i_episode + 1) % 100 == 0:
                     print("每一百回合飞机存活次数{} ".format(success_num))
                     success_num = 0
-
-                print(np.array(action_list))
-                print(reward_sum)
-                env.render()        #这个是可视化的  自己写的环境可以注释掉
-                # input("按任意键继续")
                 break
+        env.render()
+        # writer.add_scalar('reward_sum',
+        #                   reward_sum,
+        #                   global_step=global_step
+        #                   )
+
+#env.close()

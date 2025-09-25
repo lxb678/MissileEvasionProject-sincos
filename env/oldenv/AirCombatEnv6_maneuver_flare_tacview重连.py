@@ -1,5 +1,3 @@
-import math
-
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -14,25 +12,67 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 # ================== Tacview 接口类 ==================
+import socket
+
 class Tacview(object):
-    def __init__(self):
+    def __init__(self, host="localhost", port=42674):
+        self.host = host
+        self.port = port
+        self.server_socket = None
+        self.client_socket = None
+        self.address = None
+        self._connect()
+
+    def _connect(self):
         try:
-            host = "localhost"
-            port = 42674
-            print(f"请打开 Tacview 高级版 → 记录 → 实时遥测，IP: {host}, 端口: {port}")
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.bind((host, port))
-            server_socket.listen(5)
-            self.client_socket, address = server_socket.accept()
-            print(f"Tacview 连接成功: {address}")
-            handshake = "XtraLib.Stream.0\nTacview.RealTimeTelemetry.0\nHostUsername\n\x00"
-            self.client_socket.send(handshake.encode())
-            self.client_socket.recv(1024)
-            header = "FileType=text/acmi/tacview\nFileVersion=2.1\n0,ReferenceTime=2020-04-01T00:00:00Z\n"
-            self.client_socket.send(header.encode())
+            print(f"请打开 Tacview 高级版 → 记录 → 实时遥测，IP: {self.host}, 端口: {self.port}")
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # 避免端口占用
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            self.client_socket, self.address = self.server_socket.accept()
+            print(f"Tacview 连接成功: {self.address}")
+
+            self._handshake_and_header()
         except Exception as e:
             print(f"Tacview连接失败: {e}")
             self.client_socket = None
+
+    def _handshake_and_header(self):
+        """发送握手、ACMI 头文件，并清零时间"""
+        try:
+            # 握手
+            handshake = "XtraLib.Stream.0\nTacview.RealTimeTelemetry.0\nHostUsername\n\x00"
+            self.client_socket.send(handshake.encode())
+            self.client_socket.recv(1024)
+
+            # ACMI 文件头（每次回合必须重发）
+            header = (
+                "FileType=text/acmi/tacview\n"
+                "FileVersion=2.1\n"
+                "0,ReferenceTime=2020-04-01T00:00:00Z\n"
+                "0,Time=0.0\n"   # 时间清零
+            )
+            self.client_socket.send(header.encode())
+
+            # print("握手与头文件发送完成，时间轴已重置为 0.0 秒。")
+        except Exception as e:
+            print(f"握手/头文件发送失败: {e}")
+            self.client_socket = None
+
+    def reset(self):
+        """重启 Tacview 连接，相当于新一回合仿真"""
+        try:
+            if self.client_socket:
+                self.client_socket.close()
+            if self.server_socket:
+                self.server_socket.close()
+        except Exception as e:
+            print(f"关闭旧连接失败: {e}")
+
+        self.client_socket = None
+        self.server_socket = None
+        self._connect()  # 重新建立连接 + 自动发 header + 时间清零
 
     def send(self, data: str):
         if self.client_socket:
@@ -41,6 +81,7 @@ class Tacview(object):
             except Exception as e:
                 print(f"Tacview 发送失败: {e}")
                 self.client_socket = None
+
 
 class AirCombatEnv:
     def __init__(self,tacview_enabled=False):
@@ -58,8 +99,8 @@ class AirCombatEnv:
         self.delta = 50  # 滞回带，避免频繁切换
         self.t_end = 60  # 仿真结束时间
         self.n_ty_max = 2.5  # 飞机过载
-        self.flare_per_group = 1
-        self.flare_manager = FlareManager(self.flare_per_group)
+
+        self.flare_manager = FlareManager()
         # self.flare = Flare()
 
         self.D_max1 = 30000  # 导引头最大距离
@@ -79,60 +120,6 @@ class AirCombatEnv:
         self.prev_phi_L = None
         self.last_valid_theta_dot = 0
         self.last_valid_phi_dot = 0
-
-        # --- 新增：为导弹姿态奖励函数添加状态变量 ---
-        self.prev_missile_v_mag = None
-        self.posture_reward_scale = 1.0  # 姿态奖励的缩放系数，可以调整
-        # --- 新增：为高度奖励函数添加参数 ---
-        self.safe_altitude_m = 1000.0  # 安全高度 (米)，对应原始代码的 1.0 km
-        self.danger_altitude_m = 500.0  # 危险高度 (米)，对应原始代码的 0.5 km
-        self.Kv_ms = 0.2 * 340  # 垂直速度惩罚系数 (米/秒)，对应原始代码的 0.2 Mach
-        self.altitude_reward_scale = 1.0  # 高度奖励的全局缩放系数
-        # --- 新增：为高度奖励函数添加最大高度限制 ---
-        self.max_altitude_m = 12000.0  # 最大作战高度 (米)
-        self.over_altitude_penalty_factor = 0.5  # 超出最大高度的惩罚系数
-
-        # --- (中文) 新增: 新奖励函数超参数 ---
-        # 权重 (Weights)
-        self.K_ASPECT = 1.0  # 奖励将威胁置于三九线 (权重)
-        self.K_TURN = 0.1  # 奖励高G滚转拉杆 (权重)
-        self.K_ENERGY = -2.0  # 惩罚能量损失 (权重, 必须为负)
-        self.K_PITCH = -0.5  # 惩罚大仰角爬升 (权重, 必须为负)
-        self.K_FLARE = 5.0  # 奖励在正确时机投放诱饵弹 (权重)
-
-        # 阈值和参数 (Thresholds & Parameters)
-        self.ASPECT_REWARD_WIDTH_DEG = 45.0  # 三九线奖励的宽度 (角度越准奖励越高)
-        self.PITCH_PENALTY_THRESHOLD_DEG = 45.0  # 开始惩罚大仰角的阈值
-        self.FLARE_TIMING_WINDOW_DEG = 20.0  # 投放诱饵弹的黄金窗口 (+- 20度 from 90/270)
-
-        # --- (中文) 新增: 新旧奖励融合权重 ---
-        self.W_ORIGINAL_DENSE = 0.5  # 原始密集奖励的总权重
-        self.W_TACTICAL_SHAPING = 0.5  # 新战术塑形奖励的总权重
-
-        # (中文) 权重保持不变或微调
-        self.time_with_high_roll_rate = 0.0
-        self.K_SUSTAINED_ROLL_RATE = -0.2  # (中文) 新名字，强调是针对滚转角速率
-        # (中文) 定义新的阈值，针对滚转角速度
-        self.HIGH_ROLL_RATE_THRESHOLD_RAD_S = np.deg2rad(60.0)  # (中文) 比如超过 60度/秒 就认为是高速滚转
-        self.SUSTAINED_ROLL_TIME_THRESHOLD = 0.5  # (中文) 持续多久开始惩罚 (秒)，保持不变
-
-        # --- 能量管理惩罚权重 (这是关键) ---
-        self.K_VELOCITY_LOSS = -2.0  # (速度损失惩罚) 设为 -2.0。这是最重要的惩罚，因为“速度就是生命”。我们希望AI非常害怕掉速。
-        self.K_LOW_SPEED_PENALTY = -5.0  # (低速区惩罚) 设为 -5.0。这是“最后的底线”，进入危险低速区的惩罚应该是最严厉的，以防止失速。
-        self.K_BAD_CLIMB = -1.5  # (危险爬升惩罚) 设为 -1.5。在高威胁下爬升是严重的战术错误，惩罚力度应较大，但略低于直接损失速度。
-        # 我们甚至可以完全去掉对“好爬升”的奖励，让AI自己发现其价值
-        self.DANGER_SPEED_THRESHOLD_MS = 150.0  # 例如，低于150m/s就非常危险
-        self.THREAT_RANGE_M = 4000.0
-
-        self.ASPECT_REWARD_EFFECTIVE_RANGE = 5000.0  # 三九线奖励开始全力生效的距离 (5公里)
-
-        # --- (中文) 新增: 基于相对速度的逃逸终止条件 (推荐) ---
-        self.escape_timer = 0.0  # (秒) 连续满足逃逸条件的时间计时器
-        self.ESCAPE_DURATION_REQ = 2.0  # (秒) 需要连续满足条件2秒，才算成功
-        self.MIN_SEPARATION_RATE_FOR_ESCAPE = 5.0  # (米/秒) 距离拉大的速度至少要超过这个值
-
-
-
         # 干扰回报奖励参数
         #稀疏回报1奖励参数
         self.W = 100  # 成功奖励基准
@@ -157,11 +144,8 @@ class AirCombatEnv:
         # Tacview 集成
         self.tacview_enabled = tacview_enabled
         self.tacview = None
-        # self.lon0 = 116.4074  # 参考经度 (北京)
-        # self.lat0 = 39.9042  # 参考纬度 (北京)
-        self.lon0 = -155.400  # 夏威夷东南海域
-        self.lat0 = 18.800  # 夏威夷东南海域
-
+        self.lon0 = 116.4074  # 参考经度 (北京)
+        self.lat0 = 39.9042  # 参考纬度 (北京)
         if self.tacview_enabled:
             self.tacview = Tacview()
 
@@ -180,9 +164,6 @@ class AirCombatEnv:
         self.tacview_final_frame_sent = False  # 新增：标记是否已发送最终帧
         self.t_now = 0
         self.tacview_now = 0
-
-
-
 
     def _send_tacview_data(self):
         if not self.tacview_enabled or not self.tacview:
@@ -226,7 +207,7 @@ class AirCombatEnv:
             data_str += f"#{self.tacview_now:.2f}\n"
 
             # 飞机
-            x_t, y_t, z_t, _, theta_t, psi_t, phi_t,_ = self.x_target_now
+            x_t, y_t, z_t, _, theta_t, psi_t, phi_t = self.x_target_now
             lon_t = self.lon0 + z_t / (111320.0 * np.cos(np.deg2rad(self.lat0)))
             lat_t = self.lat0 + x_t / 110574.0
             alt_t = y_t
@@ -265,39 +246,16 @@ class AirCombatEnv:
     def reset(self):
         """
         开始新一回合仿真。
-        使用 Event=LeftArea 来优雅地终止上一回合的对象。
+        每回合重启 Tacview Telemetry 会话，从 #0.0 时间点开始，
+        确保画面干净，没有上一回合残留。
         """
-        if self.tacview_enabled:
-            cleanup_time = self.tacview_now
-            remove_str = f"#{cleanup_time:.2f}\n"
-
-            # 用 LeftArea 事件标明是“离开区域/清理”，然后真正移除（前缀 '-'）
-            remove_str += f"0,Event=LeftArea|{self.aircraft_id}|\n"
-            remove_str += f"-{self.aircraft_id}\n"
-
-            # 导弹：如果想标为被击中/爆炸可先发 Destroyed/Timeout 事件，否则也用 LeftArea
-            # （如果上一回合导弹已爆炸，可能先发送 Destroyed/Timeout 会更语义化）
-            if getattr(self, "missile_exploded", False):
-                remove_str += f"0,Event=Destroyed|{self.missile_id}|\n"
-            remove_str += f"-{self.missile_id}\n"
-
-            # 移除上一回合中所有实际存在的诱饵弹（同样用 '-' 前缀）
-            for i, _ in enumerate(self.flare_manager.flares):
-                flare_id = f"{self.flare_base_id + i + 1}"
-                remove_str += f"-{flare_id}\n"
-
-            # 移除爆炸特效（无论是否发生过爆炸，都尝试移除）
-            remove_str += f"-{self.explosion_id}\n"
-
-            self.tacview.send(remove_str)
-
-        # --- 在 Tacview 清理完成后，再重置所有内部状态 ---
 
         # 回合计数 +1
         self.episode_count += 1
 
         # 时间与奖励清零
         self.t_now = 0
+        self.tacview_now = 0
         self.done = False
         self.reward = 0.0
 
@@ -312,6 +270,14 @@ class AirCombatEnv:
         # 诱饵清空 (现在在这里清空是安全的)
         self.flare_manager.flares = []
 
+        # **只清零时间，不断开连接**
+        if self.tacview:
+            try:
+                self.tacview.send("0,Time=0.0\n")  # 重置时间轴
+                self.tacview.send(f"0,Episode={self.episode_count}\n")  # 可选：标记回合
+            except Exception as e:
+                print(f"[Warning] Tacview 时间轴重置失败: {e}")
+
 
         # self.vT_est = np.array([0, 0, 0])
 
@@ -319,14 +285,6 @@ class AirCombatEnv:
         self.prev_phi_L = None
         self.last_valid_theta_dot = 0
         self.last_valid_phi_dot = 0
-
-        # --- 新增：重置导弹姿态奖励的状态变量 ---
-        self.prev_missile_v_mag = None
-
-        self.time_with_high_roll_rate = 0.0
-
-        self.escape_timer = 0.0
-
         self.t = []
         self.Xt = []
         self.Y = []
@@ -344,9 +302,6 @@ class AirCombatEnv:
         # self.prev_target_pos_equiv = None
 
         self.success = False
-        self.miss_distance = None  # (中文) 关键：将 miss_distance 初始化为 None
-        if hasattr(self, 'idx_min'):
-            del self.idx_min  # (中文) 关键：如果存在 idx_min，就删除它
 
         "初始化更加随机"
         y_t = np.random.uniform(5000, 10000)
@@ -359,8 +314,7 @@ class AirCombatEnv:
         x_target_theta = np.deg2rad(np.random.uniform(-30, 30))  # 设定飞机初始俯仰角
         x_target_phi = np.deg2rad(0)
         self.x_target_now = np.array([0, y_t, 0, np.random.uniform(200, 400), x_target_theta,
-                                      x_target_phi, 0, 0])  # 飞机状态[x, y, z, V, theta, psi, phi, p_real] (p_real 是实际滚转角速度)
-        print("初始化目标位置：", self.x_target_now)
+                                      x_target_phi, 0])  # 飞机状态[x, y, z, V, theta, psi, phi]
         self.x_missile_now = np.array([np.random.uniform(700, 900), 0, 0, x_m, y_m,
                                        z_m])  # 导弹状态 [V, theta, psi_c, x, y, z]
         Rx = self.x_target_now[0] - self.x_missile_now[3]
@@ -380,44 +334,40 @@ class AirCombatEnv:
         # 确保导弹初始方向精确指向目标
         self.x_missile_now[1] = self.theta_L  # 导弹俯仰角 = 弹目视线俯仰角
         self.x_missile_now[2] = self.phi_L  # 导弹偏航角 = 弹目视线偏航角
-        print("初始化导弹位置：", self.x_missile_now)
 
 
         o_dis = np.clip(int(R / self.D_bin), 0, self.D_max / self.D_bin)  # 机弹距离状态输入值
         o_di = np.array([self.compute_relative_beta2(self.x_target_now, self.x_missile_now), -self.theta_L])  # 机弹相对方位：水平和倾斜
 
         # print("初始机弹相对方位：水平：{}，倾斜：{}".format(np.rad2deg(o_di[0]), np.rad2deg(o_di[1])))
+        if o_di[0] < np.pi and np.abs(Ry) <= 1000:
+            self.target_mode = 1
+        elif o_di[0] >= np.pi and np.abs(Ry) <= 1000:
+            self.target_mode = 2
+        elif Ry > 1000:
+            self.target_mode = 3
+        elif Ry < -1000:
+            self.target_mode = 4
 
-        # if o_di[0] < np.pi and np.abs(Ry) <= 1000:
-        #     self.target_mode = 1
-        # elif o_di[0] >= np.pi and np.abs(Ry) <= 1000:
-        #     self.target_mode = 2
-        # elif Ry > 1000:
-        #     self.target_mode = 3
-        # elif Ry < -1000:
-        #     self.target_mode = 4
-        #
-        # self.control_input = self.generate_control_input(self.x_target_now, self.n_ty_max, self.target_mode)
+        self.control_input = self.generate_control_input(self.x_target_now, self.n_ty_max, self.target_mode)
 
         o_av = self.x_target_now[3]  # 飞机速度
+        # o_ap = self.x_target_now.take([0, 2]) #飞机位置
         o_h = self.x_target_now[1]  # 飞机高度
         o_ae = self.x_target_now[4]  # 飞机俯仰角
-        # o_am = self.target_mode  # 飞机机动动作
-        o_am = self.x_target_now[6]  # 飞机滚转角
+        o_am = self.target_mode  # 飞机机动动作
         self.o_ir = self.N_infrared  # 红外诱饵弹数量
-        o_q = self.x_target_now[7]  #飞机滚转角速度
 
         # 归一化
         o_dis = np.array([o_dis / 10])
         o_di = np.array([o_di[0] / (2 * np.pi), (o_di[1] - (- np.pi / 2)) / np.pi])
-        o_av = np.array([(o_av - 100) / 300])
-        o_h = np.array([(o_h - 1000) / 14000])
+        o_av = np.array([(o_av - 200) / 310])
+        o_h = np.array([(o_h - 1000) / 7000])
         o_ae = np.array([(o_ae - (- np.pi / 2)) / np.pi])
-        o_am = np.array([(o_am - (- np.pi)) / (2 * np.pi)])
+        o_am = np.array([(o_am - 1) / 3])
         o_ir = np.array([self.o_ir / self.N_infrared])
-        o_q = np.array([(o_q - (-4.0 * np.pi / 3.0)) / (8.0 * np.pi / 3.0)])
 
-        self.observation = np.concatenate((o_dis, o_di, o_av, o_h, o_ae, o_am, o_ir, o_q))
+        self.observation = np.concatenate((o_dis, o_di, o_av, o_h, o_ae, o_am, o_ir))
 
         # --- MODIFICATION START ---
         # 开始时，发送数据到Tacview
@@ -428,9 +378,9 @@ class AirCombatEnv:
 
 
     def step(self, action):
-        nx = action[0]  # 飞机切向过载
-        nz = action[1]  # 飞机法向过载
-        p_cmd = action[2]  # 飞机滚转角速度
+        nx = action[0]  # 飞机水平速度
+        nz = action[1]  # 飞机垂直速度
+        phi2 = action[2]  # 飞机偏航角
         release_flare = action[3]  #  是否释放红外诱饵弹
         # open_laser = action[1]  # 是否开启激光定向干扰
         self.reward = 0
@@ -444,15 +394,10 @@ class AirCombatEnv:
         R_vec = self.x_target_now[0:3] - self.x_missile_now[3:6]
         R_rel = np.linalg.norm(R_vec)
 
-        # (中文) 关键修改 1: 在物理更新前保存状态
-        prev_target_state = self.x_target_now.copy()
-        # (中文) 关键：使用 prev_target_state 来计算 prev_R_rel，保证时间戳对齐
-        prev_R_rel = np.linalg.norm(prev_target_state[0:3] - self.x_missile_now[3:6])
-
         if R_rel < self.R_switch:
             for _ in range(int(round(self.dt / self.dt_small))):
                 # self.run_one_step(self.dt_small, release_flare, open_laser)
-                self.run_one_step(self.dt_small, nx, nz, p_cmd, release_flare)
+                self.run_one_step(self.dt_small, nx, nz, phi2, release_flare)
                 release_flare = 0
                 if self.done:
                     break
@@ -464,13 +409,13 @@ class AirCombatEnv:
                 for _ in range(int(round(self.dt / self.dt_flare))):
                     # print("int(self.dt / self.dt_flare", int(round(self.dt / self.dt_flare)))
                     # self.run_one_step(self.dt_flare, release_flare, open_laser)
-                    self.run_one_step(self.dt_flare, nx, nz, p_cmd, release_flare)
+                    self.run_one_step(self.dt_flare, nx, nz, phi2, release_flare)
                     release_flare = 0
                     if self.done:
                         break
             else:
                 # self.run_one_step(self.dt, release_flare, open_laser)
-                self.run_one_step(self.dt, nx, nz, p_cmd, release_flare)
+                self.run_one_step(self.dt, nx, nz, phi2, release_flare)
         # print("self.x_missile_now", self.x_missile_now)
         # print("self.x_target_now", self.x_target_now)
 
@@ -488,21 +433,18 @@ class AirCombatEnv:
         # o_ap = self.x_target_now.take([0, 2]) #飞机位置
         o_h = self.x_target_now[1]  # 飞机高度
         o_ae = self.x_target_now[4]  # 飞机俯仰角
-        # o_am = self.target_mode  # 飞机机动动作
-        o_am = self.x_target_now[6]  # 飞机滚转角
-        o_q = self.x_target_now[7]          #飞机滚转角速度
+        o_am = self.target_mode  # 飞机机动动作
 
         # 归一化
         o_dis = np.array([o_dis / 10])
         o_di = np.array([o_di[0] / (2 * np.pi), (o_di[1] - (- np.pi / 2)) / np.pi])
-        o_av = np.array([(o_av - 100) / 300])
-        o_h = np.array([(o_h - 1000) / 14000])
+        o_av = np.array([(o_av - 200) / 310])
+        o_h = np.array([(o_h - 1000) / 7000])
         o_ae = np.array([(o_ae - (- np.pi / 2)) / np.pi])
-        o_am = np.array([(o_am - (- np.pi)) / (2 * np.pi)])
+        o_am = np.array([(o_am - 1) / 3])
         o_ir = np.array([self.o_ir / self.N_infrared])
-        o_q = np.array([(o_q - (-4.0 * np.pi / 3.0)) / (8.0 * np.pi / 3.0)])
 
-        self.observation = np.concatenate((o_dis, o_di, o_av, o_h, o_ae, o_am, o_ir, o_q))
+        self.observation = np.concatenate((o_dis, o_di, o_av, o_h, o_ae, o_am, o_ir))
         # observation = np.concatenate((self.x_missile_now, self.x_target_now))
 
         if self.t_now >= self.t_end and not self.done:
@@ -516,74 +458,37 @@ class AirCombatEnv:
 
         # == 奖励计算 ==
         if self.done:
-            # --- 最终事件奖励 ---
-            # 如果回合结束（被击落、超时、坠毁等），计算最终的稀疏奖励。
             if self.miss_distance > self.R_kill:
                 self.success = True
-            # 调用稀疏奖励函数，成功则奖励 W (例如+100), 失败则惩罚 U (例如-100)。
+            #miss_distance, is_hit, R_all, t_minR, self.idx_min = self.evaluate_miss(self.t, self.Y, self.Xt,self.R_kill)
             self.reward += self.compute_sparse_reward_1(self.miss_distance)
-            # 在回合结束时，不再有任何过程奖励，因此将 reward_4 设为0。
+            self.reward += self.compute_sparse_reward_2()
+
+            # self.reward += self.compute_dense_reward_3(open_laser)   #只有红外时关闭
             reward_4 = 0
         else:
-            # --- 密集塑形奖励 (在每个时间步计算，引导过程) ---
-            # --- 1. 计算所有需要的奖励/惩罚组件 ---
-            # [旧有组件 - 基础生存与安全]
-            # a) 生存时间奖励：随着时间推移给予微小的正奖励，鼓励AI存活更久。
-            # reward_survival = self.compute_dense_reward_1()
-            reward_survival = 0.0
-            # b) 导弹姿态奖励：奖励那些能让导弹速度衰减、形成有利几何态势的机动。
-            reward_posture = self.compute_missile_posture_reward()
-            # c) 高度安全惩罚：严厉惩罚过低飞行、坠地风险和过高飞行。
-            reward_altitude = self.compute_altitude_reward()
-            # d) 资源使用惩罚：投放诱饵弹时，根据剩余数量给予惩罚，鼓励节约。
-            reward_resource = self.compute_dense_reward_4(action[3])
-            # [新有组件 - 核心战术引导]
-            # e) 三九线战术奖励：奖励飞机将导弹保持在机身侧方（3点或9点钟方向）。
-            #    这是现代空战规避红外导弹的核心战术。
-            reward_A_aspect = self._reward_for_aspect_angle()
-            # f) 持续滚转惩罚：惩罚飞机以高角速度持续滚转的无效/不实现象。
-            #    防止AI利用模拟器漏洞学到“陀螺式”滚转。
-            # reward_F_roll_penalty = self._penalty_for_sustained_roll_rate()
-            reward_F_roll_penalty = self._penalty_for_roll_rate_magnitude()
-            #最优转弯速度惩罚
-            reward_for_optimal_speed = self._penalty_for_dropping_below_speed_floor()
+            self.reward += self.compute_dense_reward_1()
+            self.reward += self.compute_dense_reward_2()
+            # self.reward += self.compute_dense_reward_3(open_laser)   #只有红外时关闭
+            # self.reward3 = self.compute_dense_reward_3(open_laser)
+            # print("self.compute_dense_reward_3()", self.compute_dense_reward_3(open_laser))
+            # self.reward += self.compute_dense_reward_4(action[0])
+            # self.reward += self.compute_dense_reward_4(action[0])
+            reward_4 = self.compute_dense_reward_4(action[0]) * 1.0 / 5.0 # 红外干扰资源使用过量惩罚函数
+            # reward_4 = 0
+            self.reward /= 5.0
+
+            # if self.compute_dense_reward_4(action[0]) != 0:
+            #     reward_4=self.compute_dense_reward_4(action[0])
+            # else:
+            #     reward_4 =0
 
 
-            # --- 2. 将所有组件按权重加权求和 ---
-            # 这里的权重是经过调试的关键超参数，直接决定了AI的行为优先级。
-            # a) 旧有组件的加权值
-            original_reward_weighted = (0.00 * reward_survival +  # 生存时间权重较低，避免AI只为了拖时间
-                                        1.0 * reward_posture +  # 导弹姿态权重较高，耗尽导弹能量很关键
-                                        0.5 * reward_altitude +  # 高度安全权重最高，避免坠毁是第一要务
-                                        0.2 * reward_resource)  # 资源惩罚权重较低
 
-            # b) 新有组件的加权值
-            tactical_reward_weighted = (1.0 * reward_A_aspect +  # 三九线奖励权重最高，是主要战术目标
-                                        0.8 * reward_F_roll_penalty +
-                                        1.0 * reward_for_optimal_speed)  # 持续滚转惩罚权重，用于修正异常行为
-            # 注意：reward_F_roll_penalty 本身是负数，所以这里乘以 -0.5 来控制惩罚力度
 
-            # 将两部分奖励相加，得到最终的密集奖励值。
-            # (您可以根据需要调整这两部分奖励的融合方式，例如给它们再分别乘以一个总权重)
-            final_dense_reward = original_reward_weighted + tactical_reward_weighted
-
-            # 将计算出的密集奖励累加到当前回合的总奖励中。
-            self.reward += final_dense_reward
-
-            # 这个返回值主要用于外部记录和调试，这里设为0，因为所有奖励都已计入 self.reward。
-            reward_4 = 0
-
-            # (可选) 添加一个详细的打印语句，方便实时调试和分析AI的决策依据
-            print(f"Posture: {1.0 * reward_posture:.2f}, "
-                  f"Altitude: {0.5 * reward_altitude:.2f}, "
-                  f"Resource: {0.2 * reward_resource:.2f}, "
-                  f"Aspect: {1.0 * reward_A_aspect:.2f}, "
-                  f"Roll Penalty: {0.8 * reward_F_roll_penalty:.2f}, "
-                  f"reward_for_optimal_speed:{1.0 * reward_for_optimal_speed:.2f},"
-                  f"Total Dense: {final_dense_reward:.2f}")
-
-        # 返回观测值、总奖励、完成标志以及其他信息
         return self.observation, self.reward, self.done, reward_4, 1
+
+        # return self.observation, self.reward, self.done,0, 1
 
     # == 回报函数 ==
     def compute_sparse_reward_1(self, miss_distance):
@@ -634,519 +539,30 @@ class AirCombatEnv:
         else:
             return 0.0
 
-    # def compute_missile_posture_reward(self):
-    #     """
-    #     计算导弹姿态奖励。
-    #     奖励那些能让导弹速度衰减，并形成有利几何态势的机动。
-    #     """
-    #     # 1. 获取当前导弹的速度大小 (magnitude)
-    #     missile_v_mag = self.x_missile_now[0]
+    # def render(self):
+    #     # ========================= 可视化 =========================
+    #     fig = plt.figure()
+    #     ax = fig.add_subplot(111, projection='3d')
+    #     ax.plot(self.Y[:, 3], self.Y[:, 5], self.Y[:, 4], 'b-', label='导弹轨迹')
+    #     ax.plot(self.Xt[:, 0], self.Xt[:, 2], self.Xt[:, 1], 'r--', label='目标轨迹')
+    #     ax.scatter(self.Y[0, 3], self.Y[0, 5], self.Y[0, 4], color='g', label='导弹起点')
+    #     ax.scatter(self.Y[self.idx_min, 3], self.Y[self.idx_min, 5], self.Y[self.idx_min, 4], color='m', label='最近点')
     #
-    #     # 2. 如果是第一步，无法计算速度变化，则初始化并返回0
-    #     if self.prev_missile_v_mag is None:
-    #         self.prev_missile_v_mag = missile_v_mag
-    #         return 0.0
+    #     for i, flare in enumerate(self.flare_manager.flares):
+    #         traj = np.array(flare.history)
+    #         if traj.shape[0] > 0:
+    #             ax.plot(traj[:, 0], traj[:, 2], traj[:, 1], color='orange', linewidth=1,
+    #                     label='红外诱饵弹' if i == 0 else "")
     #
-    #     # 3. 计算导弹速度大小的衰减量，并进行缩放
-    #     #    (self.prev_missile_v_mag - missile_v_mag) > 0 表示导弹减速了
-    #     v_decrease = (self.prev_missile_v_mag - missile_v_mag)
-    #
-    #     # 为了避免奖励值过大，可以进行归一化或限制
-    #     # 原始代码除以了340（音速），这里我们暂时只用原始速度差
-    #     # 如果奖励值太大或太小，可以调整这里的 v_decrease_scaled 计算
-    #     v_decrease_scaled = v_decrease * 0.5  # 乘以一个系数避免数值太大
-    #
-    #     # 4. 获取飞机和导弹的速度向量
-    #     missile_v_vec = self.compute_velocity_vector(self.x_missile_now)
-    #     aircraft_v_vec = self.compute_velocity_vector_from_target(self.x_target_now)
-    #
-    #     # 加上一个很小的数防止除以零
-    #     norm_product = np.linalg.norm(missile_v_vec) * np.linalg.norm(aircraft_v_vec) + 1e-6
-    #
-    #     # 5. 计算两个速度向量夹角的余弦值
-    #     angle_cos = np.dot(missile_v_vec, aircraft_v_vec) / norm_product
-    #     angle_cos = np.clip(angle_cos, -1.0, 1.0)  # 确保值在[-1, 1]之间
-    #
-    #     # 6. 根据原始逻辑计算奖励
-    #     reward = 0
-    #     if angle_cos < 0:  # 迎头或对冲态势
-    #         # 是一个惩罚，但如果导弹减速，惩罚会减小
-    #         reward = angle_cos / (max(v_decrease_scaled, 0) + 1)
-    #     else:  # 尾追或同向态势
-    #         # 只有在导弹减速时才给予正奖励
-    #         reward = angle_cos * max(v_decrease_scaled, 0)
-    #
-    #     # 7. 更新上一步的速度，为下一次计算做准备
-    #     self.prev_missile_v_mag = missile_v_mag
-    #
-    #     # 8. 返回最终计算出的奖励值，并乘以一个全局缩放系数
-    #     return reward * self.posture_reward_scale
-
-    # (中文) 在 AirCombatEnv 类中，用这个修正后的版本替换
-    def compute_missile_posture_reward(self):
-        """
-        (v2 - 修正版) 计算导弹姿态奖励。
-        新增了安全检查：如果导弹已经失锁，则不应有任何惩罚。
-        """
-        """
-        (v3 - 简化失锁判断) 计算导弹姿态奖励。
-        使用一个简化的几何条件来判断导弹是否“失锁”，并在此情况下清除负奖励。
-        """
-        # 1. 获取当前导弹的速度大小 (magnitude)
-        missile_v_mag = self.x_missile_now[0]
-
-        # 2. 如果是第一步，无法计算速度变化，则初始化并返回0
-        if self.prev_missile_v_mag is None:
-            self.prev_missile_v_mag = missile_v_mag
-            return 0.0
-
-        # 3. 计算导弹速度大小的衰减量，并进行缩放
-        v_decrease = (self.prev_missile_v_mag - missile_v_mag)
-        v_decrease_scaled = v_decrease * 0.5
-
-        # 4. 获取速度向量
-        missile_v_vec = self.compute_velocity_vector(self.x_missile_now)
-        aircraft_v_vec = self.compute_velocity_vector_from_target(self.x_target_now)
-
-        # 5. 计算速度向量夹角的余弦值
-        norm_product = np.linalg.norm(missile_v_vec) * np.linalg.norm(aircraft_v_vec) + 1e-6
-        angle_cos = np.dot(missile_v_vec, aircraft_v_vec) / norm_product
-        angle_cos = np.clip(angle_cos, -1.0, 1.0)
-
-        # 6. 根据原始逻辑计算基础奖励 (保持不变)
-        reward = 0
-        if angle_cos < 0:  # 迎头或对冲态势
-            reward = angle_cos / (max(v_decrease_scaled, 0) + 1)
-        else:  # 尾追或同向态势
-            reward = angle_cos * max(v_decrease_scaled, 0)
-
-        # # --- (中文) 7. 核心修正：安全检查 ---
-        #
-        # # a) 检查导弹当前的锁定状态
-        # lock_aircraft, *_ = self.check_seeker_lock(
-        #     self.x_missile_now, self.x_target_now,
-        #     missile_v_vec, aircraft_v_vec,
-        #     self.t_now, self.D_max1, self.Angle_IR, self.omega_max, self.T_max
-        # )
-        #
-        # # b) 如果导弹已经失锁，并且计算出的奖励是负的，则强制将奖励改为0
-        # #    这可以防止在成功规避的最后阶段受到不合理的惩罚。
-        # if not lock_aircraft and reward < 0:
-        #     reward = 0.0
-
-        # --- (中文) 7. 核心修正：使用简化的几何条件进行安全检查 ---
-
-        # a) 计算导弹到飞机的视线矢量
-        los_vec_m_to_a = self.x_target_now[0:3] - self.x_missile_now[3:6]
-
-        # b) 计算视线矢量与导弹速度矢量的夹角余弦值
-        #    这个夹角被称为 "Antenna Train Angle" (ATA) 或 "Angle-Off"
-        norm_product_ata = np.linalg.norm(los_vec_m_to_a) * np.linalg.norm(missile_v_vec) + 1e-6
-        cos_ata = np.dot(los_vec_m_to_a, missile_v_vec) / norm_product_ata
-        cos_ata = np.clip(cos_ata, -1.0, 1.0)
-
-        # c) 判断飞机是否在导弹的后半球 (夹角 > 90度)
-        #    如果夹角 > 90度，那么其余弦值 cos_ata 会是负数。
-        is_aircraft_behind_missile = cos_ata < 0
-
-        # d) 如果飞机已经在导弹的后半球 (视为失锁)，并且计算出的奖励是负的，则强制改为0
-        if is_aircraft_behind_missile and reward < 0:
-            reward = 0.0
-
-        # 8. 更新上一步的速度 (原步骤7)
-        self.prev_missile_v_mag = missile_v_mag
-
-        # 9. 返回最终计算出的奖励值 (原步骤8)
-        return reward * self.posture_reward_scale
-
-    def compute_altitude_reward(self):
-        """
-        计算高度奖励（实际为惩罚）。
-        惩罚危险的低空飞行和不经济的超高空飞行。
-        """
-        # 1. 获取飞机当前的高度 (y坐标) 和垂直速度
-        altitude_m = self.x_target_now[1]
-        v_vertical_ms = self.x_target_now[3] * np.sin(self.x_target_now[4])
-
-        # --- 低空惩罚逻辑 (保持不变) ---
-        # 2. 计算速度惩罚 (Pv)
-        Pv = 0.0
-        if altitude_m <= self.safe_altitude_m and v_vertical_ms < 0:
-            descent_speed = abs(v_vertical_ms)
-            penalty_factor = (descent_speed / self.Kv_ms) * \
-                             ((self.safe_altitude_m - altitude_m) / self.safe_altitude_m)
-            Pv = -np.clip(penalty_factor, 0.0, 1.0)
-
-        # 3. 计算绝对高度惩罚 (PH)
-        PH = 0.0
-        if altitude_m <= self.danger_altitude_m:
-            PH = np.clip(altitude_m / self.danger_altitude_m, 0.0, 1.0) - 1.0
-
-        # --- 新增：超高空惩罚逻辑 ---
-        # 4. 计算超高空惩罚 (P_over)
-        P_over = 0.0
-        if altitude_m > self.max_altitude_m:
-            # 惩罚值与超出高度成正比
-            # 例如，在13000米时，惩罚为 -(13000-12000)/1000 * 0.5 = -0.5
-            # 这样设计可以平滑地增加惩罚
-            P_over = -((altitude_m - self.max_altitude_m) / 1000.0) * self.over_altitude_penalty_factor
-
-        # 5. 合并所有惩罚项，并乘以全局缩放系数
-        #    将低空惩罚和高空惩罚相加
-        total_penalty = (Pv + PH + P_over) * self.altitude_reward_scale
-
-        return total_penalty
-
-    # --- (中文) 新增: 新奖励函数组件方法 ---
-    def _calculate_specific_energy(self, state_vec):
-        """计算飞机的比能量 (高度 + 动能)"""
-        h = state_vec[1]  # y - Altitude
-        V = state_vec[3]  # Velocity
-        return h + (V ** 2) / (2 * self.g)
-
-    # def _reward_for_aspect_angle(self):
-    #     """(组件A) 奖励将威胁置于三九线"""
-    #     threat_angle_rad = self.compute_relative_beta2(self.x_target_now, self.x_missile_now)
-    #     threat_angle_deg = np.rad2deg(threat_angle_rad)
-    #     angle_error_deg = min(abs(threat_angle_deg - 90), abs(threat_angle_deg - 270))
-    #     reward = self.K_ASPECT * math.exp(-(angle_error_deg ** 2) / (2 * self.ASPECT_REWARD_WIDTH_DEG ** 2))
-    #     return reward
-
-    # (中文) 在 AirCombatEnv 类中，用这个最终的、非对称的版本替换
-    # def _reward_for_aspect_angle(self):
-    #     """(组件A - v4版，非对称奖励) 只奖励朝向最近的三九线机动"""
-    #     # 计算当前机弹距离 (保持不变)
-    #     current_R_rel = np.linalg.norm(self.x_target_now[0:3] - self.x_missile_now[3:6])
-    #
-    #     # 动态距离权重 (保持不变)
-    #     distance_weight = 1.0 - np.clip(current_R_rel / self.ASPECT_REWARD_EFFECTIVE_RANGE, 0.0, 1.0)
-    #
-    #     if distance_weight <= 0.0:
-    #         return 0.0
-    #
-    #     # (中文) 基础的角度奖励计算 (关键修正！)
-    #     threat_angle_rad = self.compute_relative_beta2(self.x_target_now, self.x_missile_now)
-    #     threat_angle_deg = np.rad2deg(threat_angle_rad)
-    #
-    #     # --- 核心修正：打破对称性 ---
-    #
-    #     # 1. 判断导弹在前半球还是后半球
-    #     is_in_front_hemisphere = (threat_angle_deg < 90) or (threat_angle_deg > 270)
-    #
-    #     # 2. 判断导弹在右半侧还是左半侧
-    #     is_on_right_side = (threat_angle_deg > 0) and (threat_angle_deg < 180)
-    #
-    #     # 3. 计算到最近的三九线的角度误差
-    #     if is_on_right_side:
-    #         # 如果在右边，目标就是90度
-    #         angle_error_deg = abs(threat_angle_deg - 90)
-    #     else:
-    #         # 如果在左边，目标就是270度
-    #         angle_error_deg = abs(threat_angle_deg - 270)
-    #
-    #     # 4. 使用高斯函数将误差转化为奖励 (0-1范围)
-    #     #    我们重新使用高斯函数，因为它能提供更平滑的梯度
-    #     #    当误差为0时，奖励为1；误差越大，奖励越趋近于0。
-    #     #    self.ASPECT_REWARD_WIDTH_DEG (例如45.0) 控制了奖励的“尖锐”程度。
-    #     base_reward = math.exp(-(angle_error_deg ** 2) / (2 * self.ASPECT_REWARD_WIDTH_DEG ** 2))
-    #
-    #     # (可选) 对于前半球的威胁，我们可以给予更高的权重，因为迎头威胁更致命
-    #     # if is_in_front_hemisphere:
-    #     #     base_reward *= 1.2
-    #
-    #     # (中文) 最终奖励 = 基础角度奖励 * 动态距离权重
-    #     return base_reward * distance_weight
-    # (中文) 在 AirCombatEnv 类中，使用这个 v5 版本
-    def _reward_for_aspect_angle(self):
-        """(组件A - v5版，增加了对垂直机动的抑制)"""
-        # ... (距离和距离权重的计算保持不变) ...
-        current_R_rel = np.linalg.norm(self.x_target_now[0:3] - self.x_missile_now[3:6])
-        distance_weight = 1.0 - np.clip(current_R_rel / self.ASPECT_REWARD_EFFECTIVE_RANGE, 0.0, 1.0)
-        if distance_weight <= 0.0:
-            return 0.0
-
-        # --- (中文) 核心修正：只有在非极端俯仰角时才计算该奖励 ---
-        pitch_rad = self.x_target_now[4]
-        pitch_deg = np.rad2deg(pitch_rad)
-
-        # 定义一个俯仰角阈值，例如70度。只有当飞机不那么“垂直”时，三九线奖励才有效。
-        PITCH_THRESHOLD_DEG = 70.0
-        if pitch_deg > PITCH_THRESHOLD_DEG:
-            return 0.0  # (中文) 如果飞机太垂直，直接返回0，不给任何三九线奖励
-
-        # ... (后续的非对称角度奖励计算逻辑保持不变) ...
-        threat_angle_rad = self.compute_relative_beta2(self.x_target_now, self.x_missile_now)
-        threat_angle_deg = np.rad2deg(threat_angle_rad)
-        is_on_right_side = (threat_angle_deg > 0) and (threat_angle_deg < 180)
-        if is_on_right_side:
-            angle_error_deg = abs(threat_angle_deg - 90)
-        else:
-            angle_error_deg = abs(threat_angle_deg - 270)
-        base_reward = math.exp(-(angle_error_deg ** 2) / (2 * self.ASPECT_REWARD_WIDTH_DEG ** 2))
-
-        return base_reward * distance_weight
-
-    def _reward_for_banked_turn(self, action):
-        """(组件B) 奖励高G值的“滚转后拉杆”"""
-        nz_command = action[1]
-        phi_rad = self.x_target_now[6]
-        if nz_command <= 1.0:
-            return 0.0
-        bank_efficiency = abs(np.sin(phi_rad))
-        reward = self.K_TURN * (nz_command - 1.0) * bank_efficiency
-        return reward
-
-    # (中文) 在 AirCombatEnv 类中找到并替换这个方法
-    def _penalty_for_energy_loss(self, prev_target_state):
-        """(组件C) 惩罚能量损失 - (已修改，增加了尺度缩放)"""
-        Es_prev = self._calculate_specific_energy(prev_target_state)
-        Es_now = self._calculate_specific_energy(self.x_target_now)
-        energy_delta = Es_now - Es_prev
-
-        # (中文) 关键修改：对能量变化进行缩放，避免数值过大
-        # 一个典型的能量变化可能在几百到几千。我们把它除以一个较大的数（例如100）
-        # 来将其尺度缩小到与其他奖励相似的范围。这个缩放因子是新的超参数。
-        ENERGY_SCALING_FACTOR = 100.0
-        scaled_energy_delta = energy_delta / ENERGY_SCALING_FACTOR
-
-        # 只惩罚能量的损失
-        energy_penalty = min(0, scaled_energy_delta)
-
-        # K_ENERGY是负数, 现在乘以缩放后的值
-        return self.K_ENERGY * abs(energy_penalty)
-
-    # (中文) 在 AirCombatEnv 类中找到并替换这个方法
-    def _penalty_for_high_pitch(self):
-        """(组件D) 明确惩罚大仰角爬升 - (已修改，增加了尺度缩放)"""
-        pitch_rad = self.x_target_now[4]
-        pitch_deg = np.rad2deg(pitch_rad)
-
-        if pitch_deg > self.PITCH_PENALTY_THRESHOLD_DEG:
-            # (中文) 关键修改：将角度差值归一化
-            # 比如我们认为超出45度是极限 (90-45)，用这个值来归一化
-            pitch_diff = pitch_deg - self.PITCH_PENALTY_THRESHOLD_DEG
-            normalized_diff = pitch_diff / (90.0 - self.PITCH_PENALTY_THRESHOLD_DEG)
-
-            # 使用平方来加大惩罚，但现在是在归一化之后
-            penalty = normalized_diff
-            return self.K_PITCH * penalty
-        return 0.0
-
-    def _reward_for_timed_flare(self, action):
-        """(组件E) 奖励在正确时机投放诱饵弹"""
-        is_flaring = action[3] > 0.5
-        if not is_flaring:
-            return 0.0
-        threat_angle_rad = self.compute_relative_beta2(self.x_target_now, self.x_missile_now)
-        threat_angle_deg = np.rad2deg(threat_angle_rad)
-        is_in_window1 = (90 - self.FLARE_TIMING_WINDOW_DEG) < threat_angle_deg < (90 + self.FLARE_TIMING_WINDOW_DEG)
-        is_in_window2 = (270 - self.FLARE_TIMING_WINDOW_DEG) < threat_angle_deg < (
-                    270 + self.FLARE_TIMING_WINDOW_DEG)
-        if is_in_window1 or is_in_window2:
-            return self.K_FLARE
-        else:
-            return -self.K_FLARE * 0.5
-
-    def _penalty_for_sustained_roll_rate(self):
-        """(新增组件F - 修正版) 惩罚持续的高滚转角速度"""
-        # (中文) 从状态向量中获取当前的实际滚转角速度
-        p_real_rad_s = self.x_target_now[7]
-
-        # (中文) 检查滚转角速度的绝对值是否超过阈值
-        if abs(p_real_rad_s) > self.HIGH_ROLL_RATE_THRESHOLD_RAD_S:
-            # (中文) 如果是，累加计时器
-            self.time_with_high_roll_rate += self.dt
-        else:
-            # (中文) 如果滚转角速度降下来了，计时器清零
-            self.time_with_high_roll_rate = 0.0
-
-        # (中文) 如果高速滚转的时间超过了阈值，就开始施加惩罚
-        if self.time_with_high_roll_rate > self.SUSTAINED_ROLL_TIME_THRESHOLD:
-            # (中文) 惩罚与超出的时间成正比
-            penalty = (self.time_with_high_roll_rate - self.SUSTAINED_ROLL_TIME_THRESHOLD)
-            penalty = np.clip(penalty, 0.0, 5.0)
-            return self.K_SUSTAINED_ROLL_RATE * penalty
-
-        return 0.0
-
-    def _penalty_for_roll_rate_magnitude(self):
-        """
-        (最终版 - 无阈值) 直接惩罚任何非零的滚转角速度。
-        惩罚的大小与滚转角速度的绝对值成正比。
-        """
-        # 1. 定义超参数 (可以移到 __init__ 中)
-        # 飞机的最大滚转速率，用于归一化惩罚值
-        MAX_PHYSICAL_ROLL_RATE_RAD_S = np.deg2rad(240.0)
-
-        # 惩罚的权重/系数。这个值的大小现在直接决定了滚转的“成本”
-        K_ROLL_RATE_MAGNITUDE = -1.0  # 这是一个负数，可以从一个较小的值开始尝试
-
-        # 2. 从状态向量中获取当前的实际滚转角速度
-        p_real_rad_s = self.x_target_now[7]
-        p_real_abs = abs(p_real_rad_s)
-
-        # --- 核心逻辑：直接进行归一化和惩罚 ---
-
-        # 1. 将当前的滚转速率归一化到 [0, 1] 范围
-        #    (当前速率 / 最大速率)
-        #    防止除零错误
-        if MAX_PHYSICAL_ROLL_RATE_RAD_S < 1e-6:
-            return 0.0
-
-        normalized_roll_rate = p_real_abs / MAX_PHYSICAL_ROLL_RATE_RAD_S
-
-        # 2. 计算最终惩罚
-        #    当 p_real_abs = 0 时, 惩罚为 0
-        #    当 p_real_abs = MAX_PHYSICAL_ROLL_RATE_RAD_S 时, 惩罚为 K_ROLL_RATE_MAGNITUDE * 1.0
-        penalty = K_ROLL_RATE_MAGNITUDE * normalized_roll_rate
-
-        return penalty
-
-    def _reward_for_optimal_speed(self):
-        """
-        (新版速度管理) 奖励飞机将速度保持在最优马赫数附近。
-        偏离越远，惩罚越大。
-        """
-        # 1. 计算当前马赫数
-        Vt = self.x_target_now[3]
-        current_mach = Vt / 340.0
-
-        # 2. 计算与最优马赫数的差距
-        mach_error = abs(current_mach - 0.8)
-
-        # 3. 将差距转化为惩罚
-        #    我们使用一个简单的二次惩罚：penalty = error^2
-        #    这意味着微小的偏离惩罚很小，大的偏离惩罚会急剧增加。
-        #    为了让惩罚的尺度可控，我们可以对误差进行归一化。
-        #    例如，我们认为偏离超过0.4马赫是很大的误差。
-        NORMALIZATION_FACTOR = 0.4
-        normalized_error = mach_error / NORMALIZATION_FACTOR
-
-        #    最终的惩罚基准值
-        penalty_base = normalized_error
-
-        #    应用权重
-        final_penalty = -1.0 * penalty_base
-
-        # 我们可以对惩罚设置一个上限，防止其过大
-        return max(final_penalty, -1.0)  # 例如，惩罚最多为 -1.0
-
-    def _penalty_for_dropping_below_speed_floor(self):
-        """
-        (速度下限惩罚模型) 只有当飞机速度低于最优机动速度下限时，才施加惩罚。
-        速度越高，越没有惩罚。
-        """
-        # 1. 定义超参数 (可以移到 __init__ 中)
-        # F-16 的最优瞬时转弯速度区间大约在 0.7-0.9 马赫。我们取 0.7 作为下限。
-        OPTIMAL_SPEED_FLOOR_MACH = 0.8
-
-        # 惩罚的权重/系数
-        K_SPEED_FLOOR_PENALTY = -2.0  # 这是一个强烈的惩罚，因为低于最优速度很危险
-
-        # 2. 计算当前马赫数
-        Vt = self.x_target_now[3]
-        current_mach = Vt / 340.0
-
-        # 3. 检查速度是否低于了下限
-        if current_mach < OPTIMAL_SPEED_FLOOR_MACH:
-            # --- 核心逻辑：计算惩罚 ---
-
-            # a) 计算低于下限的差距
-            mach_deficit = OPTIMAL_SPEED_FLOOR_MACH - current_mach
-
-            # b) (推荐) 对差距进行归一化，使其尺度可控
-            #    分母就是我们的下限本身。
-            #    例如，如果速度掉到 0.35 马赫，差距是 0.35，归一化后就是 0.5。
-            normalized_deficit = mach_deficit / OPTIMAL_SPEED_FLOOR_MACH
-
-            # c) 计算最终惩罚
-            #    可以使用线性或二次惩罚。二次惩罚 (平方) 会让惩罚随着速度的降低而急剧增加，
-            #    这能更强烈地阻止AI进入危险的低速区。
-            penalty_base = normalized_deficit ** 2
-
-            final_penalty = K_SPEED_FLOOR_PENALTY * penalty_base
-
-            return final_penalty
-
-        # 如果速度高于或等于下限，则完全没有惩罚
-        return 0.0
-
-    def _penalty_for_energy_management(self, prev_target_state, prev_R_rel):
-        """
-        (最终版 v2) 精细化能量管理：
-        - 严厉惩罚速度损失。
-        - 只有在特定威胁下才惩罚爬升。
-        - 完全不惩罚俯冲。
-        """
-        """
-           (最终版 v3 - 带归一化) 精细化能量管理：
-           - 对所有惩罚进行归一化，使其尺度可控。
-           """
-        V_prev = prev_target_state[3]
-        V_now = self.x_target_now[3]
-
-        # --- 1. 核心：速度管理 ---
-        velocity_delta = V_now - V_prev
-        # a) 惩罚任何速度损失 (这个尺度本身比较合理，可以保持不变或轻微归一化)
-        # 假设一个决策步内最大合理速度损失为 20 m/s (约2G减速)
-        normalized_v_loss = abs(min(0, velocity_delta)) / 20.0
-        velocity_loss_penalty = self.K_VELOCITY_LOSS * normalized_v_loss
-
-        # b) 额外惩罚进入低速状态
-        low_speed_penalty = 0.0
-        if V_now < self.DANGER_SPEED_THRESHOLD_MS:
-            # (中文) 归一化：(危险速度-当前速度) / 危险速度
-            # 例如 V_now=100, (150-100)/150 = 0.33
-            normalized_speed_diff = (self.DANGER_SPEED_THRESHOLD_MS - V_now) / self.DANGER_SPEED_THRESHOLD_MS
-            low_speed_penalty = self.K_LOW_SPEED_PENALTY * normalized_speed_diff
-
-        # --- 2. 条件性爬升惩罚 ---
-        vertical_velocity = self.x_target_now[3] * np.sin(self.x_target_now[4])
-        current_R_rel = np.linalg.norm(self.x_target_now[0:3] - self.x_missile_now[3:6])
-        range_rate = (current_R_rel - prev_R_rel) / self.dt
-
-        climb_penalty = 0.0
-        if vertical_velocity > 0:
-            is_high_threat = (current_R_rel < self.THREAT_RANGE_M) and (range_rate < 0)
-            if is_high_threat:
-                # (中文) 归一化：将垂直速度除以一个典型的最大作战速度，比如 340m/s (1马赫)
-                # 这样，即使在极限爬升时，这个值也被限制在 [0, 1] 附近
-                normalized_climb_rate = vertical_velocity / 340.0
-                climb_penalty = self.K_BAD_CLIMB * normalized_climb_rate
-
-        # --- 3. 组合所有惩罚 ---
-        total_penalty = velocity_loss_penalty + low_speed_penalty + climb_penalty
-
-        # (中文) 这个 print 语句现在会显示归一化后的、尺度更一致的惩罚值
-        # 这将极大地帮助你理解每个组件的实际影响力
-        # print(f"V_loss_p: {velocity_loss_penalty:.2f}, Low_spd_p: {low_speed_penalty:.2f}, Climb_p: {climb_penalty:.2f}")
-
-        return total_penalty
-
-    def _compute_shaping_reward(self, action, prev_target_state, prev_R_rel):
-        """将所有塑形奖励组件组合起来"""
-        # --- 核心机动引导 (保持不变) ---
-        reward_A = self._reward_for_aspect_angle()
-        # reward_B = self._reward_for_banked_turn(action)
-        reward_B = 0.0
-        # --- 新的、解耦的能量管理 (替换旧的C和D) ---
-        # reward_energy = self._penalty_for_energy_management(prev_target_state, prev_R_rel)
-        reward_energy = 0.0
-        # reward_C = self._penalty_for_energy_loss(prev_target_state)
-        # reward_D = self._penalty_for_high_pitch()
-        # --- (中文) 关键修改：暂时禁用诱饵弹的塑形奖励 ---
-        # reward_E = self._reward_for_timed_flare(action) # 注释掉这一行
-        # --- 诱饵弹奖励 (保持禁用) ---
-        reward_E = 0.0
-        # (中文) 调用修正后的、基于滚转速率的惩罚函数  # --- 持续滚转惩罚 (保持不变) ---
-        reward_F = self._penalty_for_sustained_roll_rate()
-
-        # (中文) 更新 print 语句，以反映新的奖励结构
-        # 旧的 reward_C 和 reward_D 已经被 reward_energy 替代了
-        print( f"Aspect(A): {reward_A:.2f}, Turn(B): {reward_B:.2f}, Energy(C+D): {reward_energy:.2f}, SustainedRoll(F): {reward_F:.2f}")
-        total_shaping_reward = reward_A + reward_B + reward_energy + reward_E + reward_F
-        return total_shaping_reward
-
+    #     ax.set_xlabel('X / m')
+    #     ax.set_ylabel('Z / m')
+    #     ax.set_zlabel('Y / m')
+    #     ax.invert_yaxis()
+    #     ax.legend()
+    #     ax.set_title('导引头模型 + 红外诱饵弹建模仿真')
+    #     ax.grid()
+    #     ax.view_init(elev=20, azim=-150)
+    #     plt.show()
     def render(self):
         # ========================= 可视化 =========================
 
@@ -1265,19 +681,13 @@ class AirCombatEnv:
 
         print(f"✅ ACMI 文件已导出: {filename}")
 
-    def run_one_step(self, dt, nx, nz, p_cmd, release_flare):
+    def run_one_step(self, dt, nx, nz, phi2, release_flare):
 
-        self.x_target_next = self.aircraft_dynamics2(self.x_target_now, dt, nx, nz, p_cmd)
-
-        #检查飞机速度范围
-        if self.x_target_next[3] > 400:
-            self.x_target_next[3] = 400
-        elif self.x_target_next[3] < 100:
-            self.x_target_next[3] = 100
+        self.x_target_next = self.aircraft_dynamics2(self.x_target_now, dt, nx, nz, phi2)
 
         if release_flare == 1:
             if self.o_ir > 0:
-                self.o_ir -= self.flare_per_group  # 红外诱饵弹数量
+                self.o_ir -= 1  # 红外诱饵弹数量
                 self.flare_manager.release_flare_group(self.t_now)
 
         self.flare_manager.update(self.t_now, dt, self.x_target_now)
@@ -1499,8 +909,7 @@ class AirCombatEnv:
                     # 我们把爆炸时间与位置写入事件文本，便于在 Tacview 中定位
                     # _send_tacview_data 内会检测 self.missile_exploded 和 missile_explosion_reported
                     # 并把 Event/移除行发送出去 (参见你已有的实现)
-                    if self.tacview_enabled:
-                        self._send_tacview_data()
+                    self._send_tacview_data()
 
 
 
@@ -1509,21 +918,9 @@ class AirCombatEnv:
         self.prev_theta_L = self.theta_L
         self.prev_phi_L = self.phi_L
 
-        # (中文) 在 run_one_step 方法的末尾，用这个整合的逻辑块替换掉所有旧的终止判断
-
-        # ==============================================================================
-        # (中文) --- 整合的、带优先级的回合终止判断逻辑 ---
-        # ==============================================================================
-
-        # --- 1. 获取当前所有需要的状态，只计算一次 ---
-        aircraft_velocity = self.x_target_now[3]
-        missile_velocity = self.x_missile_now[0]
-        current_R_rel = np.linalg.norm(self.x_target_now[0:3] - self.x_missile_now[3:6])
-
-        if self.prev_R_rel is None:
-            range_rate = 0
-        else:
-            range_rate = (current_R_rel - self.prev_R_rel) / dt
+        # 飞机逃脱判据******************************************************************
+        R_vec = self.x_target_now[0:3] - self.x_missile_now[3:6]
+        R_rel = np.linalg.norm(R_vec)
 
         lock_aircraft, *_ = self.check_seeker_lock(
             self.x_missile_now, self.x_target_now,
@@ -1531,79 +928,32 @@ class AirCombatEnv:
             self.compute_velocity_vector_from_target(self.x_target_now),
             self.t_now, self.D_max1, self.Angle_IR, self.omega_max, self.T_max
         )
+        if (not lock_aircraft) and \
+                (self.prev_R_rel is not None and R_rel > self.prev_R_rel):
+            self.lost_and_separating_duration += dt
+        else:
+            self.lost_and_separating_duration = 0.0
 
-        # --- 2. 按优先级检查终止条件 (只要有一个触发，就设置 done = True 并跳出) ---
+        self.prev_R_rel = R_rel
 
-        # --- 优先级最高：飞机的直接失败条件 ---
-        if self.x_target_now[1] <= 100:
-            print(f">>> 飞机坠地！仿真终止。")
+        if self.lost_and_separating_duration >= 2.0:
+            print(f">>> 持续丢失目标 + 距离增大超过2秒，仿真提前终止！m")
             self.done = True
-            self.miss_distance = 0  # 视为直接命中
-            self.success = False
-
-        elif self.x_target_now[1] >= 15000:
-            print(f">>> 飞机超出升限！仿真终止。")
-            self.done = True
-            self.miss_distance = 0  # 也可视为一种失败
-            self.success = False
-
-        elif self.x_target_now[3] <= 110:
-            print(f">>> 飞机速度过低！仿真终止。")
-            self.done = True
-            self.miss_distance = 0  # 也可视为一种失败
-            self.success = False
-
-        # --- 优先级次之：飞机的成功规避条件 ---
-        if not self.done:
-            # a) 判断“物理逃逸”
-            cond_missile_slower = missile_velocity < aircraft_velocity
-            cond_separating = range_rate > self.MIN_SEPARATION_RATE_FOR_ESCAPE
-            if cond_missile_slower and cond_separating:
-                self.escape_timer += dt
-            else:
-                self.escape_timer = 0.0
-
-            # b) 判断“信息逃逸”（丢失目标）
-            cond_lost_lock = not lock_aircraft
-            cond_separating_simple = range_rate > 0  # 这里用一个更宽松的距离拉大判断
-            if cond_lost_lock and cond_separating_simple:
-                self.lost_and_separating_duration += dt
-            else:
-                self.lost_and_separating_duration = 0.0
-
-            # c) 检查是否触发成功
-            if self.escape_timer >= self.ESCAPE_DURATION_REQ:
-                print(f">>> 成功逃逸(物理)！(导弹更慢且距离拉大已持续 {self.ESCAPE_DURATION_REQ}s)，仿真提前终止!")
-                self.done = True
-                self.success = True
-            elif self.lost_and_separating_duration >= 2.0:  # 假设丢失目标的持续时间要求是2秒
-                print(
-                    f">>> 成功逃逸(信息)！(持续丢失目标且距离拉大已持续 {self.lost_and_separating_duration:.1f}s)，仿真提前终止!")
-                self.done = True
-                self.success = True
-
-        # --- 3. 如果回合结束 (done=True)，进行最后的脱靶量计算 ---
-        if self.done and not hasattr(self, 'idx_min'):  # 确保只计算一次
             self.Xt = np.array(self.Xt)
             self.Y = np.array(self.Y)
             self.t = np.array(self.t)
-            # 如果不是因为坠毁/超高导致的失败，就正常计算脱靶量
-            if self.miss_distance is None or self.miss_distance > 0:
-                self.miss_distance, _, _, _, self.idx_min = self.evaluate_miss(self.t, self.Y, self.Xt, self.R_kill)
-
-        # --- 4. 更新 prev_R_rel，为下一步计算做准备 ---
-        self.prev_R_rel = current_R_rel
-
+            self.miss_distance, is_hit, R_all, t_minR, self.idx_min = self.evaluate_miss(self.t, self.Y, self.Xt,
+                                                                                    self.R_kill)
         # print(self.t_now,self.missile_exploded)
         # --- MODIFICATION START ---
         # 在每一步物理更新后，发送数据到Tacview
-        if self.missile_exploded == False and self.tacview_enabled:
+        if self.missile_exploded == False:
             self._send_tacview_data()
         # --- MODIFICATION END ---
 
         # ========================= 飞机动力学模型 =========================
 
-    def aircraft_dynamics2(self, state, dt, nx, nz, p_cmd):
+    def aircraft_dynamics2(self, state, dt, nx, nz, phi2):
         # ================== 坐标系定义 ==================
         # 惯性坐标系 (Inertial Frame):
         #   - 外部状态表示: 北-天-东 (North-Up-East, NUE) -> 用于 state 向量和绘图
@@ -1654,10 +1004,7 @@ class AirCombatEnv:
             return phi, theta, psi
 
         g = 9.81
-        m = 15000.0
-
-        # (中文) 在 aircraft_dynamics2 方法内，或作为 self. 属性
-        MAX_TWR = 1.2  # F-16 的最大推重比
+        m = 1.0
 
         # MODIFIED: 状态向量定义更新为 北-天-东 (NUE)
         # 状态向量: [x(北), y(上), z(东), Vt, theta(俯仰), psi(偏航), phi(滚转)]
@@ -1666,7 +1013,7 @@ class AirCombatEnv:
         # ================== 主循环 (状态NUE, 物理NED/FRD) ==================
 
         # === 解包状态向量 (NUE 格式) ===
-        x_nue, y_nue, z_nue, Vt, theta, psi, phi, p_real = state
+        x_nue, y_nue, z_nue, Vt, theta, psi, phi = state
 
         # === 坐标转换: 从 NUE (状态) 到 NED (物理) ===
         # pos_ned = [North, East, Down]
@@ -1683,47 +1030,16 @@ class AirCombatEnv:
         # --- 核心物理计算 ---
         # 1. 获取控制指令
         # --- 滚转控制 ---
-        # p = p_cmd  #滚转角速度
+        phi_cmd = phi2
         nx_cmd = nx
         nz_cmd = nz
-        # --- (中文) 新增: 飞机空气动力学与阻力计算 ---
 
-        # a) 计算当前飞行环境参数
-        H = y_nue  # 高度 (米)
-        Temper = 15.0
-        T_H = 273 + Temper - 0.6 * H / 100
-        P_H = (1 - H / 44300) ** 5.256
-        rho = 1.293 * P_H * (273 / T_H)
-        Ma = Vt / 340  # 简化马赫数计算
-        q = 0.5 * rho * Vt ** 2  # 动压
-        # b) 定义飞机气动参数 (这些是F-16的典型估算值，可以调整)
-        S = 27.87  # F-16机翼参考面积 (m^2)
-        # c) 计算升力 (Lift) 和 升力系数 (C_L)
-        # 这里的 lift 是AI指令产生的总升力
+        # --- 将过载指令转换为力 ---
+        thrust_minus_drag = nx_cmd * m * g
         lift = nz_cmd * m * g
-        # --- (中文) 核心修改：直接调用新方法计算总阻力系数 C_D ---
-        C_D = self.get_total_drag_coefficient(Ma)
-        # d) 计算总阻力 (Drag)
-        drag = q * S * C_D
-        # --- 将过载指令和计算出的阻力转换为力 ---
-        # 现在的 nx_cmd 代表的是 "推力过载" (Thrust-to-Weight Ratio)
-        # 我们需要计算出实际的推力
-        if nx_cmd >= 0:
-            # --- 推力计算 ---
-            # 将 nx_cmd (0 to 1) 映射到推力百分比 (0 to 1)
-            # 这里的映射关系可以更复杂，但线性映射是一个好的开始
-            # 假设 nx_cmd=1 对应最大推力
-            max_thrust = MAX_TWR * m * g
-            thrust = max_thrust * nx_cmd
-        else:
-            # --- 减速板阻力计算 ---
-            # 将 nx_cmd (-1 to 0) 映射到减速板开启程度 (1 to 0)
-            # 减速板会增加一个巨大的额外阻力
-            thrust = nx_cmd * 0.8 * m * g
 
-        # (中文) 核心修改：净前向力 = 推力 - 阻力
-        thrust_minus_drag = thrust - drag
-
+        # 对升力进行限制，模拟飞机结构极限
+        # lift = np.clip(lift, -3.0 * m * g, 9.0 * m * g)
 
         # 2. MODIFIED: 在机体系(FRD: 前-右-下)中定义气动力
         # 升力 (lift) 产生向上的力, 在 FRD 的 Z 轴 (向下) 是负方向
@@ -1753,23 +1069,8 @@ class AirCombatEnv:
 
         # 7. 混合控制与角速度最终确定
         # 滚转率 p (绕 X 轴) 由直接控制决定
-        # tau_p = 0.1
-        # p_body_cmd = (1 / tau_p) * (phi_cmd - phi)
-
-        # (中文) ================== 新增: 滚转轴一阶动力学模型 ==================
-        # p_cmd 是AI发出的目标滚转角速度
-
-        # 滚转响应时间常数 (超参数，可以调整，值越小响应越快)
-        tau_roll = 0.2
-
-        # p_real 的变化率 p_dot = (p_cmd - p_real) / tau_roll
-        p_dot = (1 / tau_roll) * (p_cmd - p_real)
-
-        # 用欧拉积分更新实际滚转角速度
-        p_real_new = p_real + p_dot * dt
-
-        p_body_cmd = p_real_new   #滚转角速度
-        # p_body_cmd = p_cmd  # 滚转角速度
+        tau_p = 0.1
+        p_body_cmd = (1 / tau_p) * (phi_cmd - phi)
         max_roll_rate = np.deg2rad(240)
         p_body = np.clip(p_body_cmd, -max_roll_rate, max_roll_rate)
 
@@ -1810,31 +1111,9 @@ class AirCombatEnv:
         state2[1] = y_nue_new
         state2[2] = z_nue_new
         state2[3] = Vt_new
-        state2[4:7] = [theta_new, psi_new, phi_new]
-        state2[7] = p_real_new
+        state2[4:] = [theta_new, psi_new, phi_new]
 
         return state2
-
-    def get_total_drag_coefficient(self, Ma):
-        """
-        (最简化模型 v2 - 已修正数值)
-        根据马赫数(Ma)，直接估算一个“中等强度机动”状态下的总阻力系数(C_D)。
-        """
-        if Ma < 0.9:
-            # 亚音速机动状态，升致阻力已经比较显著
-            C_D = 0.10
-        elif Ma < 1.2:
-            # 跨声速区域，激波阻力叠加升致阻力，达到峰值
-            # (线性插值到一个很高的峰值，例如 0.30)
-            C_D = 0.10 + (0.30 - 0.10) * ((Ma - 0.8) / 0.4)
-        elif Ma < 2.0:
-            # 超声速区域，虽然升力效率变差，但阻力仍然很高
-            C_D = 0.30 - (0.30 - 0.20) * ((Ma - 1.2) / 0.8)
-        else:
-            # 高超声速区域，阻力稳定在一个较高的水平
-            C_D = 0.20
-
-        return C_D
     def aircraft_dynamics(self, t, x, control_input, g):
         xt, yt, zt, Vt, theta, psi = x
         n_tx, n_ty, mu_t = control_input(x)
@@ -1893,7 +1172,7 @@ class AirCombatEnv:
 
         # 飞机水平方向单位向量（注意坐标系方向 x前 y上 z右）
         psi_t = x_target[5]  # 飞机偏航角
-        V_body = np.array([np.cos(psi_t), 0.0, np.sin(psi_t)])  # 机头朝向单位向量
+        V_body = np.array([np.cos(psi_t), 0.0, -np.sin(psi_t)])  # 机头朝向单位向量
 
         # 计算夹角 β（视线与机头水平夹角）
         cos_beta = np.dot(V_body, R_proj) / (np.linalg.norm(V_body) * np.linalg.norm(R_proj))
@@ -1902,76 +1181,35 @@ class AirCombatEnv:
 
         return beta
 
-    # def compute_relative_beta2(self, x_target, x_missile):
-    #     """
-    #     输入：
-    #         x_target: 飞机状态向量 [x, y, z, V, theta, psi]
-    #         x_missile: 导弹状态向量 [V, theta, psi, x, y, z]
-    #     输出：
-    #         beta: 目标视线相对于飞机机头水平方向的夹角（弧度）
-    #     """
-    #     # 飞机与导弹相对矢量（R）并投影到水平面（xz）  方向：飞机指向导弹
-    #     R_vec = x_missile[3:6] - x_target[0:3]
-    #     R_proj = np.array([R_vec[0], 0.0, R_vec[2]])
-    #
-    #     # 飞机水平方向单位向量（注意坐标系方向 x前 y上 z右）
-    #     psi_t = x_target[5]  # 飞机偏航角
-    #     V_body = np.array([np.cos(psi_t), 0.0, np.sin(psi_t)])  # 机头朝向单位向量
-    #
-    #     # 计算夹角 β（视线与机头水平夹角）
-    #     cos_beta = np.dot(V_body, R_proj) / (np.linalg.norm(V_body) * np.linalg.norm(R_proj))
-    #     cos_beta = np.clip(cos_beta, -1.0, 1.0)
-    #     beta = np.arccos(cos_beta)
-    #     # 计算向量的叉积
-    #     cross_product = np.cross(R_proj, V_body)
-    #     reference_axis = (0, 1, 0)
-    #     # 检查叉积与参考轴的方向
-    #     if np.dot(cross_product, reference_axis) < 0:
-    #         beta = 2 * np.pi - beta
-    #     print("beta:",np.rad2deg(beta))
-    #     return beta
-
-    # (中文) 在 AirCombatEnv 类中，用这个最终的、更健-壮的版本替换
     def compute_relative_beta2(self, x_target, x_missile):
         """
-        (v3 - 修正版) 计算导弹相对于飞机机头的方位角 (0-2pi)。
-        该版本使用坐标系旋转和 arctan2，比旧的 arccos+cross_product 方法更健壮。
+        输入：
+            x_target: 飞机状态向量 [x, y, z, V, theta, psi]
+            x_missile: 导弹状态向量 [V, theta, psi, x, y, z]
+        输出：
+            beta: 目标视线相对于飞机机头水平方向的夹角（弧度）
         """
-        # 1. 获取飞机的偏航角 (从北向东为正)
-        psi_t = x_target[5]
-
-        # 2. 计算从世界坐标系 (NUE) 旋转到以飞机机头为前方的参考系所需要的旋转矩阵
-        # 这是一个绕 y 轴 (天轴) 的二维旋转
-        cos_psi = np.cos(-psi_t)  # 需要旋转 -psi_t 才能让机头朝向新的 x' 轴
-        sin_psi = np.sin(-psi_t)
-        # 旋转矩阵
-        # R = [[cos, -sin],
-        #      [sin,  cos]]
-        # 我们只关心水平面 xz (北-东)
-
-        # 3. 计算飞机指向导弹的相对位置矢量，并投影到水平面
+        # 飞机与导弹相对矢量（R）并投影到水平面（xz）  方向：飞机指向导弹
         R_vec = x_missile[3:6] - x_target[0:3]
-        R_proj_world = np.array([R_vec[0], R_vec[2]])  # 水平面上的 (x, z) 分量
+        R_proj = np.array([R_vec[0], 0.0, R_vec[2]])
 
-        # 4. 将这个相对位置矢量旋转到以飞机为参考的坐标系下
-        # [x_rel_body] = [cos, -sin] * [x_rel_world]
-        # [z_rel_body]   [sin,  cos]   [z_rel_world]
-        x_rel_body = cos_psi * R_proj_world[0] - sin_psi * R_proj_world[1]
-        z_rel_body = sin_psi * R_proj_world[0] + cos_psi * R_proj_world[1]
+        # 飞机水平方向单位向量（注意坐标系方向 x前 y上 z右）
+        psi_t = x_target[5]  # 飞机偏航角
+        V_body = np.array([np.cos(psi_t), 0.0, -np.sin(psi_t)])  # 机头朝向单位向量
 
-        # 5. 使用 arctan2 直接计算角度
-        # 在这个新的参考系下：
-        # x_rel_body > 0 表示在前半球, < 0 表示在后半球
-        # z_rel_body > 0 表示在右半侧(东), < 0 表示在左半侧(西)
-        # arctan2(z, x) 会给出从 x 轴正方向 (机头) 到该向量的角度
-        threat_angle_rad = np.arctan2(z_rel_body, x_rel_body)
+        # 计算夹角 β（视线与机头水平夹角）
+        cos_beta = np.dot(V_body, R_proj) / (np.linalg.norm(V_body) * np.linalg.norm(R_proj))
+        cos_beta = np.clip(cos_beta, -1.0, 1.0)
+        beta = np.arccos(cos_beta)
+        # 计算向量的叉积
+        cross_product = np.cross(R_proj, V_body)
+        reference_axis = (0, 1, 0)
+        # 检查叉积与参考轴的方向
+        if np.dot(cross_product, reference_axis) < 0:
+            beta = 2 * np.pi - beta
 
-        # 6. 将结果从 [-pi, pi] 转换为 [0, 2pi]
-        if threat_angle_rad < 0:
-            threat_angle_rad += 2 * np.pi
-        # print("threat_angle_rad:", np.rad2deg(threat_angle_rad))
+        return beta
 
-        return threat_angle_rad
         # ========================= 导弹动力学模型 =========================
 
     def missile_dynamics_given_rate(self, y, theta_L_dot, phi_L_dot, N, ny_max, nz_max):
@@ -2215,7 +1453,7 @@ class Flare:
     #         return self.I_max * np.exp(-t_rel / tau)
 
 class FlareManager:
-    def __init__(self, flare_per_group=6, interval=0.1, release_speed=50):
+    def __init__(self, flare_per_group=1, interval=0.1, release_speed=50):
         self.flare_per_group = flare_per_group  #每一组包含6
         self.interval = interval  #每隔0.1秒释放一次
         self.release_speed = release_speed  # 相对释放速度
@@ -2301,16 +1539,15 @@ if __name__ == '__main__':
         # 默认指令: 1g平飞，保持速度，不滚转
         nx = 0.0  # 切向过载
         nz = 1.0  # 法向过载
-        # phi_cmd = env.x_target_now[6]  # 保持当前滚转角
-        p_cmd = 0.0  # 滚转角速度
+        phi_cmd = env.x_target_now[6]  # 保持当前滚转角
         release_flare = 0
 
         # 检测按键
         if keyboard.is_pressed('w'): nz = 9.0
         if keyboard.is_pressed('s'): nz = -2.0
-        if keyboard.is_pressed('a'): p_cmd -= np.deg2rad(60)   # 按住时持续滚转
-        if keyboard.is_pressed('d'): p_cmd = np.deg2rad(60)   # 按住时持续滚转
-        if keyboard.is_pressed('shift'): nx = 1.0
+        if keyboard.is_pressed('a'): phi_cmd -= np.deg2rad(60)   # 按住时持续滚转
+        if keyboard.is_pressed('d'): phi_cmd += np.deg2rad(60)   # 按住时持续滚转
+        if keyboard.is_pressed('shift'): nx = 2.0
         if keyboard.is_pressed('ctrl'): nx = -1.0
         if keyboard.is_pressed('f'): release_flare = 1
         if keyboard.is_pressed('q'):
@@ -2318,7 +1555,7 @@ if __name__ == '__main__':
             break
 
         # 将指令打包为action
-        action = [nx, nz, p_cmd, release_flare]
+        action = [nx, nz, phi_cmd, release_flare]
 
         # --- 2.2. 执行仿真步 ---
         obs, reward, done, _, _ = env.step(action)

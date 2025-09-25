@@ -1,22 +1,15 @@
-# -*- coding: utf-8 -*-
-# @Time:    29/4/2025 下午9:19
-# @Author:  Zeming M
-# @File:    Run
-# @IDE:     PyCharm
-# -*- coding: utf-8 -*-
-# @Time:    1/5/2025 下午5:33
-# @Author:  Zeming M
-# @File:    env
-# @IDE:     PyCharm
 import gym
 import torch
 import numpy as np
 import random
-from PPO_model.PPO_Continuous import *
+from PPO_model.Hybrid_PPO_不修正 import *
+from PPO_model.Hybrid_PPO_jsbsim import *
 from PPO_model.Config import *
 from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
 from env.AirCombatEnv6_maneuver_flare import *
+from env.missile_evasion_environment.missile_evasion_environment import *
+from env.missile_evasion_environment_jsbsim.Vec_missile_evasion_environment_jsbsim import *
 import time
 
 LOAD_ABLE = False  #是否使用save文件夹中的模型
@@ -44,7 +37,7 @@ agent = PPO_continuous(LOAD_ABLE)
 global_step = 0               #总交互步数
 success_num = 0
 for i_episode in range(100000):
-    observation = np.array(env.reset())    #自己写的环境可以改为 env.reset()   这个函数返回初始化时的观测状态
+    observation, info = env.reset(seed=AGENTPARA.RANDOM_SEED)   #自己写的环境可以改为 env.reset()   这个函数返回初始化时的观测状态
 
     # <<<--- 在这里检查 ---<<<
     if np.isnan(observation).any():
@@ -54,64 +47,23 @@ for i_episode in range(100000):
     # rewards = 0
     done = False
     step = 0
+    global_reward = 0
     action_list = []
     for t in range(10000):
+        agent.prep_eval_rl()    #交互经验的时候不会传梯度
+        with torch.no_grad():   #交互时梯度不回传
+            env_action, action_tanh, prob = agent.choose_action(observation)
+            value = agent.get_value(observation).cpu().detach().numpy()
+            state = observation
+        observation, reward, done, _, _ = env.step(env_action)
+        global_reward += reward
+        agent.buffer.store_transition(state, value, action_tanh, prob, reward, done)  # 收集经验
 
-        #env.render()        #这个是可视化的  自己写的环境可以注释掉
-        #print(round(env.t_now, 2))
-        if t % (round(env.dt_dec/env.dt_normal)) == 0:
-            if t != 0:
-                # reward = (reward + 10.0) / 20.0
-                agent.buffer.store_transition(state, value, action_tanh, prob, reward, done)     #收集经验
-                # rewards = 0
-                global_step += 1
-                step += 1
-            agent.prep_eval_rl()    #交互经验的时候不会传梯度
-            with torch.no_grad():   #交互时梯度不回传
-                env_action, action_tanh, prob = agent.choose_action(observation)
-                # env_action = env_action[0]
+        global_step += 1
+        step += 1
 
-                # 2. 打印出即将送入环境的动作的所有信息
-                # print("\n" + "=" * 50)
-                # print(f"DEBUG: 即将执行 env.step(env_action)")
-                # print(f"  - env_action 的类型: {type(env_action)}")
-                # print(f"  - env_action 的形状: {env_action.shape}")
-                # print(f"  - env_action 的内容: {env_action}")
-                # print("=" * 50 + "\n")
-                # --- 调试代码结束 ---
-                # action = action.cpu().detach().numpy()
-                # action_list.append(np.array([round(env.t_now, 2), action[0], action[1]]))
-                # prob = prob.cpu().detach().numpy()
-                value = agent.get_value(observation).cpu().detach().numpy()
-                state = observation
-
-            observation, reward, done, reward_4,_ = env.step(env_action)
-            # rewards = reward
-            # agent.buffer.store_transition(state, value, action, prob, rewards, done)  # 收集经验
-            # if done:
-            #     agent.buffer.store_transition(state, value, action, prob, reward, done)  # 收集经验
-            #     # rewards = 0
-            #     global_step += 1
-            #     step += 1
-            #     print("Episode {} finished after {} timesteps,仿真时间t = {}".format(i_episode+1, step+1,round(env.t_now, 2)))
-            #     if env.success:
-            #         success_num += 1
-            #     if (i_episode + 1) % 100 == 0:
-            #         print("每一百回合飞机存活次数{} ".format(success_num))
-            #         success_num = 0
-            #     break
-        else:
-            action1 = np.array([env_action[0], env_action[1], env_action[2], 0])
-            #rewards += reward
-            observation, reward, done, info, _ = env.step(action1)
-            # rewards = reward
-        reward += reward_4
         if done:
-            agent.buffer.store_transition(state, value, action_tanh, prob, reward, done)  # 收集经验
-            # rewards = 0
-            global_step += 1
-            step += 1
-            print("Episode {} finished after {} timesteps,仿真时间t = {}s".format(i_episode+1, step+1,round(env.t_now, 2)))
+            print("Episode {} finished after {} timesteps,仿真时间t = {}s,回合奖励:{}".format(i_episode+1, step,round(env.t_now, 2), global_reward))
             if env.success:
                 success_num += 1
             if (i_episode + 1) % 100 == 0:
@@ -125,14 +77,13 @@ for i_episode in range(100000):
                                   )
                 success_num = 0
             break
-    # print(np.array(action_list))
     #env.render()        #这个是可视化的  自己写的环境可以注释掉
     if i_episode % 10 == 0 and i_episode != 0:  # 每交互10局训练一次
         print("train, global_step:{}".format(global_step))
         agent.prep_training_rl()
         train_info = agent.learn()  # 获得训练中的信息，用于绘制图表
         for item in list(train_info.keys()):
-            writer.add_scalar(item,
+            writer.add_scalar(f"train/{item}",  # 加上 "train/" 前缀
                               train_info[item],
                               global_step=global_step
                               )
@@ -141,40 +92,18 @@ for i_episode in range(100000):
         print("eval, global_step:{}".format(global_step))
         with torch.no_grad():
             done_eval = False
-            observation_eval = np.array(env.reset())  # 自己写的环境可以改为 env.reset()   这个函数返回初始化时的观测状态
+            observation_eval, info = env.reset(seed=AGENTPARA.RANDOM_SEED)  # 自己写的环境可以改为 env.reset()   这个函数返回初始化时的观测状态
             reward_sum = 0
             step = 0
             reward_eval = 0
-            reward_4 = 0
             for t in range(10000):
-                if t % (round(env.dt_dec/env.dt_normal)) == 0:
-                    # dist = agent.Actor(observation_eval)  # 在验证时采用确定的策略，而不是采样
-                    # action_eval_tanh = dist.mean
-                    # action_eval = agent.scale_action(action_eval_tanh)
-                    # action_eval = action_eval.cpu().detach().numpy()
-                    # action_eval = action_eval[0]
-                    action_eval, _, _ = agent.choose_action(observation_eval, deterministic=True)
-
-                    # reward = (reward_eval + reward_4 + 10.0) / 20.0
-                    # reward_sum += reward
-                    reward_sum += reward_eval + reward_4
-
-                    observation_eval, reward_eval, done_eval, reward_4, _ = env.step(action_eval)
-                    # reward_sum += reward_eva
-                    step += 1
-                else:
-                    # action_eval1 = np.array([0, action_eval[1]])
-                    action_eval1 = np.array([action_eval[0], action_eval[1], action_eval[2], 0])
-                    observation_eval, reward_eval, done_eval, info, _ = env.step(action_eval1)
-                    # reward_sum += reward_eval
-                    # step += 1
+                action_eval, _, _ = agent.choose_action(observation_eval, deterministic=True)
+                observation_eval, reward_eval, done_eval, _, _ = env.step(action_eval)
+                reward_sum += reward_eval
+                step += 1
                 if done_eval:
-                    reward_sum += reward_eval
                     break
-
             writer.add_scalar('reward_sum',
                               reward_sum,
                               global_step=global_step
                               )
-
-#env.close()

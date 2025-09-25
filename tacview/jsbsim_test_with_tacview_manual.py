@@ -62,7 +62,7 @@ class Tacview(object):
 if tacview_show:
     tacview = Tacview()
 
-t_total = 90  # 总时间（秒）
+t_total = 600  # 总时间（秒）
 dt = 0.02
 
 # 启动 JSBSim
