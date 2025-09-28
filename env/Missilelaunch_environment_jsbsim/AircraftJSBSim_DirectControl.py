@@ -14,9 +14,11 @@ class Aircraft:
     使用 JSBSim 作为飞行动力学模型的适配器类。
     向外暴露统一的标准单位 (米、米/秒、弧度)。
     """
-    def __init__(self, dt: float, initial_state: np.ndarray):
+    def __init__(self, dt: float, initial_state: np.ndarray, name: str = "Aircraft", color: str = "Green"):
         self.dt = dt
         self.state = np.zeros(8, dtype=float)  # [x,y,z,Vt,theta,psi,phi,p_real]
+        self.name = name
+        self.color = color
 
         # --- 1. 创建并初始化 FDM 实例 ---
         self.fdm = jsbsim.FGFDMExec(None)   # 只创建一次
@@ -185,22 +187,3 @@ class Aircraft:
         # 从 NED (北-东-地) 转换到 NUE (北-天-东)
         v_nue = np.array([v_ned[0], -v_ned[2], v_ned[1]])
         return v_nue
-
-    def get_normal_g_force(self) -> float:
-        """
-        直接从JSBSim获取法向过载(nz)。
-        注意JSBSim的符号约定：拉杆时nz为负。
-        """
-        # 属性名称可能是 'accelerations/nz-pilot-g' 或 'accelerations/nz-g'
-        # 请根据您的JSBSim配置确认
-        return self.fdm.get_property_value('accelerations/Nz')
-
-    def beta_deg(self):
-        '''
-        计算并返回飞机的侧滑角 (beta)，单位：弧度。
-        侧滑角定义为：beta = arcsin(v / Vt)
-        其中 v 是机体侧向速度分量，Vt 是总速度。
-        '''
-        # 获取弧度值
-        return self.fdm.get_property_value('aero/beta-rad')
-

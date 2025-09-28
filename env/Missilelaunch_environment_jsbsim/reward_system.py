@@ -5,6 +5,7 @@ import math
 
 # (中文) 导入对象类，以便进行类型提示和访问状态
 from .AircraftJSBSim_DirectControl import Aircraft
+from .aircraft import AircraftPointMass
 from .missile import Missile
 
 
@@ -16,6 +17,13 @@ class RewardCalculator:
 
     def __init__(self):
         # --- 在这里集中定义所有奖励相关的超参数 ---
+
+        # [态势评估奖励参数 - 来自图片]
+        # 距离优势参数 (单位: 米)
+        self.D_RMAX = 17700.0  # (d_rmax) 导弹最大射程
+        self.D_MMAX = 12000.0  # (d_mmax) 导弹攻击区远界 (估算值)
+        self.D_MK = 6000.0  # (d_mk)   导弹不可逃逸区边界 (估算值)
+        self.D_MMIN = 1000.0  # (d_mmin) 导弹攻击区近界 (估算值)
 
         # [稀疏奖励参数]
         self.W = 50  # 成功奖励基准
@@ -40,25 +48,12 @@ class RewardCalculator:
         self.OPTIMAL_SPEED_FLOOR_MACH = 0.8
         self.K_SPEED_FLOOR_PENALTY = -2.0
 
-        self.DIVE_OUTER_BOUNDARY_M = 7000.0  # 奖励开始出现的外部边界
-        self.DIVE_INNER_BOUNDARY_M = 3000.0  # 奖励达到最大权重的内部边界
-        self.MAX_DIVE_SPEED_MS = 300.0
-
-        self.OPTIMAL_DIVE_ANGLE_DEG = -30.0  # 定义我们认为最理想的俯冲角
-        self.DIVE_ANGLE_WIDTH_DEG = 30.0  # 定义奖励曲线的“宽度”，越大越宽容
-
-        self.COORDINATION_BONUS_FACTOR = 0.5
-
         # --- 状态变量 ---
         self.prev_missile_v_mag = None
-        self.prev_los_vec = None
-        self.prev_velocity_vec = None
-        self.MAX_G_LIMIT = -5.0  # 假设飞机的结构极限
 
     def reset(self):
         """为新回合重置状态变量。"""
         self.prev_missile_v_mag = None
-        self.prev_los_vec = None
         # 注意：持续滚转的计时器现在不在这个类里，因为它依赖于环境的dt，
         # 最好由主环境管理。或者在这里接收dt进行更新。为简化，我们先假设它在主环境中。
 
@@ -74,50 +69,73 @@ class RewardCalculator:
             return self.U
 
     # --- (中文) 密集奖励接口 ---
-    def calculate_dense_reward(self, aircraft: Aircraft, missile: Missile,
-                               remaining_flares: int, total_flares: int, action: list) -> float:
+    def calculate_dense_reward(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
         """
         计算并返回当前时间步的总密集奖励。
         这是从主环境调用的唯一接口。
         """
         # 1. 计算所有独立的奖励/惩罚组件
-        reward_posture = 1.0 * self._compute_missile_posture_reward_blend(missile, aircraft)
-        reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #高度惩罚阶跃
-        reward_resource = 0.1 * self._compute_resource_penalty(action[4], remaining_flares, total_flares)
-        reward_roll_penalty = 0.8 * self._penalty_for_roll_rate_magnitude(aircraft)
-        reward_speed_penalty = 1.0 * self._penalty_for_dropping_below_speed_floor(aircraft)
+        reward_altitude = self._compute_altitude_reward(my_aircraft)
+        reward_roll_penalty = self._penalty_for_roll_rate_magnitude(my_aircraft)
+        reward_speed_penalty = self._penalty_for_dropping_below_speed_floor(my_aircraft)
         reward_survivaltime = 0.2  # 每步存活奖励
-        reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
-        # reward_dive = self._reward_for_tactical_dive_smooth(aircraft, missile)
-        reward_coordinated_turn = self._reward_for_coordinated_turn(aircraft, 0.2)
-        reward_dive = self._reward_for_optimal_dive_angle(aircraft, missile)
-
-
+        reward_situational_advantage = self.calculate_situational_advantage_reward(my_aircraft, opponent_aircraft)
 
         # 2. 将所有组件按权重加权求和 (权重直接在此处定义，与您的代码一致)
         final_dense_reward = (
-                reward_posture +
-                reward_altitude +
-                reward_resource +
-                reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的
-                reward_speed_penalty  # reward_for_optimal_speed基准是负的
+                0.5 * reward_altitude +
+                0.8 * reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的
+                1.0 * reward_speed_penalty  # reward_for_optimal_speed基准是负的
                 + reward_survivaltime
-                + reward_los
-                + reward_dive
-                + reward_coordinated_turn
+                + reward_situational_advantage
         )
-        # print(f"reward_posture: {reward_posture:.2f}",
-        #       # f"reward_altitude: {reward_altitude:.2f}",
-        #       # f"reward_resource: {reward_resource:.2f}",
-        #       # f"reward_roll_penalty: {reward_roll_penalty:.2f}",
-        #       # f"reward_speed_penalty: {reward_speed_penalty:.2f}",
-        #       #   f"reward_survivaltime: {reward_survivaltime:.2f}",
-        #         f"reward_los: {reward_los:.2f}",
-        #         f"reward_dive: {reward_dive:.2f}",
-        #         f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
+        # print(f"reward_posture: {1.0 * reward_posture:.2f}",
+        #       f"reward_altitude: {0.5 * reward_altitude:.2f}",
+        #       f"reward_resource: {0.2 * reward_resource:.2f}",
+        #       f"reward_aspect: {1.0 * reward_aspect:.2f}",
+        #       f"reward_roll_penalty: {0.8 * reward_roll_penalty:.2f}",
+        #       f"reward_speed_penalty: {1.0 * reward_speed_penalty:.2f}",
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
+
+    # ==========================================================================
+    # --- <<< 新增：基于图片的态势优势奖励函数 >>> ---
+    # ==========================================================================
+
+    def calculate_situational_advantage_reward(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+        """
+        根据图片中的四个公式，计算我方相对于敌方的综合态势优势奖励。
+
+        Args:
+            my_aircraft (Aircraft): 我方飞机对象。
+            opponent_aircraft (Aircraft): 敌方飞机对象。
+
+        Returns:
+            float: 综合态势优势得分。
+        """
+        # 1. 分别计算四个维度的优势值
+        f_phi = self._compute_angular_advantage(my_aircraft, opponent_aircraft)
+        f_v = self._compute_velocity_advantage(my_aircraft, opponent_aircraft)
+        f_h = self._compute_altitude_advantage(my_aircraft, opponent_aircraft)
+        f_d = self._compute_distance_advantage(my_aircraft, opponent_aircraft)
+
+        # 2. 组合奖励 (这里使用简单的加权求和，权重可以调整)
+        #    您可以根据任务需求为每个部分分配不同的权重。
+        w_phi = 0.4  # 角度权重
+        w_v = 0.15  # 速度权重
+        w_h = 0.15  # 高度权重
+        w_d = 0.3  # 距离权重
+
+        total_advantage_reward = (w_phi * f_phi +
+                                  w_v * f_v +
+                                  w_h * f_h +
+                                  w_d * f_d)
+
+        # (可选) 打印每个分量，用于调试
+        # print(f"Advantage -> Angle: {f_phi:.2f}, Vel: {f_v:.2f}, Alt: {f_h:.2f}, Dist: {f_d:.2f} | Total: {total_advantage_reward:.2f}")
+
+        return total_advantage_reward
 
     # --- (中文) 下面是所有从您主环境文件中迁移过来的、正在使用的私有奖励计算方法 ---
 
@@ -182,6 +200,96 @@ class RewardCalculator:
         # 9. 返回最终计算出的奖励值 (原步骤8)
         return reward * 1.0
 
+    def _compute_angular_advantage(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+        """ (1) 角度优势评估函数 f_phi (公式13) """
+        # 计算目标方位角 (phi_r): 我机机头与目标的夹角
+        my_heading_psi = my_aircraft.state_vector[5]
+        los_vector = opponent_aircraft.pos - my_aircraft.pos
+        # 将LOS向量投影到水平面
+        los_horizontal = np.array([los_vector[0], los_vector[2]])
+        # 计算相对于我机机头的角度
+        phi_r = self._calculate_horizontal_angle(my_heading_psi, los_horizontal)
+
+        # 计算目标进入角 (q_r): 目标机头与我机的夹角
+        opponent_heading_psi = opponent_aircraft.state_vector[5]
+        los_vector_inv = my_aircraft.pos - opponent_aircraft.pos
+        # 将反向LOS向量投影到水平面
+        los_horizontal_inv = np.array([los_vector_inv[0], los_vector_inv[2]])
+        # 计算相对于目标机头的角度
+        q_r = self._calculate_horizontal_angle(opponent_heading_psi, los_horizontal_inv)
+
+        # 应用公式 (13)
+        f_phi = 1 - (np.abs(phi_r) + np.abs(q_r)) / (2 * np.pi)
+        return np.clip(f_phi, 0, 1)  # 确保结果在[0, 1]范围内
+
+    def _compute_velocity_advantage(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+        """ (2) 速度优势评估函数 f_v (公式14) """
+        v_r = my_aircraft.velocity
+        v_b = opponent_aircraft.velocity
+
+        if v_b < 1e-6:  # 避免除零错误
+            return 0.1
+
+        ratio = v_r / v_b
+
+        if ratio < 0.6:
+            return 0.1
+        elif 0.6 <= ratio <= 1.5:
+            return (v_r / v_b) - 0.5
+        else:  # ratio > 1.5
+            return 1.0
+
+    def _compute_altitude_advantage(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+        """ (3) 高度优势评估函数 f_h (公式15) """
+        h_r = my_aircraft.pos[1]
+        h_b = opponent_aircraft.pos[1]
+
+        delta_h_km = (h_r - h_b) / 1000.0  # 高度差，单位：千米
+
+        if delta_h_km >= 5:
+            return 1.0
+        elif -5 < delta_h_km < 5:
+            return 0.5 + 0.1 * delta_h_km
+        else:  # delta_h_km <= -5
+            return 0.0
+
+    def _compute_distance_advantage(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+        """ (4) 距离优势评估函数 f_d (公式16) """
+        d = np.linalg.norm(my_aircraft.pos - opponent_aircraft.pos)
+
+        d_rmax = self.D_RMAX
+        d_mmax = self.D_MMAX
+        d_mk = self.D_MK
+        d_mmin = self.D_MMIN
+
+        if d >= d_rmax:
+            return 0.18 * np.exp(-(d - d_rmax) / d_rmax)
+        elif d_mmax <= d < d_rmax:
+            return 0.5 * np.exp((d - d_mmax) / (d_rmax - d_mmax))
+        elif d_mk <= d < d_mmax:
+            power = -(d - d_mk) / (d_mmax - d_mk)
+            return np.power(2, power)  # 这是一个复杂的函数，直接翻译
+        elif d_mmin <= d < d_mk:
+            return 1.0
+        else:  # d < d_mmin
+            return 0.0
+
+    # --- (中文) 这是一个用于计算角度的辅助函数 ---
+    def _calculate_horizontal_angle(self, heading_psi: float, vector_horizontal: np.ndarray) -> float:
+        """
+        计算一个水平向量相对于给定的偏航角(heading)的角度。
+        返回 [-pi, pi] 范围内的弧度值。
+        """
+        # 将世界坐标系下的向量旋转到以机头为参考的坐标系
+        cos_psi = np.cos(-heading_psi)
+        sin_psi = np.sin(-heading_psi)
+
+        x_body = cos_psi * vector_horizontal[0] - sin_psi * vector_horizontal[1]
+        z_body = sin_psi * vector_horizontal[0] + cos_psi * vector_horizontal[1]
+
+        # 使用arctan2计算角度，z_body对应y轴，x_body对应x轴
+        return np.arctan2(z_body, x_body)
+
     def _compute_missile_posture_reward_pure_posture(self, missile: Missile, aircraft: Aircraft):
         """
         (v5 - 纯姿态版) 计算导弹姿态奖励。
@@ -224,46 +332,6 @@ class RewardCalculator:
 
         # 5. 返回最终计算出的奖励值
         return reward * 1.0
-
-    def _compute_missile_posture_reward_blend(self, missile: Missile, aircraft: Aircraft):
-        """
-        (v6 - 平滑融合版)
-        距离阈值：
-            d <= 4 km : 仅使用三九奖励
-            d >= 5 km : 仅使用纯姿态奖励
-            4 km < d < 5 km : 两者线性混合
-        """
-        # 0. 距离计算
-        los_vec_m_to_a = aircraft.pos[0:3] - missile.pos[0:3]
-        distance = np.linalg.norm(los_vec_m_to_a)
-
-        # --- 三九奖励 ---
-        reward_three_nine = self._reward_for_aspect_angle(aircraft, missile)
-
-        # --- 纯姿态奖励 ---
-        missile_v_vec = missile.get_velocity_vector()
-        aircraft_v_vec = aircraft.get_velocity_vector()
-        norm_product = np.linalg.norm(missile_v_vec) * np.linalg.norm(aircraft_v_vec) + 1e-6
-        angle_cos = np.dot(missile_v_vec, aircraft_v_vec) / norm_product
-        angle_cos = np.clip(angle_cos, -1.0, 1.0)
-        reward_pure = angle_cos
-
-        # ATA失锁检查
-        norm_product_ata = np.linalg.norm(los_vec_m_to_a) * np.linalg.norm(missile_v_vec) + 1e-6
-        cos_ata = np.dot(los_vec_m_to_a, missile_v_vec) / norm_product_ata
-        cos_ata = np.clip(cos_ata, -1.0, 1.0)
-        if cos_ata < 0 and reward_pure < 0:
-            reward_pure = 0.0
-
-        # --- 平滑融合 ---
-        if distance <= 4000.0:
-            return reward_three_nine
-        elif distance >= 5000.0:
-            return reward_pure
-        else:
-            # 在 4-5 km 之间线性混合
-            alpha = (distance - 4000.0) / 1000.0  # 0~1
-            return (1 - alpha) * reward_three_nine + alpha * reward_pure
 
     def _compute_altitude_reward(self, aircraft: Aircraft):
         """
@@ -311,8 +379,7 @@ class RewardCalculator:
     def _reward_for_aspect_angle(self, aircraft: Aircraft, missile: Missile):
         """(组件A - v5版，增加了对垂直机动的抑制)"""
         current_R_rel = np.linalg.norm(aircraft.pos - missile.pos)
-        # distance_weight = 1.0 - np.clip(current_R_rel / self.ASPECT_REWARD_EFFECTIVE_RANGE, 0.0, 1.0)
-        distance_weight = 1.0
+        distance_weight = 1.0 - np.clip(current_R_rel / self.ASPECT_REWARD_EFFECTIVE_RANGE, 0.0, 1.0)
         if distance_weight <= 0.0: return 0.0
         # --- (中文) 核心修正：只有在非极端俯仰角时才计算该奖励 ---# 定义一个俯仰角阈值，例如70度。只有当飞机不那么“垂直”时，三九线奖励才有效。
         pitch_rad = aircraft.state_vector[4]
@@ -342,7 +409,7 @@ class RewardCalculator:
         #    (当前速率 / 最大速率)
         #    防止除零错误
         normalized_roll_rate = abs(p_real_rad_s) / self.MAX_PHYSICAL_ROLL_RATE_RAD_S
-        return (normalized_roll_rate ** 2) * -1.0  # 返回基准值[0,1]
+        return normalized_roll_rate * -1.0  # 返回基准值[0,1]
 
     def _penalty_for_dropping_below_speed_floor(self, aircraft: Aircraft):
         """
@@ -402,192 +469,3 @@ class RewardCalculator:
         # print("threat_angle_rad:", np.rad2deg(threat_angle_rad))
 
         return threat_angle_rad
-
-    # 新的奖励函数:
-    def _reward_for_los_rate(self, aircraft: Aircraft, missile: Missile, dt: float):
-        """
-        (V2 - 修正版) 奖励视线矢量的角速度。
-        新增了安全门控：只在飞机处于导弹前半球时才计算奖励。
-        """
-        # 1. 计算当前的视线矢量 (从导弹指向飞机)
-        current_los_vec = aircraft.pos - missile.pos
-        norm_current = np.linalg.norm(current_los_vec)
-
-        # --- 核心修正：增加前向扇区门控 ---
-        # a) 获取导弹的速度矢量
-        missile_v_vec = missile.get_velocity_vector()
-        norm_missile_v = np.linalg.norm(missile_v_vec)
-
-        # b) 避免除零错误
-        if norm_current < 1e-6 or norm_missile_v < 1e-6:
-            # 如果距离过近或导弹静止，则不计算奖励
-            self.prev_los_vec = current_los_vec  # 别忘了更新状态
-            return 0.0
-
-        # c) 计算ATA角的余弦值
-        # cos(ATA) = (LOS · V_missile) / (|LOS| * |V_missile|)
-        cos_ata = np.dot(current_los_vec, missile_v_vec) / (norm_current * norm_missile_v)
-
-        # d) 如果飞机在导弹后半球 (ATA > 90度, cos(ATA) < 0)，则奖励为0
-        if cos_ata < 0:
-            self.prev_los_vec = current_los_vec  # 仍然需要更新状态以备下一帧
-            return 0.0
-        # --- 修正结束 ---
-
-        # 如果是第一步，则初始化并返回0
-        if self.prev_los_vec is None:
-            self.prev_los_vec = current_los_vec
-            return 0.0
-
-        # 2. 计算角速度 (原逻辑)
-        norm_prev = np.linalg.norm(self.prev_los_vec)
-        if norm_prev < 1e-6:
-            self.prev_los_vec = current_los_vec
-            return 0.0
-
-        current_los_unit_vec = current_los_vec / norm_current
-        prev_los_unit_vec = self.prev_los_vec / norm_prev
-
-        dot_product = np.clip(np.dot(current_los_unit_vec, prev_los_unit_vec), -1.0, 1.0)
-        angle_rad = np.arccos(dot_product)
-
-        los_angular_rate_rad_s = angle_rad / dt if dt > 1e-6 else 0.0
-
-        # 5. 更新历史记录
-        self.prev_los_vec = current_los_vec
-
-        # 6. 返回缩放后的奖励值
-        return los_angular_rate_rad_s * 0.5
-
-    def _reward_for_tactical_dive_smooth(self, aircraft: Aircraft, missile: Missile):
-        """
-        (平滑版) 在导弹接近时，奖励向下的俯冲机动。
-        奖励在内外边界之间平滑增长。
-        """
-        distance = np.linalg.norm(aircraft.pos - missile.pos)
-
-        # 1. 计算平滑的距离权重
-        if distance > self.DIVE_OUTER_BOUNDARY_M:
-            distance_weight = 0.0
-        elif distance < self.DIVE_INNER_BOUNDARY_M:
-            distance_weight = 1.0
-        else:
-            # 在 [DIVE_INNER_BOUNDARY_M, DIVE_OUTER_BOUNDARY_M] 区间内线性插值
-            # 公式: 1 - (当前值 - 下限) / (上限 - 下限)
-            distance_weight = 1.0 - (distance - self.DIVE_INNER_BOUNDARY_M) / (
-                        self.DIVE_OUTER_BOUNDARY_M - self.DIVE_INNER_BOUNDARY_M)
-
-        if distance_weight <= 0:
-            return 0.0
-
-        # 2. 获取并检查垂直速度
-        vertical_velocity = aircraft.get_velocity_vector()[1]
-        if vertical_velocity >= 0:
-            return 0.0  # 只有俯冲时才奖励
-
-        # 3. 计算基础的速度奖励
-        dive_speed = -vertical_velocity
-        normalized_speed_reward = np.clip(dive_speed / self.MAX_DIVE_SPEED_MS, 0, 1.0)
-
-        # 4. 最终奖励 = 速度奖励 * 平滑的距离权重
-        reward = normalized_speed_reward * distance_weight
-        return reward
-
-    def _reward_for_optimal_dive_angle(self, aircraft: Aircraft, missile: Missile):
-        """
-        (V2 - 角度优化版) 奖励飞机以一个最优角度进行战术俯冲。
-        """
-        distance = np.linalg.norm(aircraft.pos - missile.pos)
-
-        # 1. 计算平滑的距离权重 (这部分逻辑保持不变)
-        if distance > self.DIVE_OUTER_BOUNDARY_M:
-            distance_weight = 0.0
-        elif distance < self.DIVE_INNER_BOUNDARY_M:
-            distance_weight = 1.0
-        else:
-            distance_weight = 1.0 - (distance - self.DIVE_INNER_BOUNDARY_M) / (
-                    self.DIVE_OUTER_BOUNDARY_M - self.DIVE_INNER_BOUNDARY_M)
-
-        if distance_weight <= 0:
-            return 0.0
-
-        # 2. 获取飞机俯冲角并计算角度奖励因子
-        try:
-            pitch_rad = aircraft.state_vector[4]  # 获取俯仰角 theta
-            pitch_deg = np.rad2deg(pitch_rad)
-        except IndexError:
-            return 0.0
-
-        # a) 只在俯冲时（俯仰角为负）才计算奖励
-        if pitch_deg >= 0:
-            return 0.0
-
-        # b) 计算当前角度与最优角度的差距
-        angle_error_deg = abs(pitch_deg - self.OPTIMAL_DIVE_ANGLE_DEG)
-
-        # c) 使用高斯函数计算角度因子
-        #    当 angle_error_deg = 0 时, 因子为 exp(0) = 1 (最大)
-        #    当 angle_error_deg 变大时, 因子平滑下降
-        angle_factor = math.exp(-(angle_error_deg ** 2) / (2 * self.DIVE_ANGLE_WIDTH_DEG ** 2))
-
-        # 3. 最终奖励 = 角度因子 * 平滑的距离权重
-        reward = angle_factor * distance_weight
-        # print(f"Distance: {distance:.1f} m, Weight: {distance_weight:.2f}, Pitch: {pitch_deg:.1f} deg, AngleErr: {angle_error_deg:.1f} deg, AngleF: {angle_factor:.2f}, Reward: {reward:.3f}")
-        return reward
-
-        # 这是一个辅助函数，如果您的飞机类没有提供旋转矩阵，可以用这个
-        # 您需要把它放在 RewardCalculator 类的内部
-
-    def _get_rotation_matrix_from_euler(self, roll, pitch, yaw):
-        """从欧拉角（phi, theta, psi）创建从机体到世界的旋转矩阵。"""
-        cr, sr = math.cos(roll), math.sin(roll)
-        cp, sp = math.cos(pitch), math.sin(pitch)
-        cy, sy = math.cos(yaw), math.sin(yaw)
-
-        # ZYX 顺序 (Yaw-Pitch-Roll)
-        R = np.array([
-            [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
-            [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
-            [-sp, sr * cp, cr * cp]
-        ])
-        return R
-
-    def _reward_for_coordinated_turn(self, aircraft: Aircraft, dt: float):
-        """
-        (V5 - 最终版) 直接从JSBSim读取nz，只奖励正确的拉杆转弯。
-        这个版本简单、直接且不会出错。
-        """
-        # 1. 计算滚转因子 (请务必最后一次确认滚转角的正确索引，很可能是[3]！)
-        try:
-            roll_rad = aircraft.state_vector[6]  # <--- 滚转角 phi
-        except IndexError:
-            return 0.0
-
-        roll_factor = math.sin(abs(roll_rad))
-        if abs(np.rad2deg(roll_rad)) > 90:
-            roll_factor = math.sin(math.pi - abs(roll_rad))
-        roll_factor = np.clip(roll_factor, 0, 1.0)
-
-        # 2. 直接从飞机对象获取法向G力 (nz)
-        try:
-            nz = aircraft.get_normal_g_force()
-        except AttributeError:
-            print("错误: 您的 Aircraft 类中没有 get_normal_g_force() 方法。请先实现它。")
-            return 0.0
-
-        # 3. 根据JSBSim的符号约定计算G力因子
-        #    平飞: nz = -1.0 G -> positive_g = 1.0 G
-        #    2G转弯: nz = -2.0 G -> positive_g = 2.0 G
-        positive_g = nz
-
-        # G力因子是超过1G的部分
-        g_factor = min(0, positive_g - 1) / (self.MAX_G_LIMIT - 1)
-        g_factor = np.clip(g_factor, 0, 1.0)
-
-        # 4. 最终奖励
-        reward = -1.0 * roll_factor * g_factor
-
-        # 调试打印
-        # print(f"RollF: {roll_factor:.2f} | NZ: {nz:.2f} | G_F: {g_factor:.2f} | Reward: {reward:.3f}")
-
-        return reward

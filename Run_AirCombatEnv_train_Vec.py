@@ -19,11 +19,11 @@ LOAD_ABLE = False  # 是否从 'save/' 文件夹加载预训练模型
 TACVIEW_ENABLED_DURING_TRAINING = False  # 是否为第一个并行环境开启Tacview
 # 只有在评估时才可能开启Tacview，训练时关闭以提高效率
 TACVIEW_ENABLED_DURING_EVAL = False
-NUM_ENVS = 10  # <<<--- 并行环境的数量 ---<<<
+NUM_ENVS = 4  # <<<--- 并行环境的数量 ---<<<
 RANDOM_SEED = AGENTPARA.RANDOM_SEED
 COLLECTION_EPISODES = 10  # 每收集10个回合的数据后，进行一次学习
 EVALUATION_EPISODES = 1  # 每次评估时，运行5个回合来计算平均奖励
-
+UPDATE_INTERVAL = 2048   # 每收集 2048 个 step 后更新一次 (可调)
 
 # ========================= 辅助函数 =========================
 def set_seed(seed=RANDOM_SEED):
@@ -78,6 +78,7 @@ if __name__ == "__main__":
     # --- 4. 主训练循环 ---
     global_step = 0
     episodes_collected = 0
+    steps_collected = 0  # ✅ 用步数来控制更新
     total_episodes_trained = 0
 
     # 用于统计成功率
@@ -98,7 +99,9 @@ if __name__ == "__main__":
 
         episode_rewards = [0] * NUM_ENVS  # 记录每个并行环境的当前回合奖励
 
-        while episodes_collected < COLLECTION_EPISODES:
+        # while episodes_collected < COLLECTION_EPISODES:
+        # ✅ 持续收集，直到累计的环境总步数达到 UPDATE_INTERVAL
+        while steps_collected < UPDATE_INTERVAL:
             with torch.no_grad():
                 # Agent 根据批量观测选择动作
                 env_actions, actions_to_store, log_probs = agent.choose_action(observations, deterministic=False)
@@ -124,6 +127,7 @@ if __name__ == "__main__":
                 episode_rewards[i] += rewards[i]
 
             global_step += NUM_ENVS  # 每次 step，总步数增加 NUM_ENVS
+            steps_collected += NUM_ENVS  # 本轮累计步数
             observations = next_observations
 
             # 检查是否有环境结束
@@ -166,7 +170,9 @@ if __name__ == "__main__":
 #                 observations[dones_idx] = reset_obs
 
         # --- 4.2 学习阶段 ---
-        print(f"\n--- 收集了 {episodes_collected} 个回合, 开始学习. Global Step: {global_step} ---")
+        # print(f"\n--- 收集了 {episodes_collected} 个回合, 开始学习. Global Step: {global_step} ---")
+        # ✅ 固定步数收集完成 -> 训练一次
+        print(f"\n--- 收集 {steps_collected} 步, 开始学习. Global Step: {global_step} ---")
         agent.prep_training_rl()
         train_info = agent.learn()
 
@@ -175,6 +181,7 @@ if __name__ == "__main__":
             writer.add_scalar(f"train/{key}", value, global_step=global_step)
 
         episodes_collected = 0  # 重置收集计数器
+        steps_collected = 0  # 重置累计步数计数器
 
         # --- 4.3 评估阶段 (使用单个环境) ---
         print(f"--- 开始评估 (单个回合) ---")
@@ -212,7 +219,7 @@ if __name__ == "__main__":
             print(f"--- 过去 {total_completed_episodes} 回合的成功率: {success_rate:.2f}% (成功 {success_num} 次) ---")
             writer.add_scalar('success_num', success_rate, global_step=global_step)
 
-            if success_rate >= 80:
+            if success_rate >= 90:
                 print(f"*** 成功率达到 {success_rate:.2f}%, 保存模型! ***")
                 agent.save(f"success_{int(success_rate)}_ep{total_episodes_trained}")
 

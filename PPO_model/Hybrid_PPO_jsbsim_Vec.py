@@ -406,12 +406,12 @@ class PPO_continuous(object):
                 # old_prob: 确保是一维向量 [B]
                 old_prob = check(old_probs[batch]).to(**ACTOR_PARA.tpdv).view(-1)
                 # advantage: 确保是列向量 [B, 1]
-                # advantage = check(advantages[batch]).to(**ACTOR_PARA.tpdv).view(-1, 1)
+                advantage = check(advantages[batch]).to(**ACTOR_PARA.tpdv).view(-1, 1)
 
-                advantage = check(advantages[batch]).to(**ACTOR_PARA.tpdv).view(-1, 1)  # 这里 advantage 还是 (B,)
-                # 在这里进行 mini-batch 内部的优势标准化
-                advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-                # advantage = advantage.unsqueeze(-1)  # 然后再增加维度
+                # advantage = check(advantages[batch]).to(**ACTOR_PARA.tpdv).view(-1, 1)  # 这里 advantage 还是 (B,)
+                # # 在这里进行 mini-batch 内部的优势标准化
+                # advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+                # # advantage = advantage.unsqueeze(-1)  # 然后再增加维度
 
                 # 从 Buffer 中分离出连续动作的原始值 u 和离散动作
                 u_from_buffer = action_batch[:, :CONTINUOUS_DIM]
@@ -467,12 +467,12 @@ class PPO_continuous(object):
                 value_pred_clipped = old_value_from_buffer + \
                                      torch.clamp(new_value - old_value_from_buffer, -AGENTPARA.epsilon,
                                                  AGENTPARA.epsilon)
-
-                # 2. 计算两个损失
+                #
+                # # 2. 计算两个损失
                 loss_unclipped = torch.nn.functional.mse_loss(new_value, return_)
                 loss_clipped = torch.nn.functional.mse_loss(value_pred_clipped, return_)
-
-                # 3. 取两者中较大的一个作为最终损失
+                #
+                # # 3. 取两者中较大的一个作为最终损失
                 critic_loss = 0.5 * torch.max(loss_unclipped, loss_clipped)
 
                 # (乘以 0.5 是常见做法，也可以不乘)

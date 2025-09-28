@@ -3,8 +3,8 @@ from torch.nn import *
 # <<< 混合动作空间 >>> 导入伯努利分布用于离散动作
 from torch.distributions import Bernoulli, Categorical, TransformedDistribution
 from torch.distributions import Normal, TanhTransform
-from PPO_model.Config import *
-from PPO_model.Buffer import *
+from PPO_model.Config_launch import *
+from PPO_model.Buffer_launch import *
 from torch.optim import lr_scheduler
 import numpy as np
 import os
@@ -16,7 +16,7 @@ import re
 # --- 动作空间配置 ---
 # 定义连续和离散动作的维度
 CONTINUOUS_DIM = 4  # 更改为 4: 油门, 升降舵, 副翼, 方向舵
-DISCRETE_DIM = 1    # 离散动作的数量 (例如: flare)
+DISCRETE_DIM = 1    # 离散动作的数量 (fire_missile)
 # 定义连续动作的键名，用于后续的动作缩放
 # <<< 更改 >>> 定义连续动作的键名
 CONTINUOUS_ACTION_KEYS = ['throttle', 'elevator', 'aileron', 'rudder']
@@ -29,7 +29,7 @@ ACTION_RANGES = {
     'elevator': {'low': -1.0, 'high': 1.0},  # 升降舵指令范围 [-1, 1]
     'aileron':  {'low': -1.0, 'high': 1.0},  # 副翼指令范围 [-1, 1]
     'rudder':   {'low': -1.0, 'high': 1.0},  # 方向舵指令范围 [-1, 1]
-    'flare':    {'low': 0.0,  'high': 1.0}        # 离散动作的逻辑范围 (这里用不上，但保持完整性)
+    'missile':    {'low': 0.0,  'high': 1.0}        # 离散动作的逻辑范围 (这里用不上，但保持完整性)
 }
 
 class Actor(Module):
@@ -45,6 +45,7 @@ class Actor(Module):
     def __init__(self):
         super(Actor, self).__init__()
         self.input_dim = ACTOR_PARA.input_dim
+        # print(f"Actor 网络输入维度: {self.input_dim}")
         # <<< 混合动作空间 >>> output_dim 是所有动作分布所需的参数总数
         # 输出维度 = (连续动作数量 * 2 (均值mu, 标准差log_std)) + (离散动作数量 (logits))
         self.output_dim = (CONTINUOUS_DIM * 2) + DISCRETE_DIM
@@ -98,7 +99,7 @@ class Actor(Module):
         # 3. 【动作掩码】逻辑
         # 假设 obs_tensor 的第 7 个特征 (索引为7) 代表红外诱饵弹数量
         # has_flares_info 的形状是 (B)
-        has_flares_info = obs_tensor[:, 7]
+        has_flares_info = obs_tensor[:, 4]
         # 创建一个掩码，当没有诱饵弹时为 True
         mask = (has_flares_info == 0)
 
@@ -341,7 +342,9 @@ class PPO_continuous(object):
             # 9. 准备发送到环境的最终动作
             #    连续部分需要被缩放到环境的实际范围
             env_action_cont = self.scale_action(action_cont_tanh)
-            final_env_action_tensor = torch.cat([env_action_cont, action_disc], dim=-1)
+            # 创建一个全零的 "flare" 占位符
+            dummy_flare_action = torch.zeros_like(action_disc)
+            final_env_action_tensor = torch.cat([env_action_cont, dummy_flare_action, action_disc], dim=-1)
         # 将 Tensors 转换为 Numpy 数组
         action_to_store_np = action_to_store.cpu().numpy()
         log_prob_to_store_np = total_log_prob.cpu().numpy()
@@ -502,13 +505,13 @@ class PPO_continuous(object):
     def save1(self):
         for net in ['Actor', 'Critic']:
             try:
-                torch.save(getattr(self, net).state_dict(), "save/" + net + ".pkl")
+                torch.save(getattr(self, net).state_dict(), "save_launch/" + net + ".pkl")
             except Exception as e:
                 print(f"模型保存失败: {e}")
     def save(self, prefix=""):
         for net in ['Actor', 'Critic']:
             try:
-                filename = f"save/{prefix}_{net}.pkl" if prefix else f"save/{net}.pkl"
+                filename = f"save/{prefix}_{net}.pkl" if prefix else f"save_launch/{net}.pkl"
                 torch.save(getattr(self, net).state_dict(), filename)
             except:
                 print("write_error")

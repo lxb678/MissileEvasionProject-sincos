@@ -68,7 +68,7 @@ for i_episode in range(100000):
                 success_num += 1
             if (i_episode + 1) % 100 == 0:
                 print("每一百回合飞机存活次数{} ".format(success_num))
-                if success_num >= 80:
+                if success_num >= 90:
                     # agent.save()
                     agent.save(f"success_{success_num}_ep{i_episode + 1}")
                 writer.add_scalar('success_num',
