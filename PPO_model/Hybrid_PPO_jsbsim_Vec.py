@@ -9,6 +9,7 @@ from torch.optim import lr_scheduler
 import numpy as np
 import os
 import re
+import time
 ##PPO算法：解决梯度爆炸   动作采用tanh缩放的话，经验池存储原始动作u，可以不用雅可比修正动作对数概率log. （用了雅可比修正也不会爆炸，暂时不清楚为什么），如果用反tanh算原始动作u就会有误差，就会梯度爆炸
 ## 如果动作为加速度，观测状态中有速度，可以对速度进行裁剪，不会爆炸；如果观测状态没有速度，对环境的速度进行裁剪会爆炸，因为同一观测状态导致不同结果
 # 优势标准化不用了、Minibatch可以留
@@ -182,6 +183,17 @@ class PPO_continuous(object):
         self.gae_lambda = AGENTPARA.lamda
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
+
+        # <<< 3. 在初始化时，为本次训练运行生成一个唯一的时间戳 >>>
+        # 格式为 "年-月-日_时-分-秒"，例如 "2023-10-27_15-30-45"
+        self.training_start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
+
+        # 定义基础保存目录
+        self.base_save_dir = "save/saveVec"
+
+        # 构建本次训练专用的文件夹路径
+        self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
+
         # 加载预训练模型
         if load_able:
             # 推荐使用新的加载逻辑，如果旧逻辑仍需保留，可以取消注释
@@ -500,7 +512,7 @@ class PPO_continuous(object):
         train_info['actor_lr'] = self.Actor.optim.param_groups[0]['lr']
         train_info['critic_lr'] = self.Critic.optim.param_groups[0]['lr']
         # 保存模型
-        self.save1()
+        self.save()
         return train_info
 
     # --- 实用方法 ---
@@ -521,10 +533,46 @@ class PPO_continuous(object):
                 torch.save(getattr(self, net).state_dict(), "save/saveVec/Vec" + net + ".pkl")
             except Exception as e:
                 print(f"模型保存失败: {e}")
+    # def save(self, prefix=""):
+    #     for net in ['Actor', 'Critic']:
+    #         try:
+    #             filename = f"save/saveVec/Vec{prefix}_{net}.pkl" if prefix else f"save/saveVec/Vec{net}.pkl"
+    #             torch.save(getattr(self, net).state_dict(), filename)
+    #         except:
+    #             print("write_error")
     def save(self, prefix=""):
+        """
+        将模型保存到以训练开始时间命名的专属文件夹中。
+
+        Args:
+            prefix (str, optional): 文件名的前缀，可用于标记回合数或最佳模型。
+                                    例如: save(prefix="episode_5000")
+        """
+        try:
+            # <<< 4. 确保本次训练的专属文件夹存在，如果不存在则创建 >>>
+            # os.makedirs(..., exist_ok=True) 是一个安全的操作，
+            # 如果文件夹已存在，它不会报错。
+            os.makedirs(self.run_save_dir, exist_ok=True)
+            print(f"模型将被保存至: {self.run_save_dir}")
+
+        except Exception as e:
+            print(f"创建模型文件夹 {self.run_save_dir} 失败: {e}")
+            return  # 如果文件夹创建失败，则不继续执行
+
+        # 循环保存 Actor 和 Critic 网络
         for net in ['Actor', 'Critic']:
             try:
-                filename = f"save/saveVec/Vec{prefix}_{net}.pkl" if prefix else f"save/saveVec/Vec{net}.pkl"
-                torch.save(getattr(self, net).state_dict(), filename)
-            except:
-                print("write_error")
+                # <<< 5. 构建带有前缀和网络名的完整文件名 >>>
+                # 如果 prefix 为空, 文件名为 "Actor.pkl" 或 "Critic.pkl"
+                # 如果 prefix 为 "best", 文件名为 "best_Actor.pkl"
+                filename = f"{prefix}_{net}.pkl" if prefix else f"{net}.pkl"
+
+                # <<< 6. 构建最终的完整文件路径 >>>
+                full_path = os.path.join(self.run_save_dir, filename)
+
+                # 执行保存操作
+                torch.save(getattr(self, net).state_dict(), full_path)
+                print(f"  - {filename} 保存成功。")
+
+            except Exception as e:
+                print(f"  - 保存模型 {net} 到 {full_path} 时发生错误: {e}")

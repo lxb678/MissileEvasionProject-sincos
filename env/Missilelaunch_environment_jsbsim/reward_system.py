@@ -1,5 +1,5 @@
 # 文件: reward_system.py (已修正，精确匹配您的代码)
-
+from typing import Union # <<< 1. 导入 Union
 import numpy as np
 import math
 
@@ -7,6 +7,8 @@ import math
 from .AircraftJSBSim_DirectControl import Aircraft
 from .aircraft import AircraftPointMass
 from .missile import Missile
+# <<< 3. 创建一个可以代表任何一种飞机的类型别名 >>>
+AnyAircraft = Union[Aircraft, AircraftPointMass]
 
 
 class RewardCalculator:
@@ -25,13 +27,14 @@ class RewardCalculator:
         self.D_MK = 6000.0  # (d_mk)   导弹不可逃逸区边界 (估算值)
         self.D_MMIN = 1000.0  # (d_mmin) 导弹攻击区近界 (估算值)
 
-        # [稀疏奖励参数]
-        self.W = 50  # 成功奖励基准
-        self.U = -50  # 失败固定惩罚
+        # --- [稀疏奖励参数] ---
+        self.WIN_REWARD = 100.0
+        self.LOSS_PENALTY = -100.0
+        self.DRAW_PENALTY = -100.0  # 根据您的代码，平局也惩罚
 
         # [高度惩罚参数]
-        self.SAFE_ALTITUDE_M = 1000.0
-        self.DANGER_ALTITUDE_M = 500.0
+        self.SAFE_ALTITUDE_M = 3000.0 #1000.0
+        self.DANGER_ALTITUDE_M = 1000.0 #500.0
         self.KV_MS = 0.2 * 340
         self.MAX_ALTITUDE_M = 12000.0
         self.OVER_ALTITUDE_PENALTY_FACTOR = 0.5
@@ -57,44 +60,75 @@ class RewardCalculator:
         # 注意：持续滚转的计时器现在不在这个类里，因为它依赖于环境的dt，
         # 最好由主环境管理。或者在这里接收dt进行更新。为简化，我们先假设它在主环境中。
 
-    # --- (中文) 稀疏奖励接口 ---
-    def get_sparse_reward(self, miss_distance: float, R_kill: float) -> float:
+    # --- <<< 核心修改：功能完整的稀疏奖励方法 >>> ---
+    def get_sparse_reward(self, my_status_alive: bool, opponent_status_alive: bool) -> float:
         """
-        计算最终的事件奖励。
-        这个方法精确地复制了您原来的 compute_sparse_reward_1 逻辑。
+        根据我方和敌方的最终存活状态，计算稀疏奖励。
+        这是一个通用函数，从调用者的视角进行判断。
+
+        Args:
+            my_status_alive (bool): 我方智能体是否存活。
+            opponent_status_alive (bool): 敌方智能体是否存活。
+
+        Returns:
+            float: 对应的稀疏奖励值 (+100, -100)。
         """
-        if miss_distance > R_kill:
-            return self.W
-        else:
-            return self.U
+        # # 1. 我方胜利: 我方存活，敌方被击落
+        # if my_status_alive and not opponent_status_alive:
+        #     return self.WIN_REWARD
+        #
+        # # 2. 我方失败: 我方被击落，敌方存活
+        # elif not my_status_alive and opponent_status_alive:
+        #     return self.LOSS_PENALTY
+        #
+        # # 3. 平局: 其他所有情况 (双方都存活或双方都被击落)
+        # else:
+        #     return self.DRAW_PENALTY
+
+
+        #这里训练红方机动，只要最后红方死了就惩罚，不给奖励，奖励为密集奖励
+        # 1. 我方胜利: 我方存活，敌方被击落
+        if my_status_alive and not opponent_status_alive:
+            return 0
+
+        # 2. 我方失败: 我方被击落，敌方存活
+        elif not my_status_alive and opponent_status_alive:
+            return self.LOSS_PENALTY
+
+        # 3. 平局: 其他所有情况 (双方都存活或双方都被击落)
+        elif not my_status_alive and not opponent_status_alive:
+            return self.DRAW_PENALTY
+
+        else:    #都活着
+            return 0
 
     # --- (中文) 密集奖励接口 ---
-    def calculate_dense_reward(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+    def calculate_dense_reward(self, my_aircraft: AnyAircraft, opponent_aircraft: AnyAircraft) -> float:
         """
         计算并返回当前时间步的总密集奖励。
         这是从主环境调用的唯一接口。
         """
         # 1. 计算所有独立的奖励/惩罚组件
-        reward_altitude = self._compute_altitude_reward(my_aircraft)
-        reward_roll_penalty = self._penalty_for_roll_rate_magnitude(my_aircraft)
-        reward_speed_penalty = self._penalty_for_dropping_below_speed_floor(my_aircraft)
+        reward_altitude = 0.5 * self._compute_altitude_reward(my_aircraft)
+        reward_roll_penalty = 0.8 * self._penalty_for_roll_rate_magnitude(my_aircraft)
+        reward_speed_penalty = 1.0 * self._penalty_for_dropping_below_speed_floor(my_aircraft)
         reward_survivaltime = 0.2  # 每步存活奖励
-        reward_situational_advantage = self.calculate_situational_advantage_reward(my_aircraft, opponent_aircraft)
+        reward_situational_advantage = 1.0 * self.calculate_situational_advantage_reward(my_aircraft, opponent_aircraft)
 
         # 2. 将所有组件按权重加权求和 (权重直接在此处定义，与您的代码一致)
         final_dense_reward = (
-                0.5 * reward_altitude +
-                0.8 * reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的
-                1.0 * reward_speed_penalty  # reward_for_optimal_speed基准是负的
+                reward_altitude +
+                reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的
+                reward_speed_penalty  # reward_for_optimal_speed基准是负的
                 + reward_survivaltime
                 + reward_situational_advantage
         )
-        # print(f"reward_posture: {1.0 * reward_posture:.2f}",
-        #       f"reward_altitude: {0.5 * reward_altitude:.2f}",
-        #       f"reward_resource: {0.2 * reward_resource:.2f}",
-        #       f"reward_aspect: {1.0 * reward_aspect:.2f}",
-        #       f"reward_roll_penalty: {0.8 * reward_roll_penalty:.2f}",
-        #       f"reward_speed_penalty: {1.0 * reward_speed_penalty:.2f}",
+        # print(
+        #       f"reward_altitude: {reward_altitude:.2f}",
+        #       f"reward_roll_penalty: {reward_roll_penalty:.2f}",
+        #       f"reward_speed_penalty: {reward_speed_penalty:.2f}",
+        #         # f"reward_survivaltime: {reward_survivaltime:.2f}",
+        #         f"reward_situational_advantage: {reward_situational_advantage:.2f}",
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
@@ -103,7 +137,7 @@ class RewardCalculator:
     # --- <<< 新增：基于图片的态势优势奖励函数 >>> ---
     # ==========================================================================
 
-    def calculate_situational_advantage_reward(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+    def calculate_situational_advantage_reward(self, my_aircraft: AnyAircraft, opponent_aircraft: AnyAircraft) -> float:
         """
         根据图片中的四个公式，计算我方相对于敌方的综合态势优势奖励。
 
@@ -122,10 +156,10 @@ class RewardCalculator:
 
         # 2. 组合奖励 (这里使用简单的加权求和，权重可以调整)
         #    您可以根据任务需求为每个部分分配不同的权重。
-        w_phi = 0.4  # 角度权重
-        w_v = 0.15  # 速度权重
-        w_h = 0.15  # 高度权重
-        w_d = 0.3  # 距离权重
+        w_phi = 0.3  # 角度权重
+        w_v = 0.2  # 速度权重
+        w_h = 0.3  # 高度权重
+        w_d = 0.2  # 距离权重
 
         total_advantage_reward = (w_phi * f_phi +
                                   w_v * f_v +
@@ -200,7 +234,7 @@ class RewardCalculator:
         # 9. 返回最终计算出的奖励值 (原步骤8)
         return reward * 1.0
 
-    def _compute_angular_advantage(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+    def _compute_angular_advantage(self, my_aircraft: AnyAircraft, opponent_aircraft: AnyAircraft) -> float:
         """ (1) 角度优势评估函数 f_phi (公式13) """
         # 计算目标方位角 (phi_r): 我机机头与目标的夹角
         my_heading_psi = my_aircraft.state_vector[5]
@@ -222,7 +256,7 @@ class RewardCalculator:
         f_phi = 1 - (np.abs(phi_r) + np.abs(q_r)) / (2 * np.pi)
         return np.clip(f_phi, 0, 1)  # 确保结果在[0, 1]范围内
 
-    def _compute_velocity_advantage(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+    def _compute_velocity_advantage(self, my_aircraft: AnyAircraft, opponent_aircraft: AnyAircraft) -> float:
         """ (2) 速度优势评估函数 f_v (公式14) """
         v_r = my_aircraft.velocity
         v_b = opponent_aircraft.velocity
@@ -239,7 +273,7 @@ class RewardCalculator:
         else:  # ratio > 1.5
             return 1.0
 
-    def _compute_altitude_advantage(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+    def _compute_altitude_advantage(self, my_aircraft: AnyAircraft, opponent_aircraft: AnyAircraft) -> float:
         """ (3) 高度优势评估函数 f_h (公式15) """
         h_r = my_aircraft.pos[1]
         h_b = opponent_aircraft.pos[1]
@@ -253,7 +287,7 @@ class RewardCalculator:
         else:  # delta_h_km <= -5
             return 0.0
 
-    def _compute_distance_advantage(self, my_aircraft: Aircraft, opponent_aircraft: AircraftPointMass) -> float:
+    def _compute_distance_advantage(self, my_aircraft: AnyAircraft, opponent_aircraft: AnyAircraft) -> float:
         """ (4) 距离优势评估函数 f_d (公式16) """
         d = np.linalg.norm(my_aircraft.pos - opponent_aircraft.pos)
 

@@ -36,20 +36,36 @@ class Aircraft:
         可以在环境的 reset() 中调用。
         """
         self.state[:] = np.array(initial_state, dtype=float)
-
         x_m, y_m, z_m, vt_mps, theta_rad, psi_rad, phi_rad, p_rad_s = initial_state
-        self.fdm['ic/h-sl-ft']       = y_m * M_TO_FT
-        self.fdm['ic/vc-kts']        = vt_mps * MPS_TO_KTS
-        self.fdm['ic/theta-deg']     = theta_rad * RAD_TO_DEG
-        self.fdm['ic/psi-true-deg']  = psi_rad * RAD_TO_DEG
-        self.fdm['ic/phi-deg']       = phi_rad * RAD_TO_DEG
 
-        # 关键步骤：run_ic() 构建发动机/气动面等内部模型
+        # 位姿/高度（保持你原来的写法）
+        self.fdm['ic/h-sl-ft'] = y_m * M_TO_FT
+        self.fdm['ic/theta-deg'] = theta_rad * RAD_TO_DEG
+        self.fdm['ic/psi-true-deg'] = psi_rad * RAD_TO_DEG
+        self.fdm['ic/phi-deg'] = phi_rad * RAD_TO_DEG
+
+        # ---- 关键：选择正确的 airspeed IC ----
+        # 如果 initial_state[3] 表示 真空速 (TAS, m/s) -> 写 ic/vt-kts
+        self.fdm['ic/vt-kts'] = vt_mps * MPS_TO_KTS
+
+        # 如果 initial_state[3] 表示 仪表速度/校准空速 (CAS) -> 写 ic/vc-kts
+        # self.fdm['ic/vc-kts'] = vt_mps * MPS_TO_KTS
+
+        # ---- 清除/固定风场（排除风的影响） ----
+        self.fdm['atmosphere/wind-north-fps'] = 0.0
+        self.fdm['atmosphere/wind-east-fps'] = 0.0
+        self.fdm['atmosphere/wind-down-fps'] = 0.0
+
+        # 运行初始化（run_ic 可能会调整内部状态）
         if not self.fdm.run_ic():
             raise RuntimeError("JSBSim run_ic() 失败，请检查初始条件。")
 
-        # 启动发动机
-        self.fdm['propulsion/engine[0]/set-running'] = 1
+        # 启动发动机（注意：set-running 不一定会自动给出推力，详见下面说明）
+        self.fdm['propulsion/engine[0]/set-running'] = -1
+
+        # 读取并打印 JSBSim 的真实速度（供调试）
+        vt_fps = float(self.fdm['velocities/vt-fps'])  # true airspeed (ft/s)
+        # print(f"After run_ic: vt = {vt_fps * FPS_TO_MPS:.2f} m/s  (vt-fps={vt_fps:.2f} fps)")
 
         return self.state
 

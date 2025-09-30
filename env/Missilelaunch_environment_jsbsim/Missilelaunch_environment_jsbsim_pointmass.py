@@ -30,7 +30,7 @@ class AirCombatEnv:
         self.max_disengagement_range = 40000.0  # 最大脱离距离
         # --- 弹药库 ---
         self.initial_missiles = 2
-        self.initial_flares = 24
+        self.initial_flares = 50 #24
         # --- <<< 从规避环境中引入的导引头参数 >>> ---
         self.D_max = 30000.0  # 导引头最大搜索范围 (m)
         self.Angle_IR_rad = np.deg2rad(90)  # 导引头最大视场角度 (弧度)
@@ -53,8 +53,8 @@ class AirCombatEnv:
         self.blue_alive = True
 
         # --- 核心组件实例化 ---
-        initial_state = np.array([0, 1000, 0, 200, 0.1, 0.0, 0.0, 0.0])
-        self.aircraft = Aircraft(dt=self.dt_normal, initial_state=initial_state)
+        # initial_state = np.array([0, 1000, 0, 200, 0.1, 0.0, 0.0, 0.0])
+        # self.aircraft = Aircraft(dt=self.dt_normal, initial_state=initial_state)
         self.missile = None
         self.flare_manager = FlareManager(flare_per_group=1)
         self.reward_calculator = RewardCalculator()
@@ -64,6 +64,15 @@ class AirCombatEnv:
         self.prev_missile_state = None
         self.prev_R_rel = None
         self.prev_theta_L, self.prev_phi_L = None, None
+
+        # --- <<< 新增：用于控制日志打印的状态标志 >>> ---
+        self.log_flags = {
+            'red_continue_evade_logged': False,
+            'blue_continue_evade_logged': False,
+            # --- <<< 新增：用于控制诱饵弹投放打印的状态标志 >>> ---
+            'red_is_flaring': False,
+            'blue_is_flaring': False
+        }
 
         # 历史记录 (用于可视化和计算)
         self.history = {
@@ -102,6 +111,13 @@ class AirCombatEnv:
         self.red_flare_manager.reset()
         self.blue_flare_manager.reset()
 
+        # --- <<< 核心修正：在 reset 时重置日志标志 >>> ---
+        self.log_flags['red_continue_evade_logged'] = False
+        self.log_flags['blue_continue_evade_logged'] = False
+        # --- <<< 核心修正：在 reset 时重置新标志 >>> ---
+        self.log_flags['red_is_flaring'] = False
+        self.log_flags['blue_is_flaring'] = False
+
         for key in self.history:
             if isinstance(self.history[key], list):
                 self.history[key].clear()
@@ -111,41 +127,46 @@ class AirCombatEnv:
         # --- 3. 重置所有组件 ---
         self.flare_manager.reset()
         self.reward_calculator.reset()
+        # 3. (可选但推荐) 重置用于计算变化率的状态变量
+        self.prev_aircraft_state = None
+        self.prev_missile_state = None
+        self.prev_R_rel = None
+        self.prev_theta_L, self.prev_phi_L = None, None
 
-        # --- 2. 设置初始对抗场景 (例如: 30km 迎头对冲) ---
-        altitude = 8000.0
-        initial_speed = 250.0  # m/s
-        separation = 20000.0
-
-        # 红方初始状态 (向东飞行)
-        red_initial_state = np.array([
-            0, altitude, -separation / 2,  # pos (x, y, z)
-            initial_speed,  # Vel (m/s)
-            0.0,  # theta (pitch)
-            np.deg2rad(90),  # psi (heading, east)
-            0.0,  # phi (roll)
-            0.0  # roll rate
-        ])
-        if self.red_aircraft is None:
-            self.red_aircraft = Aircraft(dt=self.dt_normal, initial_state=red_initial_state, name="F-16", color="Red")
-        else:
-            self.red_aircraft.reset(initial_state=red_initial_state)
-            # (可选) 如果 reset 后希望属性保持一致，也可以在这里设置
-            self.red_aircraft.name = "F-16"
-            self.red_aircraft.color = "Red"
-
-        self.red_aircraft.missile_ammo = self.initial_missiles
-        self.red_aircraft.flare_ammo = self.initial_flares
-
-        # 蓝方初始状态 (向西飞行)
-        blue_initial_state = np.array([
-            0, altitude, separation / 2,  # pos (x, y, z)
-            initial_speed,  # Vel (m/s)
-            0.0,  # theta (pitch)
-            np.deg2rad(-90),  # psi (heading, west)
-            0.0,  # phi (roll)
-            0.0  # roll rate
-        ])
+        # # --- 2. 设置初始对抗场景 (例如: 30km 迎头对冲) ---
+        # altitude = 8000.0
+        # initial_speed = 250.0  # m/s
+        # separation = 20000.0
+        #
+        # # 红方初始状态 (向东飞行)
+        # red_initial_state = np.array([
+        #     0, altitude, -separation / 2,  # pos (x, y, z)
+        #     initial_speed,  # Vel (m/s)
+        #     0.0,  # theta (pitch)
+        #     np.deg2rad(90),  # psi (heading, east)
+        #     0.0,  # phi (roll)
+        #     0.0  # roll rate
+        # ])
+        # if self.red_aircraft is None:
+        #     self.red_aircraft = Aircraft(dt=self.dt_normal, initial_state=red_initial_state, name="F-16", color="Red")
+        # else:
+        #     self.red_aircraft.reset(initial_state=red_initial_state)
+        #     # (可选) 如果 reset 后希望属性保持一致，也可以在这里设置
+        #     self.red_aircraft.name = "F-16"
+        #     self.red_aircraft.color = "Red"
+        #
+        # self.red_aircraft.missile_ammo = self.initial_missiles
+        # self.red_aircraft.flare_ammo = self.initial_flares
+        #
+        # # 蓝方初始状态 (向西飞行)
+        # blue_initial_state = np.array([
+        #     0, altitude, separation / 2,  # pos (x, y, z)
+        #     initial_speed,  # Vel (m/s)
+        #     0.0,  # theta (pitch)
+        #     np.deg2rad(-90),  # psi (heading, west)
+        #     0.0,  # phi (roll)
+        #     0.0  # roll rate
+        # ])
         # if self.blue_aircraft is None:
         #     self.blue_aircraft = AircraftPointMass(dt=self.dt_normal, initial_state=blue_initial_state,name="F-16", color="Blue")
         # else:
@@ -155,6 +176,101 @@ class AirCombatEnv:
         #
         # self.blue_aircraft.missile_ammo = self.initial_missiles
         # self.blue_aircraft.flare_ammo = self.initial_flares
+
+        # --- 2. 设置随机化的初始对抗场景 (最终版) ---
+        # 定义随机化参数
+        separation = 10000.0  # 蓝方与红方的初始距离 (米)
+        ALTITUDE_RANGE = [5000.0, 10000.0]  # 高度随机范围 (米)
+        ALTITUDE_OFFSET_RANGE = [-2000.0, 2000.0]  # 蓝方相对红方的高度偏移范围 (米)
+        SPEED_RANGE_MS = [200.0, 400.0]  # 速度随机范围 (米/秒, 约 0.7-1.1马赫)
+        PITCH_CHOICES_DEG = [-30.0, 30.0]  # 俯仰角随机选项 (度)
+        MIN_SAFE_ALTITUDE = 1500.0  # 防止随机化后高度过低的安全下限
+
+        # --- 红方初始状态 ---
+        # 位置: 水平坐标为原点 (0, 0)
+        # 高度: 在指定范围内随机
+        # 俯仰角: 在 -30 或 +30 度中随机选择
+        # 速度: 在指定范围内随机
+        red_altitude = np.random.uniform(ALTITUDE_RANGE[0], ALTITUDE_RANGE[1])
+        red_speed = np.random.uniform(SPEED_RANGE_MS[0], SPEED_RANGE_MS[1])
+        red_pitch_deg = np.random.choice(PITCH_CHOICES_DEG)
+        # red_speed = 400
+        # red_pitch_deg = 0
+        red_pitch_rad = np.deg2rad(red_pitch_deg)
+
+        red_initial_state = np.array([
+            0.0, red_altitude, 0.0,  # pos (x, y, z) -> 北=0, 天=随机, 东=0
+            red_speed,  # Vel (m/s) -> 随机速度
+            red_pitch_rad,  # theta (pitch) -> 随机俯仰角
+            np.deg2rad(90),  # psi (heading) -> 默认朝向东
+            0.0,  # phi (roll)
+            0.0  # roll rate
+        ])
+        #测试时的状态
+        red_initial_state = np.array([
+            0.0, 5000.0, 0.0,  # pos (x, y, z) -> 北=0, 天=随机, 东=0
+            300.0,  # Vel (m/s) -> 随机速度
+            0.0,  # theta (pitch) -> 随机俯仰角
+            np.deg2rad(90),  # psi (heading) -> 默认朝向东
+            0.0,  # phi (roll)
+            0.0  # roll rate
+        ])
+
+        # (这部分逻辑保持不变，用于创建或重置飞机对象)
+        if self.red_aircraft is None:
+            self.red_aircraft = Aircraft(dt=self.dt_normal, initial_state=red_initial_state, name="F-16", color="Red")
+        else:
+            self.red_aircraft.reset(initial_state=red_initial_state)
+        self.red_aircraft.name = "F-16"
+        self.red_aircraft.color = "Red"
+        self.red_aircraft.missile_ammo = self.initial_missiles
+        self.red_aircraft.flare_ammo = self.initial_flares
+
+        # --- 蓝方初始状态 ---
+        # 位置: 在以红方为中心、半径10km的圆上随机一点
+        # 高度: 为蓝方高度增加随机偏移                                        不与红方相同，以保证初始能量公平
+        # 朝向: 始终朝向红方 (原点)
+        # 速度: 在指定范围内独立随机
+
+        # a. 在圆上随机生成一个角度
+        random_angle_rad = np.random.uniform(0, 2 * np.pi)
+
+        # b. 根据角度计算蓝方的水平坐标 (北, 东)
+        blue_x_pos = separation * np.cos(random_angle_rad)  # 北向坐标
+        blue_z_pos = separation * np.sin(random_angle_rad)  # 东向坐标
+        altitude_offset = np.random.uniform(ALTITUDE_OFFSET_RANGE[0], ALTITUDE_OFFSET_RANGE[1])
+        blue_altitude = red_altitude + altitude_offset
+        # 增加一个安全检查，确保蓝方的最终高度不会低于安全下限
+        blue_altitude = max(blue_altitude, MIN_SAFE_ALTITUDE)
+        # blue_altitude = red_altitude  # 保持高度一致
+
+        # c. 计算蓝方朝向红方(0,0)所需的偏航角
+        blue_heading_rad = np.arctan2(-blue_z_pos, -blue_x_pos)
+
+        # d. 独立随机化蓝方速度
+        blue_speed = np.random.uniform(SPEED_RANGE_MS[0], SPEED_RANGE_MS[1])
+        # blue_speed = 400
+
+        # blue_initial_state = np.array([
+        #     blue_x_pos, blue_altitude, blue_z_pos,  # pos (x, y, z) -> 在圆上的随机位置
+        #     blue_speed,  # Vel (m/s) -> 随机速度
+        #     0.0,  # theta (pitch) -> 初始平飞
+        #     # blue_heading_rad,  # psi (heading) -> 确保朝向红方
+        #     np.deg2rad(90),  # psi (heading) -> 默认朝向东
+        #     0.0,  # phi (roll)
+        #     0.0  # roll rate
+        # ])
+
+        # 测试时的状态
+        blue_initial_state = np.array([
+            10000.0, 5000.0, -1000.0,  # pos (x, y, z) -> 北=0, 天=随机, 东=0
+            300.0,  # Vel (m/s) -> 随机速度
+            0.0,  # theta (pitch) -> 随机俯仰角
+            np.deg2rad(-90),  # psi (heading) -> 默认朝向西
+            0.0,  # phi (roll)
+            0.0  # roll rate
+        ])
+
         if self.blue_aircraft is None:
             self.blue_aircraft = AircraftPointMass(initial_state=blue_initial_state)
         else:
@@ -179,17 +295,56 @@ class AirCombatEnv:
         :param actions: 字典, e.g., {'red_agent': red_action, 'blue_agent': blue_action}
                         每个 action 是 [油门, 升降舵, 副翼, 方向舵, 投放诱饵, 发射导弹]
         """
+        # print("剩余红外诱饵弹数：", self.red_aircraft.flare_ammo, "剩余导弹数：", self.red_aircraft.missile_ammo)
         red_action = actions.get('red_agent')
         blue_action = actions.get('blue_agent')
 
         num_steps = int(round(self.dt_dec / self.dt_normal))
 
-        # 在决策步开始时计算一次性事件 (发射)
-        # 只有在第一步且存活时才能发射
-        if self.red_alive and red_action[5] > 1.0:  #暂时不使用开火
+        # --- 决策步开始时的一次性事件 ---
+
+        # 1. 导弹发射
+        if self.red_alive and red_action[5] > 0.5:
             self._fire_missile('red')
         if self.blue_alive and blue_action[5] > 0.5:
             self._fire_missile('blue')
+
+        # --- <<< 核心修正：诱饵弹投放、弹药扣除 和 边沿检测打印 >>> ---
+
+        # a) 处理红方
+        red_wants_to_flare = self.red_alive and red_action[4] > 0.5
+        if red_wants_to_flare:
+            # 只有在AI想要投放时，我们才检查弹药和冷却
+            if self.red_aircraft.flare_ammo > 0:
+                # 弹药充足，执行投放计划
+                self.red_flare_manager.release_flare_group(self.t_now)
+                # 扣除弹药
+                self.red_aircraft.flare_ammo -= self.red_flare_manager.flare_per_group
+
+                # 检查是否是【刚刚开始】投放，如果是，则打印
+                if not self.log_flags['red_is_flaring']:
+                    # print(f">>> {self.t_now:.2f}s: 红方开始投放诱饵弹 (剩余: {self.red_aircraft.flare_ammo})")
+                    self.log_flags['red_is_flaring'] = True
+
+        # 更新状态标志位：如果AI本帧不想投放了，就重置标志
+        if not red_wants_to_flare and self.log_flags['red_is_flaring']:
+            self.log_flags['red_is_flaring'] = False
+
+        # b) 处理蓝方 (逻辑完全相同)
+        blue_wants_to_flare = self.blue_alive and blue_action[4] > 0.5
+        if blue_wants_to_flare:
+            if self.blue_aircraft.flare_ammo > 0:
+                self.blue_flare_manager.release_flare_group(self.t_now)
+                self.blue_aircraft.flare_ammo -= self.blue_flare_manager.flare_per_group
+
+                if not self.log_flags['blue_is_flaring']:
+                    # print(f">>> {self.t_now:.2f}s: 蓝方开始投放诱饵弹 (剩余: {self.blue_aircraft.flare_ammo})")
+                    self.log_flags['blue_is_flaring'] = True
+
+        if not blue_wants_to_flare and self.log_flags['blue_is_flaring']:
+            self.log_flags['blue_is_flaring'] = False
+
+        # --- <<< 修正结束 >>> ---
 
         # 物理仿真内循环
         for _ in range(num_steps):
@@ -210,15 +365,19 @@ class AirCombatEnv:
                 # 接收 [throttle_cmd, theta_L_dot, phi_L_dot]
                 self.blue_aircraft.update(self.dt_normal, blue_action[:3])
 
-            # --- 2. 更新诱饵弹 ---
-            if self.red_alive and red_action[4] > 0.5 and self.red_aircraft.flare_ammo > 0:
-                self.red_flare_manager.release_flare_group(self.t_now)
-                self.red_aircraft.flare_ammo -= self.red_flare_manager.flare_per_group
-            self.red_flare_manager.update(self.t_now, self.dt_normal, self.red_aircraft)
+            # # --- 2. 更新诱饵弹 ---
+            # if self.red_alive and red_action[4] > 0.5 and self.red_aircraft.flare_ammo > 0:
+            #     self.red_flare_manager.release_flare_group(self.t_now)
+            #     self.red_aircraft.flare_ammo -= self.red_flare_manager.flare_per_group
+            # self.red_flare_manager.update(self.t_now, self.dt_normal, self.red_aircraft)
+            #
+            # if self.blue_alive and blue_action[4] > 0.5 and self.blue_aircraft.flare_ammo > 0:
+            #     self.blue_flare_manager.release_flare_group(self.t_now)
+            #     self.blue_aircraft.flare_ammo -= self.blue_flare_manager.flare_per_group
+            # self.blue_flare_manager.update(self.t_now, self.dt_normal, self.blue_aircraft)
 
-            if self.blue_alive and blue_action[4] > 0.5 and self.blue_aircraft.flare_ammo > 0:
-                self.blue_flare_manager.release_flare_group(self.t_now)
-                self.blue_aircraft.flare_ammo -= self.blue_flare_manager.flare_per_group
+            # 2. 更新诱饵弹 (创建 + 移动)
+            self.red_flare_manager.update(self.t_now, self.dt_normal, self.red_aircraft)
             self.blue_flare_manager.update(self.t_now, self.dt_normal, self.blue_aircraft)
 
             # --- 3. 更新导弹 ---
@@ -242,17 +401,33 @@ class AirCombatEnv:
         # --- 8. 计算奖励 ---
         # rewards = self._calculate_rewards()
         rewards = {'red_agent': 0.0, 'blue_agent': 0.0}
+        # 8.1. 如果回合结束，则计算并添加稀疏奖励
+        if self.dones["__all__"]:
+            # 为红方计算稀疏奖励 (红方是我方, 蓝方是敌方)
+            sparse_reward_red = self.reward_calculator.get_sparse_reward(
+                my_status_alive=self.red_alive,
+                opponent_status_alive=self.blue_alive
+            )
+            rewards['red_agent'] += sparse_reward_red
+
+            # 为蓝方计算稀疏奖励 (蓝方是我方, 红方是敌方)
+            sparse_reward_blue = self.reward_calculator.get_sparse_reward(
+                my_status_alive=self.blue_alive,
+                opponent_status_alive=self.red_alive
+            )
+            rewards['blue_agent'] += sparse_reward_blue
+        # --- 计算态势优势奖励---
         # 计算红方的态势优势奖励
         advantage_reward_red = self.reward_calculator.calculate_dense_reward(
             self.red_aircraft, self.blue_aircraft)
 
         # 计算蓝方的态势优势奖励 (注意对象顺序颠倒)
-        # advantage_reward_blue = self.reward_calculator.calculate_situational_advantage_reward(
-        #     self.blue_aircraft, self.red_aircraft
-        # )
+        advantage_reward_blue = self.reward_calculator.calculate_situational_advantage_reward(
+            self.blue_aircraft, self.red_aircraft
+        )
         # 将这个奖励添加到您现有的奖励计算逻辑中
-        rewards['red_agent'] = advantage_reward_red
-        # rewards['blue_agent'] = advantage_reward_blue
+        rewards['red_agent'] += advantage_reward_red
+        rewards['blue_agent'] += advantage_reward_blue
 
 
         # --- 9. 获取新观测 ---
@@ -333,20 +508,73 @@ class AirCombatEnv:
         print(f">>> {shooter.capitalize()} 方发射了一枚导弹！剩余 {shooter_obj.missile_ammo} 枚。")
 
     def _update_all_missiles(self, dt):
-        """更新所有在飞导弹的状态"""
-        # 更新红方导弹
-        for m in self.red_missiles:
-            if not m.is_active: continue
-            # 红方导弹的目标是蓝方飞机和其诱饵弹
-            target_pos = self._calculate_equivalent_target(m, self.blue_aircraft, self.blue_flare_manager)
-            m.update(dt, target_pos)
+        """
+               更新所有在飞导弹的状态。
+               (V4: 修正了在目标被摧毁后导弹消失的问题)
+               """
+        all_missiles_in_flight = self.red_missiles + self.blue_missiles
 
-        # 更新蓝方导弹
-        for m in self.blue_missiles:
-            if not m.is_active: continue
-            # 蓝方导弹的目标是红方飞机和其诱饵弹
-            target_pos = self._calculate_equivalent_target(m, self.red_aircraft, self.red_flare_manager)
-            m.update(dt, target_pos)
+        for m in all_missiles_in_flight:
+            # 1. 如果导弹在上一帧还是激活的，我们才处理它
+            if not m.was_active_in_prev_frame:
+                continue
+
+            # --- <<< 核心修正：将目标选择和物理更新分离 >>> ---
+
+            # 1. 确定目标 (无论目标是否存活)
+            if m.color == "Red":
+                target_ac = self.blue_aircraft
+                flare_manager = self.blue_flare_manager
+                target_is_alive = self.blue_alive
+            else:  # Blue
+                target_ac = self.red_aircraft
+                flare_manager = self.red_flare_manager
+                target_is_alive = self.red_alive
+
+            # 2. 计算制导所需的目标位置
+            target_pos_for_guidance = None  # 默认为失锁
+
+            # 只有在目标存活时，我们才计算等效红外质心
+            if target_is_alive:
+                target_pos_for_guidance = self._calculate_equivalent_target(m, target_ac, flare_manager)
+
+            # 3. 【无条件】更新导弹的物理状态
+            #    - 如果 target_pos_for_guidance 不是 None，导弹会继续制导。
+            #    - 如果 target_pos_for_guidance 是 None (因为目标已被摧毁)，
+            #      导弹的 update 方法内部逻辑会处理“目标丢失”的情况，
+            #      使其继续沿着弹道飞行直到自毁。
+            just_deactivated = m.update(dt, target_pos_for_guidance)
+
+            # 3. 在【所有】物理更新和状态检查都完成后，
+            #    我们【最后】来比较一下这一帧的状态和上一帧的状态。
+            if m.was_active_in_prev_frame and not m.is_active:
+                # 这意味着，在本帧的某个时刻 (无论是在 _check_threat_escaped 还是在 m.update 中)，
+                # 导弹的状态从 True 变成了 False。
+                print(f">>> 导弹 {m.name} 已失效 (原因: {m.inactive_reason})。")
+                if self.tacview_enabled:
+                    self.tacview.stream_explosion(
+                        t_explosion=self.tacview_global_time,
+                        missile_pos=m.pos,
+                        is_hit=False,
+                        destroy_object=m
+                    )
+
+            # 4. 更新“上一帧”的标志，为下一帧做准备
+            m.was_active_in_prev_frame = m.is_active
+
+        # # 更新红方导弹
+        # for m in self.red_missiles:
+        #     if not m.is_active: continue
+        #     # 红方导弹的目标是蓝方飞机和其诱饵弹
+        #     target_pos = self._calculate_equivalent_target(m, self.blue_aircraft, self.blue_flare_manager)
+        #     m.update(dt, target_pos)
+        #
+        # # 更新蓝方导弹
+        # for m in self.blue_missiles:
+        #     if not m.is_active: continue
+        #     # 蓝方导弹的目标是红方飞机和其诱饵弹
+        #     target_pos = self._calculate_equivalent_target(m, self.red_aircraft, self.red_flare_manager)
+        #     m.update(dt, target_pos)
 
     def _check_hits_and_crashes(self):
         """
@@ -358,22 +586,42 @@ class AirCombatEnv:
             for m in self.red_missiles:
                 if not m.is_active: continue
                 if np.linalg.norm(m.pos - self.blue_aircraft.pos) < self.R_kill:
-                    print(f"\n>>> 蓝方飞机被红方导弹 {m.name} 击中！")
+                    # print(f"\n>>> 蓝方飞机被红方导弹 {m.name} 击中！")
                     self.blue_alive = False
                     m.is_active = False
+                    # --- <<< 核心修正：为“命中”事件触发爆炸 >>> ---
                     if self.tacview_enabled:
-                        self.tacview.stream_explosion(self.tacview_global_time, self.blue_aircraft.pos, m.pos)
+                        self.tacview.stream_explosion(
+                            t_explosion=self.tacview_global_time,
+                            aircraft_pos=self.blue_aircraft.pos,
+                            missile_pos=m.pos,
+                            is_hit=True,  # 这是一个真实的命中
+                            # --- <<< 核心修正：传递要销毁的对象 >>> ---
+                            destroy_object = m
+                        )
+                    break
+                    # if self.tacview_enabled:
+                    #     self.tacview.stream_explosion(self.tacview_global_time, self.blue_aircraft.pos, m.pos)
                     break
 
         if self.red_alive:
             for m in self.blue_missiles:
                 if not m.is_active: continue
                 if np.linalg.norm(m.pos - self.red_aircraft.pos) < self.R_kill:
-                    print(f"\n>>> 红方飞机被蓝方导弹 {m.name} 击中！")
+                    # print(f"\n>>> 红方飞机被蓝方导弹 {m.name} 击中！")
                     self.red_alive = False
                     m.is_active = False
                     if self.tacview_enabled:
-                        self.tacview.stream_explosion(self.tacview_global_time, self.red_aircraft.pos, m.pos)
+                        self.tacview.stream_explosion(
+                            t_explosion=self.tacview_global_time,
+                            aircraft_pos=self.red_aircraft.pos,
+                            missile_pos=m.pos,
+                            is_hit=True,  # 这是一个真实的命中
+                            # --- <<< 核心修正：传递要销毁的对象 >>> ---
+                            destroy_object = m
+                        )
+                    # if self.tacview_enabled:
+                    #     self.tacview.stream_explosion(self.tacview_global_time, self.red_aircraft.pos, m.pos)
                     break
 
         if self.red_alive and (self.red_aircraft.pos[1] < 100 or self.red_aircraft.velocity < 110):
@@ -410,7 +658,10 @@ class AirCombatEnv:
                     print(">>> 蓝方已被击落，且所有来袭导弹均已规避，红方胜利！仿真结束。")
                     self.dones["__all__"] = True
                 else:
-                    print(">>> 蓝方已被击落，但其导弹威胁仍在，红方需继续规避...")
+                    # --- <<< 核心修正：使用标志位进行条件打印 >>> ---
+                    if not self.log_flags['red_continue_evade_logged']:
+                        print(">>> 蓝方已被击落，但其导弹威胁仍在，红方需继续规避...")
+                        self.log_flags['red_continue_evade_logged'] = True  # 打印后，立即将标志位设为True
 
             # b) 蓝方存活，红方被击落
             if self.blue_alive and not self.red_alive:
@@ -425,7 +676,10 @@ class AirCombatEnv:
                     print(">>> 红方已被击落，且所有来袭导弹均已规避，蓝方胜利！仿真结束。")
                     self.dones["__all__"] = True
                 else:
-                    print(">>> 红方已被击落，但其导弹威胁仍在，蓝方需继续规避...")
+                    # --- <<< 核心修正：使用标志位进行条件打印 >>> ---
+                    if not self.log_flags['blue_continue_evade_logged']:
+                        print(">>> 红方已被击落，但其导弹威胁仍在，蓝方需继续规避...")
+                        self.log_flags['blue_continue_evade_logged'] = True  # 打印后，立即将标志位设为True
 
     def _check_threat_escaped(self, missile: Missile, target_aircraft: Aircraft, dt: float) -> bool:
         """
@@ -463,7 +717,8 @@ class AirCombatEnv:
             missile.escape_timer = 0.0  # 重置计时器
 
         if missile.escape_timer >= 2.0:
-            print(f">>> 导弹 {missile.name} 已被 {target_aircraft.name} [物理规避]！")
+            # print(f">>> 导弹 {missile.name} 已被 {target_aircraft.name} [物理规避]！")
+            missile.inactive_reason = "Physically Evaded"
             return True  # 判定为已规避
 
         # --- 3. 判断“信息逃逸” ---
@@ -475,7 +730,8 @@ class AirCombatEnv:
             missile.lost_and_separating_duration = 0.0  # 重置计时器
 
         if missile.lost_and_separating_duration >= 2.0:
-            print(f">>> 导弹 {missile.name} 已被 {target_aircraft.name} [信息规避]！")
+            # print(f">>> 导弹 {missile.name} 已被 {target_aircraft.name} [信息规避]！")
+            missile.inactive_reason = "Informationally Evaded"
             return True  # 判定为已规避
 
         # 如果以上条件都不满足，则认为威胁依然存在
@@ -660,8 +916,8 @@ class AirCombatEnv:
 
     def _get_observations(self) -> dict:
         """为每个智能体生成观测向量"""
-        obs_red = self._get_agent_observation('red') if self.red_alive else np.zeros(10)
-        obs_blue = self._get_agent_observation('blue') if self.blue_alive else np.zeros(10)
+        obs_red = self._get_agent_observation('red') if self.red_alive else np.zeros(14)
+        obs_blue = self._get_agent_observation('blue') if self.blue_alive else np.zeros(14)
         return {'red_agent': obs_red, 'blue_agent': obs_blue}
 
     def _get_agent_observation(self, agent_side: str) -> np.ndarray:
@@ -697,9 +953,57 @@ class AirCombatEnv:
             threat_dist = np.clip(closest_threat_dist / self.max_disengagement_range, 0, 1)
         o_threat_dist = threat_dist
 
+        # ------------------- START OF MODIFICATION -------------------
+        # --- 4. 新增的高级战术信息 (4维) ---
+
+        # a) 敌方速度大小 (归一化)
+        o_opponent_vel = opponent_ac.velocity / 400.0
+
+        # b) 敌方相对我方高度差 (归一化)
+        # 假设最大高度差为10000米
+        rel_alt = opponent_ac.pos[1] - agent_ac.pos[1]
+        o_rel_alt = np.clip(rel_alt / 10000.0, -1.0, 1.0)  # 归一化到 [-1, 1]
+
+        # 为了计算角度，需要获取双方的机头前向矢量
+        agent_theta, agent_psi, _ = agent_ac.attitude_rad
+        agent_fwd_vec = np.array([
+            np.cos(agent_theta) * np.cos(agent_psi),
+            np.sin(agent_theta),
+            np.cos(agent_theta) * np.sin(agent_psi)
+        ])
+
+        opp_theta, opp_psi, _ = opponent_ac.attitude_rad
+        opp_fwd_vec = np.array([
+            np.cos(opp_theta) * np.cos(opp_psi),
+            np.sin(opp_theta),
+            np.cos(opp_theta) * np.sin(opp_psi)
+        ])
+
+        # c) 进入角 (Aspect Angle, AA) - [修正版]
+        #    定义: 从我机指向敌机的视线矢量，与敌机机头矢量的夹角。
+        #    0度 = 追尾 (Tail-chase), 180度 = 迎头 (Head-on)
+
+        # 矢量1: 从我机指向敌机
+        los_vec_from_agent_to_opp = opponent_ac.pos - agent_ac.pos
+        cos_aa = np.dot(los_vec_from_agent_to_opp, opp_fwd_vec) / (np.linalg.norm(los_vec_from_agent_to_opp) + 1e-6)
+        aspect_angle_rad = np.arccos(np.clip(cos_aa, -1.0, 1.0))
+        o_aspect_angle = aspect_angle_rad / np.pi  # 归一化到 [0, 1], 0=追尾, 1=迎头
+
+        # d) 脱离角 (Antenna Train Angle, ATA) / 我机离轴角
+        #    定义: 从我机指向敌机的视线矢量，与我机机头矢量的夹角。
+        # los_vec_from_agent_to_opp = opponent_ac.pos - agent_ac.pos
+        cos_ata = np.dot(agent_fwd_vec, los_vec_from_agent_to_opp) / (np.linalg.norm(los_vec_from_agent_to_opp) + 1e-6)
+        ata_angle_rad = np.arccos(np.clip(cos_ata, -1.0, 1.0))
+        o_ata_angle = ata_angle_rad / np.pi  # 归一化到 [0, 1], 0=正对目标, 1=目标在正后方
+        # -------------------- END OF MODIFICATION --------------------
+
+        # 返回新的14维观测向量
         return np.array([
+            # 原始10维
             o_vel, o_alt, o_pitch, o_roll, o_missiles, o_flares,
-            o_target_dist, o_target_bearing, o_target_elev, o_threat_dist
+            o_target_dist, o_target_bearing, o_target_elev, o_threat_dist,
+            # 新增4维
+            o_opponent_vel, o_rel_alt, o_aspect_angle, o_ata_angle
         ]).astype(np.float32)
 
     def _update_history(self):
@@ -732,7 +1036,14 @@ class AirCombatEnv:
 
         all_missiles = [m for m in self.red_missiles if m.is_active] + [m for m in self.blue_missiles if m.is_active]
         all_flares = self.red_flare_manager.flares + self.blue_flare_manager.flares
-        self.tacview.stream_multi_object_frame(self.tacview_global_time, all_aircraft, all_missiles, all_flares)
+        # --- <<< 核心修正：传递两个时间参数 >>> ---
+        self.tacview.stream_multi_object_frame(
+            global_t=self.tacview_global_time,  # Tacview时间轴使用全局时间
+            episode_t=self.t_now,  # 物理计算使用回合内时间
+            aircraft_list=all_aircraft,
+            missile_list=all_missiles,
+            flare_list=all_flares
+        )
 
     def render(self, view_init_elev=20, view_init_azim=-150):
         """使用matplotlib进行3D可视化"""

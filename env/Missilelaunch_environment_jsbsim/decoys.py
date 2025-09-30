@@ -116,7 +116,7 @@ class FlareManager:
         """
         # --- 1. 创建并释放新的诱饵弹 ---
         # 找出在当前时间步 t 应该被释放的诱饵弹
-        newly_scheduled_times = [sch_time for sch_time in self.schedule if abs(t - sch_time) < dt / 2]
+        newly_scheduled_times = [sch_time for sch_time in self.schedule if t <= sch_time < t + dt]
 
         if newly_scheduled_times:
             # 获取飞机当前状态

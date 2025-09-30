@@ -7,8 +7,9 @@ from PPO_model.Config_launch import *
 from PPO_model.Buffer_launch import *
 from torch.optim import lr_scheduler
 import numpy as np
-import os
 import re
+import os  # <<< 1. 导入 os 库
+import time # <<< 2. 导入 time 库
 ##PPO算法：解决梯度爆炸   动作采用tanh缩放的话，经验池存储原始动作u，可以不用雅可比修正动作对数概率log. （用了雅可比修正也不会爆炸，暂时不清楚为什么），如果用反tanh算原始动作u就会有误差，就会梯度爆炸
 ## 如果动作为加速度，观测状态中有速度，可以对速度进行裁剪，不会爆炸；如果观测状态没有速度，对环境的速度进行裁剪会爆炸，因为同一观测状态导致不同结果
 # 优势标准化不用了、Minibatch可以留
@@ -173,7 +174,16 @@ class PPO_continuous(object):
    该类整合了 Actor 和 Critic 网络，并实现了 PPO 算法的核心逻辑，
    包括动作选择、经验存储、优势计算和网络更新。
    """
-    def __init__(self, load_able):
+    """
+   初始化PPO智能体。
+
+   Args:
+       load_able (bool): 是否需要加载预训练模型。
+       model_dir_path (str, optional): 【新】包含模型文件的【文件夹路径】。
+                                       如果提供，将从此文件夹加载。
+   """
+
+    def __init__(self, load_able: bool, model_dir_path: str = None):
         super(PPO_continuous, self).__init__()
         self.Actor = Actor()
         self.Critic = Critic()
@@ -183,17 +193,97 @@ class PPO_continuous(object):
         self.gae_lambda = AGENTPARA.lamda
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
-        # 加载预训练模型
+
+        # <<< 3. 在初始化时，为本次训练运行生成一个唯一的时间戳 >>>
+        # 格式为 "年-月-日_时-分-秒"，例如 "2023-10-27_15-30-45"
+        self.training_start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
+
+        # 定义基础保存目录
+        self.base_save_dir = "save_launch"
+
+        # 构建本次训练专用的文件夹路径
+        self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
+
+        # # 加载预训练模型
+        # if load_able:
+        #     # 推荐使用新的加载逻辑，如果旧逻辑仍需保留，可以取消注释
+        #     self.load_model_from_save_folder()
+        #     # for net in ['Actor', 'Critic']:
+        #     #     try:
+        #     #         path = f"save/{net}.pkl"
+        #     #         getattr(self, net).load_state_dict(torch.load(path, weights_only=True))
+        #     #         print(f"成功加载模型: {path}")
+        #     #     except Exception as e:
+        #     #         print(f"加载模型 {net}.pkl 失败: {e}")
+
+        # --- <<< 核心修改 2: 更新模型加载逻辑 >>> ---
         if load_able:
-            # 推荐使用新的加载逻辑，如果旧逻辑仍需保留，可以取消注释
-            self.load_model_from_save_folder()
-            # for net in ['Actor', 'Critic']:
-            #     try:
-            #         path = f"save/{net}.pkl"
-            #         getattr(self, net).load_state_dict(torch.load(path, weights_only=True))
-            #         print(f"成功加载模型: {path}")
-            #     except Exception as e:
-            #         print(f"加载模型 {net}.pkl 失败: {e}")
+            if model_dir_path:
+                print(f"--- 正在从指定文件夹加载模型: {model_dir_path} ---")
+                # 调用我们新的、更强大的加载函数
+                self.load_models_from_directory(model_dir_path)
+            else:
+                # 保留旧的回退逻辑，如果需要的话
+                print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
+                self.load_models_from_directory("../test")
+
+        # --- <<< 核心修改 3: 实现新的、通用的加载函数 >>> ---
+
+    def load_models_from_directory(self, directory_path: str):
+        """
+        从指定的文件夹路径加载模型，能自动识别多种命名格式。
+        - 格式1 (带前缀): "prefix_Actor.pkl", "prefix_Critic.pkl"
+        - 格式2 (无前缀): "Actor.pkl", "Critic.pkl"
+        """
+        if not os.path.isdir(directory_path):
+            print(f"[错误] 模型加载失败：提供的路径 '{directory_path}' 不是一个有效的文件夹。")
+            return
+
+        files = os.listdir(directory_path)
+
+        # 优先级 1: 查找带前缀的 Actor 文件 (e.g., "best_Actor.pkl")
+        actor_files_with_prefix = [f for f in files if f.endswith("_Actor.pkl")]
+        if len(actor_files_with_prefix) > 0:
+            # 如果有多个，优先选择第一个找到的
+            actor_filename = actor_files_with_prefix[0]
+            # 从文件名中提取前缀
+            prefix = actor_filename.replace("_Actor.pkl", "")
+            critic_filename = f"{prefix}_Critic.pkl"
+            print(f"  - 检测到前缀 '{prefix}'，准备加载模型...")
+
+            # 检查对应的 Critic 文件是否存在
+            if critic_filename in files:
+                actor_full_path = os.path.join(directory_path, actor_filename)
+                critic_full_path = os.path.join(directory_path, critic_filename)
+
+                try:
+                    self.Actor.load_state_dict(torch.load(actor_full_path, map_location=ACTOR_PARA.device))
+                    print(f"    - 成功加载 Actor: {actor_full_path}")
+                    self.Critic.load_state_dict(torch.load(critic_full_path, map_location=CRITIC_PARA.device))
+                    print(f"    - 成功加载 Critic: {critic_full_path}")
+                    return  # 成功加载，结束函数
+                except Exception as e:
+                    print(f"    - [错误] 加载带前缀的模型时失败: {e}")
+            else:
+                print(f"    - [警告] 找到了 '{actor_filename}' 但未找到对应的 '{critic_filename}'。")
+
+        # 优先级 2: 如果没找到带前缀的，就查找无前缀的 "Actor.pkl"
+        if "Actor.pkl" in files and "Critic.pkl" in files:
+            print("  - 检测到无前缀格式，准备加载 'Actor.pkl' 和 'Critic.pkl'...")
+            actor_full_path = os.path.join(directory_path, "Actor.pkl")
+            critic_full_path = os.path.join(directory_path, "Critic.pkl")
+            try:
+                self.Actor.load_state_dict(torch.load(actor_full_path, map_location=ACTOR_PARA.device))
+                print(f"    - 成功加载 Actor: {actor_full_path}")
+                self.Critic.load_state_dict(torch.load(critic_full_path, map_location=CRITIC_PARA.device))
+                print(f"    - 成功加载 Critic: {critic_full_path}")
+                return  # 成功加载，结束函数
+            except Exception as e:
+                print(f"    - [错误] 加载无前缀模型时失败: {e}")
+
+        # 如果以上两种方式都失败
+        print(f"[错误] 模型加载失败：在文件夹 '{directory_path}' 中未找到任何有效的 Actor/Critic 模型对。")
+
     def load_model_from_save_folder(self):
         """
           从指定文件夹加载模型，能自动识别新旧两种命名格式。
@@ -487,7 +577,7 @@ class PPO_continuous(object):
         train_info['actor_lr'] = self.Actor.optim.param_groups[0]['lr']
         train_info['critic_lr'] = self.Critic.optim.param_groups[0]['lr']
         # 保存模型
-        self.save1()
+        self.save()
         return train_info
 
     # --- 实用方法 ---
@@ -501,17 +591,40 @@ class PPO_continuous(object):
         self.Actor.eval()
         self.Critic.eval()
 
-    # 原始的 save1 方法，用于保存为默认名称
-    def save1(self):
-        for net in ['Actor', 'Critic']:
-            try:
-                torch.save(getattr(self, net).state_dict(), "save_launch/" + net + ".pkl")
-            except Exception as e:
-                print(f"模型保存失败: {e}")
+
     def save(self, prefix=""):
+        """
+        将模型保存到以训练开始时间命名的专属文件夹中。
+
+        Args:
+            prefix (str, optional): 文件名的前缀，可用于标记回合数或最佳模型。
+                                    例如: save(prefix="episode_5000")
+        """
+        try:
+            # <<< 4. 确保本次训练的专属文件夹存在，如果不存在则创建 >>>
+            # os.makedirs(..., exist_ok=True) 是一个安全的操作，
+            # 如果文件夹已存在，它不会报错。
+            os.makedirs(self.run_save_dir, exist_ok=True)
+            print(f"模型将被保存至: {self.run_save_dir}")
+
+        except Exception as e:
+            print(f"创建模型文件夹 {self.run_save_dir} 失败: {e}")
+            return  # 如果文件夹创建失败，则不继续执行
+
+        # 循环保存 Actor 和 Critic 网络
         for net in ['Actor', 'Critic']:
             try:
-                filename = f"save/{prefix}_{net}.pkl" if prefix else f"save_launch/{net}.pkl"
-                torch.save(getattr(self, net).state_dict(), filename)
-            except:
-                print("write_error")
+                # <<< 5. 构建带有前缀和网络名的完整文件名 >>>
+                # 如果 prefix 为空, 文件名为 "Actor.pkl" 或 "Critic.pkl"
+                # 如果 prefix 为 "best", 文件名为 "best_Actor.pkl"
+                filename = f"{prefix}_{net}.pkl" if prefix else f"{net}.pkl"
+
+                # <<< 6. 构建最终的完整文件路径 >>>
+                full_path = os.path.join(self.run_save_dir, filename)
+
+                # 执行保存操作
+                torch.save(getattr(self, net).state_dict(), full_path)
+                print(f"  - {filename} 保存成功。")
+
+            except Exception as e:
+                print(f"  - 保存模型 {net} 到 {full_path} 时发生错误: {e}")

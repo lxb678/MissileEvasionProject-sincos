@@ -24,10 +24,20 @@ class TacviewInterface:
         self.client_socket = None
         self.tacview_final_frame_sent = False
 
-        # 动态ID管理系统，以支持多个对象
-        self.object_ids: Dict[int, str] = {}
+        # # 动态ID管理系统，以支持多个对象
+        # self.object_ids: Dict[int, str] = {}
         self.next_id_counter = 100
         self.next_event_id_counter = 10000
+
+        # 动态ID管理系统
+        self.object_ids: Dict[int, str] = {}
+        # --- <<< 核心修正 1: 分开管理持久对象和一次性事件 >>> ---
+        # self.next_id_counter 用于飞机、导弹等
+
+        # self.next_event_id_counter 用于爆炸等，这些ID需要在回合结束时被清理
+
+        # 新增一个列表来存储本回合创建的所有事件ID
+        self.episode_event_ids: List[str] = []
 
         try:
             print(f"请打开 Tacview 高级版 → 记录 → 实时遥测，IP: {self.host}, 端口: {self.port}")
@@ -57,9 +67,11 @@ class TacviewInterface:
         return self.object_ids[py_id]
 
     def _get_next_event_id(self) -> str:
-        """为一次性事件（如爆炸）生成唯一ID"""
+        """为一次性事件（如爆炸）生成唯一ID，并记录下来以便清理"""
         event_id = str(self.next_event_id_counter)
         self.next_event_id_counter += 1
+        # 关键：将生成的事件ID【添加】到列表中
+        self.episode_event_ids.append(event_id)
         return event_id
 
     def _send(self, data: str):
@@ -79,13 +91,18 @@ class TacviewInterface:
         return lon, lat, alt
 
     # --- 关键修改 1: 提供环境正在调用的正确方法名 ---
-    def stream_multi_object_frame(self, t_now: float, aircraft_list: List, missile_list: List, flare_list: List):
+    def stream_multi_object_frame(self, global_t: float, episode_t: float,
+                                  aircraft_list: List, missile_list: List, flare_list: List):
         """
         发送一个包含所有活动对象列表的遥测帧。
-        这个方法名匹配多智能体环境的需求。
+
+        Args:
+            global_t (float): 用于Tacview时间轴的全局连续时间。
+            episode_t (float): 用于计算物理属性（如诱饵弹强度）的当前回合时间。
         """
         if self.tacview_final_frame_sent: return
-        data_str = f"#{t_now:.2f}\n"
+        # 使用 global_t 作为Tacview的时间戳
+        data_str = f"#{global_t:.2f}\n"
 
         # 处理飞机列表
         for ac in aircraft_list:
@@ -112,35 +129,124 @@ class TacviewInterface:
 
         # 处理诱饵弹列表
         for flare in flare_list:
-            if flare.get_intensity(t_now) > 1e-3:
+            # --- <<< 核心修正：使用 episode_t 来计算强度 >>> ---
+            if flare.get_intensity(episode_t) > 1e-3:
                 f_id = self._get_or_create_id(flare)
                 lon, lat, alt = self._pos_to_lon_lat_alt(flare.pos)
                 data_str += f"{f_id},T={lon:.8f}|{lat:.8f}|{alt:.1f},Name=Flare,Color=Yellow,Type=Decoy+Flare\n"
 
         self._send(data_str)
 
-    def stream_explosion(self, t_explosion: float, aircraft_pos: np.ndarray, missile_pos: np.ndarray):
-        """发送一个自我清理的爆炸效果。"""
+    # def stream_explosion(self, t_explosion: float, aircraft_pos: np.ndarray, missile_pos: np.ndarray):
+    #     """发送一个自我清理的爆炸效果。"""
+    #     explosion_id = self._get_next_event_id()
+    #     lon_e, lat_e, alt_e = self._pos_to_lon_lat_alt(missile_pos)
+    #     self._send(
+    #         f"#{t_explosion:.2f}\n{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},Type=Misc+Explosion,Name=Hit\n")
+    #     self._send(f"#{t_explosion + 2.0:.2f}\n-{explosion_id}\n")
+    # --- <<< 核心修正：增强 stream_explosion 方法 >>> ---
+    def stream_explosion(self, t_explosion: float,
+                         aircraft_pos: np.ndarray = None,
+                         missile_pos: np.ndarray = None,
+                         is_hit: bool = True,
+                        destroy_object: object = None): # <<< 新增参数
+        """
+        发送一个自我清理的爆炸效果。
+        (V2: 修改了签名以接受 missile_pos，并能处理其为None的情况)
+
+        Args:
+            t_explosion (float): 爆炸发生的全局时间。
+            aircraft_pos (np.ndarray, optional): 如果是命中，可以提供飞机位置。
+            missile_pos (np.ndarray, optional): 爆炸发生的中心位置 (通常是导弹位置)。
+            is_hit (bool): 标志是真实命中还是导弹自毁。
+        """
+        """
+        发送一个自我清理的爆炸效果，并可选择立即销毁一个关联的对象。
+
+        Args:
+            ...
+            destroy_object (object, optional): 需要在爆炸后立即从Tacview中移除的对象 (例如导弹)。
+        """
+        # --- 确定爆炸中心位置 ---
+        # 优先级：优先使用 missile_pos，如果未提供，则使用 aircraft_pos
+        if missile_pos is not None:
+            explosion_center_pos = missile_pos
+        elif aircraft_pos is not None:
+            explosion_center_pos = aircraft_pos
+        else:
+            # 如果两个位置都未提供，则无法创建爆炸，直接返回
+            print("[警告][Tacview] stream_explosion被调用，但未提供任何位置信息。")
+            return
+
         explosion_id = self._get_next_event_id()
-        lon_e, lat_e, alt_e = self._pos_to_lon_lat_alt(missile_pos)
-        self._send(
-            f"#{t_explosion:.2f}\n{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},Type=Misc+Explosion,Name=Hit\n")
-        self._send(f"#{t_explosion + 2.0:.2f}\n-{explosion_id}\n")
+        lon_e, lat_e, alt_e = self._pos_to_lon_lat_alt(explosion_center_pos)
+
+        # 根据事件类型选择不同的名称和效果 (逻辑不变)
+        if is_hit:
+            explosion_name = "Hit"
+            explosion_type = "Misc+Explosion"
+        else:
+            explosion_name = "Missile_End"
+            explosion_type = "Misc+Explosion"
+
+        data_str = f"#{t_explosion:.2f}\n"
+
+        # 1. 创建爆炸对象
+        data_str += (f"{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},"
+                     f"Type={explosion_type},Name={explosion_name}\n")
+
+        # --- <<< 核心修正：立即删除关联对象 >>> ---
+        # 2. 如果指定了要销毁的对象，则查找其ID并发送删除指令
+        if destroy_object is not None:
+            py_id = id(destroy_object)
+            if py_id in self.object_ids:
+                object_to_destroy_id = self.object_ids[py_id]
+                data_str += f"-{object_to_destroy_id}\n"
+                # 从我们的ID映射中也移除它，防止未来复用
+                del self.object_ids[py_id]
+        self._send(data_str)
+
+        # # 发送创建爆炸对象的帧
+        # self._send(
+        #     f"#{t_explosion:.2f}\n"
+        #     f"{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},"
+        #     f"Type={explosion_type},Name={explosion_name}\n"
+        # )
+        # 发送2秒后自动删除爆炸对象的帧
+        # self._send(f"#{t_explosion + 2.0:.2f}\n-{explosion_id}\n")
 
     # --- 关键修改 2: 提供环境正在调用的正确方法名和健壮的签名 ---
     def end_of_episode(self, t_now: float, **kwargs):
         """
-        在回合结束时清理所有持久化对象。
-        使用 **kwargs 接收并忽略所有额外的、可能导致崩溃的参数。
+        在回合结束时清理所有持久化对象【和】所有本回合创建的事件对象。
         """
-        if not self.object_ids: return
-        print(f"Tacview: Cleaning up {len(self.object_ids)} persistent objects...")
-
+        # 准备一个用于发送的指令字符串
         data_str = f"#{t_now:.2f}\n"
-        for tacview_id in self.object_ids.values():
-            data_str += f"-{tacview_id}\n"
+        something_to_clean = False
 
-        self._send(data_str)
+        # 1. 清理所有持久化对象 (飞机、剩余的导弹等)
+        if self.object_ids:
+            # print(f"[DEBUG][Tacview] Cleaning up {len(self.object_ids)} persistent objects...")
+            for tacview_id in self.object_ids.values():
+                data_str += f"-{tacview_id}\n"
+            something_to_clean = True
+
+        # 2. 清理本回合创建的所有事件对象 (爆炸特效)
+        if self.episode_event_ids:
+            # print(f"[DEBUG][Tacview] Cleaning up {len(self.episode_event_ids)} event objects (explosions)...")
+            for event_id in self.episode_event_ids:
+                data_str += f"-{event_id}\n"
+            something_to_clean = True
+
+        # 3. 如果有任何需要清理的对象，则发送指令
+        if something_to_clean:
+            self._send(data_str)
+
+        # 4. 重置状态，为下一回合做准备
         self.object_ids.clear()
-        self.next_id_counter = 100
+        self.episode_event_ids.clear()  # <<< 关键：清空事件ID列表
+
+        # (ID计数器保持不清空，以保证全局唯一性)
+        # self.next_persistent_id_counter = 100
+
         self.tacview_final_frame_sent = False

@@ -10,9 +10,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 # --- 导入您的自定义模块 ---
 # 确保这里的路径是正确的
-from PPO_model.Hybrid_PPO_jsbsim_Vec import PPO_continuous
-from PPO_model.Config_Vec import AGENTPARA
-from env.missile_evasion_environment_jsbsim.Vec_missile_evasion_environment_jsbsim import AirCombatEnv
+from Interference_code.PPO_model.Hybrid_PPO_jsbsim_Vec import PPO_continuous
+from Interference_code.PPO_model.Config_Vec import AGENTPARA
+from Interference_code.env.missile_evasion_environment_jsbsim.Vec_missile_evasion_environment_jsbsim import AirCombatEnv
 
 # ========================= 配置区 =========================
 LOAD_ABLE = False  # 是否从 'save/' 文件夹加载预训练模型

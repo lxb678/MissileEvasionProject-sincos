@@ -40,7 +40,7 @@ class Missile:
         self.max_g_load = 50.0  # 导弹最大过载
 
         # --- <<< 新增：发动机参数 >>> ---
-        self.thrust = 10000.0  # (N) 助推器推力, 这是一个估算值
+        self.thrust = 12000.0  #15000.0 # (N) 助推器推力, 这是一个估算值
         self.boost_time = 3.0  # (s) 助推器工作时间
 
         # --- <<< 新增：从规避环境中移植的计时器 >>> ---
@@ -50,6 +50,11 @@ class Missile:
 
         # --- <<< 新增：失锁自毁计时器 >>> ---
         self.time_since_lock_lost = 0.0
+
+        # --- <<< 新增：用于检测状态变化的标志 >>> ---
+        self.was_active_in_prev_frame = True
+        # --- <<< 新增：记录失效原因 >>> ---
+        self.inactive_reason = "In-Flight"
 
         # --- 导引头/引信参数 ---
         self.seeker_max_range = 30000.0  # 导引头最大搜索范围 (m)
@@ -95,6 +100,7 @@ class Missile:
         self.flight_time += dt
         if not self.is_active or self.flight_time > self.max_flight_time:
             self.is_active = False
+            self.inactive_reason = "Flight Time Exceeded"  # <--- 记录原因
             return
 
         # 2. <<< 新增：检查失锁自毁逻辑 >>>
@@ -105,9 +111,10 @@ class Missile:
             # 如果当前帧有目标，清零计时器
             self.time_since_lock_lost = 0.0
         if self.time_since_lock_lost > 2.0:
-            if self.is_active:  # 确保只打印一次
-                print(f">>> 导弹 {self.name} 因持续失锁超过2秒而自毁。")
+            # if self.is_active:  # 确保只打印一次
+                # print(f">>> 导弹 {self.name} 因持续失锁超过2秒而自毁。")
             self.is_active = False
+            self.inactive_reason = "Target Lost"  # <--- 记录原因
             return  # 自毁后，直接返回，不再进行后续计算
 
         # 2. 计算视线角速率 (Line-of-Sight Rate)
@@ -204,15 +211,43 @@ class Missile:
         导弹的核心动力学积分器，增加了助推段逻辑。
         """
 
+        # def get_Cx_AIM9X(Ma: float) -> float:
+        #     if Ma <= 0.9:
+        #         return 0.20
+        #     elif Ma <= 1.2:
+        #         return 0.20 + (0.38 - 0.20) * (Ma - 0.9) / 0.3
+        #     elif Ma <= 4.0:
+        #         return 0.38 * np.exp(-0.35 * (Ma - 1.2)) + 0.15
+        #     else:
+        #         return 0.15
+        # AIM-9X 阻力系数模型 更大
         def get_Cx_AIM9X(Ma: float) -> float:
-            if Ma <= 0.9:
-                return 0.20
-            elif Ma <= 1.2:
-                return 0.20 + (0.38 - 0.20) * (Ma - 0.9) / 0.3
-            elif Ma <= 4.0:
-                return 0.38 * np.exp(-0.35 * (Ma - 1.2)) + 0.15
+            """
+            根据马赫数 Ma 返回导弹阻力系数 Cd
+            分段拟合：
+              1) Ma <= 0.8 : 常数
+              2) 0.8 < Ma <= 1.1 : 线性
+              3) 1.1 < Ma <= 4.0 : 三次多项式
+            """
+            Ma1, Ma2, Ma3 = 0.8, 1.1, 4.0
+
+            if Ma <= Ma1:
+                return 0.5
+            elif Ma <= Ma2:
+                # 线性段 (0.8,0.5) -> (1.1,0.78)
+                return 0.9333 * Ma - 0.2466
+            elif Ma <= Ma3:
+                # 三次多项式段
+                return (-0.0004537 * Ma ** 3
+                        + 0.0290835 * Ma ** 2
+                        - 0.2867967 * Ma
+                        + 1.0608893)
             else:
-                return 0.15
+                # 超出拟合范围可选择外推或固定
+                return (-0.0004537 * Ma ** 3
+                        + 0.0290835 * Ma ** 2
+                        - 0.2867967 * Ma
+                        + 1.0608893)
 
         V, theta, psi_c, x_pos, y_pos, z_pos = state
 

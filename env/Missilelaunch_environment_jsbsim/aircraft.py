@@ -33,7 +33,7 @@ class AircraftPointMass:
         self.THRUST_MACH_K2 = 0.18  # 马赫数二次项系数 (用于模拟高马赫数下的损失)
 
         # 滚转响应时间常数
-        self.tau_roll = 0.2
+        self.tau_roll = 0.02
 
         # 飞行动作的物理限制
         self.min_velocity_ms = 110.0
@@ -314,3 +314,31 @@ class AircraftPointMass:
         # 返回新的状态向量 (NUE 格式)
         return np.array(
             [pos_ned_new[0], -pos_ned_new[2], pos_ned_new[1], Vt_new, theta_new, psi_new, phi_new, p_real_new])
+
+        # <<<--- 在这里添加新方法 --->>>
+
+    def get_rotation_matrix_transpose(self) -> np.ndarray:
+        """计算并返回从世界系(NED)到机体系(FRD)的旋转矩阵。"""
+
+        # 这些内部函数是从 _aircraft_dynamics 复制的
+        def euler_to_quaternion(phi, theta, psi):
+            cy, sy = np.cos(psi * 0.5), np.sin(psi * 0.5);
+            cp, sp = np.cos(theta * 0.5), np.sin(theta * 0.5);
+            cr, sr = np.cos(phi * 0.5), np.sin(phi * 0.5)
+            q0 = cr * cp * cy + sr * sp * sy;
+            q1 = sr * cp * cy - cr * sp * sy;
+            q2 = cr * sp * cy + sr * cp * sy;
+            q3 = cr * cp * sy - sr * sp * cy
+            norm = np.linalg.norm([q0, q1, q2, q3]);
+            return np.array([q0, q1, q2, q3]) / norm if norm > 1e-9 else np.array([1, 0, 0, 0])
+
+        def quaternion_to_rotation_matrix(q):
+            q0, q1, q2, q3 = q;
+            return np.array([[1 - 2 * (q2 ** 2 + q3 ** 2), 2 * (q1 * q2 - q0 * q3), 2 * (q1 * q3 + q0 * q2)],
+                             [2 * (q1 * q2 + q0 * q3), 1 - 2 * (q1 ** 2 + q3 ** 2), 2 * (q2 * q3 - q0 * q1)],
+                             [2 * (q1 * q3 - q0 * q2), 2 * (q2 * q3 + q0 * q1), 1 - 2 * (q1 ** 2 + q2 ** 2)]])
+
+        theta, psi, phi = self.attitude_rad
+        q_current = euler_to_quaternion(phi, theta, psi)
+        R_frd_to_ned = quaternion_to_rotation_matrix(q_current)
+        return R_frd_to_ned.T

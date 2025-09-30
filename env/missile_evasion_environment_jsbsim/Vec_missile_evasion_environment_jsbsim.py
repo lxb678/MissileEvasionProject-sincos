@@ -155,7 +155,7 @@ class AirCombatEnv(gym.Env):
 
         # 6.
         aircraft_vel = np.random.uniform(200, 400)
-
+        # aircraft_vel = 400
         # 7.
         missile_vel = np.random.uniform(700, 900)
 
