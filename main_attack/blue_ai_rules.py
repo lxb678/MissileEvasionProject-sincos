@@ -1,6 +1,5 @@
 import numpy as np
-from Interference_code.fire_control_rules import should_fire_missile
-from Interference_code.fire_control_rules_all import can_launch_missile_with_pk, fire_control_timers, FIRE_COOLDOWN_S
+from Interference_code.main_attack.fire_control_rules_all import can_launch_missile_with_pk
 
 # ==============================================================================
 # --- 蓝方 AI 逻辑：追踪法  ---

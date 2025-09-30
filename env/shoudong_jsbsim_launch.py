@@ -2,8 +2,7 @@
 # 描述: 人机对抗脚本。红方由人类键盘操作，蓝方由规则AI控制。
 
 from Missilelaunch_environment_jsbsim.Missilelaunch_environment_jsbsim_pointmass import AirCombatEnv
-from Interference_code.fire_control_rules import should_fire_missile
-from Interference_code.blue_random_rules import *
+from Interference_code.main_attack.fire_control_rules import should_fire_missile
 import keyboard
 import time
 import numpy as np

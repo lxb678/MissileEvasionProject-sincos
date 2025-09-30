@@ -3,7 +3,7 @@
 # @Author:  Zeming M
 # @File:    Buffer
 # @IDE:     PyCharm
-from PPO_model.Config_launch import *
+from Interference_code.PPO_model.Config_launch import *
 class Buffer(object):
     '''
     经验池 不指定经验池大小，而是根据对抗结束的次数来触发训练  只需要确定采样的样本批次大小

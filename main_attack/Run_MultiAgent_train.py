@@ -9,11 +9,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 # --- 导入您的环境和PPO算法 ---
 # (确保这里的路径和文件名是正确的)
-from env.Missilelaunch_environment_jsbsim.Missilelaunch_environment_jsbsim_pointmass import AirCombatEnv
-from PPO_model.Config_launch import *
-from PPO_model.Hybrid_PPO_jsbsim_launch import *  # 导入我们为进攻任务简化的PPO
-from blue_ai_rules import get_blue_ai_action # <<< 导入蓝方AI
-from Interference_code.blue_random_rules import get_blue_ai_action_random
+from Interference_code.env.Missilelaunch_environment_jsbsim.Missilelaunch_environment_jsbsim_pointmass import AirCombatEnv
+from Interference_code.PPO_model.Config_launch import *
+from Interference_code.PPO_model.Hybrid_PPO_jsbsim_launch import *  # 导入我们为进攻任务简化的PPO
+from Interference_code.main_attack.blue_random_rules import get_blue_ai_action_random
 
 # --- 全局设置 ---
 # 如果要加载预训练模型，请将此设为 True

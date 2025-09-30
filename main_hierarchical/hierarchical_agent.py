@@ -4,11 +4,11 @@ import numpy as np
 
 # --- 导入您的PPO模型类 ---
 # (请确保这里的路径和文件名是正确的)
-from PPO_model.Hybrid_PPO_jsbsim_launch import PPO_continuous as AttackPPO
+from Interference_code.PPO_model.Hybrid_PPO_jsbsim_launch import PPO_continuous as AttackPPO
 # 假设规避模型的类名为 EvadePPO，请根据实际情况修改
-from PPO_model.Hybrid_PPO_jsbsim import PPO_continuous as EvadePPO
+from Interference_code.PPO_model.Hybrid_PPO_jsbsim import PPO_continuous as EvadePPO
 
-from Interference_code.fire_control_rules_all import can_launch_missile_with_pk, fire_control_timers, FIRE_COOLDOWN_S
+from Interference_code.main_attack.fire_control_rules_all import can_launch_missile_with_pk, fire_control_timers, FIRE_COOLDOWN_S
 
 
 class HierarchicalAgent:

@@ -8,12 +8,10 @@ import time
 
 # --- 导入您的环境和PPO算法 ---
 # (确保这里的路径和文件名是正确的)
-from env.Missilelaunch_environment_jsbsim.Missilelaunch_environment_jsbsim_pointmass import AirCombatEnv
-from PPO_model.Config_launch import *
-from PPO_model.Hybrid_PPO_jsbsim_launch import *
+from Interference_code.env.Missilelaunch_environment_jsbsim.Missilelaunch_environment_jsbsim_pointmass import AirCombatEnv
+from Interference_code.PPO_model.Config_launch import *
+from Interference_code.PPO_model.Hybrid_PPO_jsbsim_launch import *
 from blue_ai_rules import get_blue_ai_action  # <<< 导入蓝方AI
-from Interference_code.blue_random_rules import get_blue_ai_action_random
-
 
 # --- 全局测试设置 ---
 LOAD_MODELS = True  # 测试时必须加载模型

@@ -197,13 +197,13 @@ class TacviewInterface:
 
         # --- <<< 核心修正：立即删除关联对象 >>> ---
         # 2. 如果指定了要销毁的对象，则查找其ID并发送删除指令
-        if destroy_object is not None:
-            py_id = id(destroy_object)
-            if py_id in self.object_ids:
-                object_to_destroy_id = self.object_ids[py_id]
-                data_str += f"-{object_to_destroy_id}\n"
-                # 从我们的ID映射中也移除它，防止未来复用
-                del self.object_ids[py_id]
+        # if destroy_object is not None:
+        #     py_id = id(destroy_object)
+        #     if py_id in self.object_ids:
+        #         object_to_destroy_id = self.object_ids[py_id]
+        #         data_str += f"-{object_to_destroy_id}\n"
+        #         # 从我们的ID映射中也移除它，防止未来复用
+        #         del self.object_ids[py_id]
         self._send(data_str)
 
         # # 发送创建爆炸对象的帧

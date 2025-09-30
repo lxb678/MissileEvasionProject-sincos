@@ -3,14 +3,12 @@
 import torch
 import numpy as np
 import random
-import time
 
 # --- 导入您的环境和新的分层AI ---
-from env.Missilelaunch_environment_jsbsim.Missilelaunch_environment_jsbsim_pointmass import AirCombatEnv
-from env.missile_evasion_environment_jsbsim.Vec_missile_evasion_environment_jsbsim import AirCombatEnv as EvadeEnv  # 导入规避环境以获取其观测函数
-from hierarchical_agent import HierarchicalAgent
-from blue_random_rules import get_blue_ai_action_random  # 导入我们之前写的随机机动蓝方AI
-from blue_ai_rules import get_blue_ai_action
+from Interference_code.env.Missilelaunch_environment_jsbsim.Missilelaunch_environment_jsbsim_pointmass import AirCombatEnv
+from Interference_code.env.missile_evasion_environment_jsbsim.Vec_missile_evasion_environment_jsbsim import AirCombatEnv as EvadeEnv  # 导入规避环境以获取其观测函数
+from Interference_code.main_hierarchical.hierarchical_agent import HierarchicalAgent
+from Interference_code.main_attack.blue_ai_rules import get_blue_ai_action
 
 # --- 全局测试设置 ---
 TACVIEW_ENABLED_DURING_TESTING = True
@@ -37,8 +35,8 @@ if __name__ == '__main__':
 
     # 2. 初始化并加载分层智能体 (红方)
     # !!! 请将这里的路径替换为您真实模型文件的路径 !!!
-    attack_model_folder= "./test_hierarchical_model/attack_model"
-    evade_model_folder = "./test_hierarchical_model/evade_model"
+    attack_model_folder= "../test_hierarchical_model/attack_model"
+    evade_model_folder = "../test_hierarchical_model/evade_model"
 
     red_agent = HierarchicalAgent(
         attack_model_dir=attack_model_folder,  # <<< 使用新的参数名

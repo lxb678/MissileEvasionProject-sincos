@@ -3,8 +3,8 @@ from torch.nn import *
 # <<< 混合动作空间 >>> 导入伯努利分布用于离散动作
 from torch.distributions import Bernoulli, Categorical, TransformedDistribution
 from torch.distributions import Normal, TanhTransform
-from PPO_model.Config_launch import *
-from PPO_model.Buffer_launch import *
+from Interference_code.PPO_model.Config_launch import *
+from Interference_code.PPO_model.Buffer_launch import *
 from torch.optim import lr_scheduler
 import numpy as np
 import re
