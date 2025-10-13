@@ -2,7 +2,7 @@
 # 描述: 人机对抗脚本。红方由人类键盘操作，蓝方由规则AI控制。
 
 from Missilelaunch_environment_jsbsim.Missilelaunch_environment_jsbsim_pointmass import AirCombatEnv
-from Interference_code.main_attack.fire_control_rules import should_fire_missile
+from Interference_code.main.main_attack import can_launch_missile_with_pk
 import keyboard
 import time
 import numpy as np
@@ -448,8 +448,16 @@ def get_blue_ai_action(blue_obs: dict, env) -> list:
     release_flare = 0.0
 
     # 调用新的火控决策逻辑
-    fire_missile_decision = should_fire_missile(env)
-    fire_missile = 1.0 if fire_missile_decision else 0.0
+    # fire_missile_decision = should_fire_missile(env)
+    # fire_missile = 1.0 if fire_missile_decision else 0.0
+
+    # 调用通用函数
+    if can_launch_missile_with_pk(launcher_ac=env.blue_aircraft,
+                                  target_ac=env.red_aircraft,
+                                  current_sim_time=env.t_now):
+        fire_missile = 1.0
+    else:
+        fire_missile = 0.0
 
     return [nx_cmd, nz_cmd, phi_cmd, 0.0, release_flare, fire_missile]
 
@@ -474,7 +482,7 @@ if __name__ == '__main__':
     print("  俯仰: S (拉杆) / W (推杆)")
     print("  滚转: A (左) / D (右)")
     print("  偏航: Z (左) / C (右)")
-    print("  发射导弹: Space (空格键)")
+    print("  发射导弹: c")
     print("  投放诱饵: F")
     print("\n--- 通用控制 ---")
     print("  Q: 退出仿真")
@@ -497,7 +505,7 @@ if __name__ == '__main__':
         red_rudder = 0.0
         if keyboard.is_pressed('z'): red_rudder = -0.5
         if keyboard.is_pressed('c'): red_rudder = 0.5
-        red_fire_missile = 1.0 if keyboard.is_pressed('space') else 0.0
+        red_fire_missile = 1.0 if keyboard.is_pressed('c') else 0.0
         red_release_flare = 1.0 if keyboard.is_pressed('f') else 0.0
 
         red_action = [

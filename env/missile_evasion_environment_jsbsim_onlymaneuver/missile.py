@@ -19,45 +19,12 @@ class Missile:
         # --- 核心状态 ---
         self.state = np.array(initial_state, dtype=float)
 
-        # --- <<< 新增：状态标志和辅助属性 >>> ---
-        self.is_active = True
-        self.flight_time = 0.0
-        self.max_flight_time = 60.0  # 导弹最大飞行时间 (s)
-        self.target = None  # 用于存储导弹的目标对象 (在发射时由环境设置)
-        self.id = "missile_default_id"  # 导弹的唯一ID (在发射时由环境设置)
-        self.name = "Missile"  # Tacview显示的名称
-        self.color = "Orange"  # Tacview显示的颜色
-
-        # --- <<< 新增：用于计算视线角速率的历史变量 >>> ---
-        self.prev_theta_L = None
-        self.prev_phi_L = None
-
         # --- 物理与导引参数 (源自您的 AirCombatEnv) ---
         self.g = 9.81
         self.N = 5.0  # 比例导引系数
-        self.mass = 90.0  # (kg) AIM-9X 质量约为 85kg，我们取一个整数
+        self.mass = 60.0  # (kg) 导弹质量
         self.diameter = 0.127  # (m) 导弹直径
         self.max_g_load = 50.0  # 导弹最大过载
-
-        # --- <<< 新增：发动机参数 >>> ---
-        self.thrust = 12000.0  #15000.0 # (N) 助推器推力, 这是一个估算值
-        self.boost_time = 3.0  # (s) 助推器工作时间
-
-        # --- <<< 新增：从规避环境中移植的计时器 >>> ---
-        self.prev_dist_to_target = None  # 用于计算 range_rate
-        self.escape_timer = 0.0
-        self.lost_and_separating_duration = 0.0
-
-        # --- <<< 新增：失锁自毁计时器 >>> ---
-        self.time_since_lock_lost = 0.0
-
-        # --- <<< 新增：用于检测状态变化的标志 >>> ---
-        self.was_active_in_prev_frame = True
-        # --- <<< 新增：记录失效原因 >>> ---
-        self.inactive_reason = "In-Flight"
-
-        self.pos_prev = np.copy(self.pos)
-        self.target_pos_prev = np.zeros(3)  # 初始化
 
         # --- 导引头/引信参数 ---
         self.seeker_max_range = 30000.0  # 导引头最大搜索范围 (m)
@@ -88,55 +55,6 @@ class Missile:
         # --- 2. 调用动力学函数计算新状态 ---
         self.state = self._missile_dynamics(self.state, dt, theta_L_dot, phi_L_dot)
 
-    # --- <<< 改造：主更新方法 >>> ---
-    def update(self, dt: float, target_pos_equiv: np.ndarray or None):
-        """
-        根据等效目标位置，更新导弹在一个时间步 dt 后的状态。
-        这个方法现在封装了所有逻辑。
-
-        Args:
-            dt (float): 仿真时间步长 (秒)。
-            target_pos_equiv (np.ndarray or None): 导引头当前锁定的等效红外质心位置 [x, y, z]。
-                                                   如果为 None，表示导引头失锁。
-        """
-        # 1. 检查导弹是否还应继续飞行
-        self.flight_time += dt
-        if not self.is_active or self.flight_time > self.max_flight_time:
-            self.is_active = False
-            self.inactive_reason = "Flight Time Exceeded"  # <--- 记录原因
-            return
-
-        # 2. <<< 新增：检查失锁自毁逻辑 >>>
-        if target_pos_equiv is None:
-            # 如果当前帧失锁，累加计时器
-            self.time_since_lock_lost += dt
-        else:
-            # 如果当前帧有目标，清零计时器
-            self.time_since_lock_lost = 0.0
-        if self.time_since_lock_lost > 2.0:
-            # if self.is_active:  # 确保只打印一次
-                # print(f">>> 导弹 {self.name} 因持续失锁超过2秒而自毁。")
-            self.is_active = False
-            self.inactive_reason = "Target Lost"  # <--- 记录原因
-            return  # 自毁后，直接返回，不再进行后续计算
-
-        # 2. 计算视线角速率 (Line-of-Sight Rate)
-        if target_pos_equiv is not None:
-            # 如果导引头锁定目标，正常计算LOS速率
-            theta_L, phi_L, theta_L_dot, phi_L_dot = self._calculate_los_rate(
-                target_pos_equiv, (self.prev_theta_L, self.prev_phi_L), dt
-            )
-            # 更新历史值，为下一步计算做准备
-            self.prev_theta_L = theta_L
-            self.prev_phi_L = phi_L
-        else:
-            # 如果导引头失锁 (target_pos_equiv is None)，导弹按直线飞行
-            # 此时视线角速率为0，即没有制导指令
-            theta_L_dot, phi_L_dot = 0.0, 0.0
-
-        # 3. 调用动力学函数计算新状态
-        # 调用动力学模型时，需要传入当前飞行时间来判断发动机是否工作
-        self.state = self._missile_dynamics(self.state, dt, theta_L_dot, phi_L_dot, self.flight_time)
 
     # --- 属性访问器 (Property Accessors) ---
     @property
@@ -208,10 +126,9 @@ class Missile:
 
         return theta_L, phi_L, theta_L_dot, phi_L_dot
 
-    # --- <<< 核心修改：更新动力学模型 >>> ---
-    def _missile_dynamics(self, state, dt, theta_L_dot, phi_L_dot, current_flight_time):
+    def _missile_dynamics(self, state, dt, theta_L_dot, phi_L_dot):
         """
-        导弹的核心动力学积分器，增加了助推段逻辑。
+        导弹的核心动力学积分器。这是一个纯函数。
         """
 
         # def get_Cx_AIM9X(Ma: float) -> float:
@@ -223,6 +140,7 @@ class Missile:
         #         return 0.38 * np.exp(-0.35 * (Ma - 1.2)) + 0.15
         #     else:
         #         return 0.15
+
         # AIM-9X 阻力系数模型 更大
         def get_Cx_AIM9X(Ma: float) -> float:
             """
@@ -254,49 +172,57 @@ class Missile:
 
         V, theta, psi_c, x_pos, y_pos, z_pos = state
 
-        # 1. 过载计算 (不变)
+        # === 1. 过载计算 ===
         ny = self.N * V * theta_L_dot / self.g + np.cos(theta)
+        # nz = self.N * V * phi_L_dot * np.cos(theta) / self.g  # (修正) 传统导引律中, nz = N*V*phi_dot*cos(theta)/g
+        # (中文) 核心恢复：移除 nz 计算中的 cos(theta) 项
         nz = self.N * V * phi_L_dot / self.g
+
         n_total_cmd = np.sqrt(ny ** 2 + nz ** 2)
         if n_total_cmd > self.max_g_load:
             scale = self.max_g_load / n_total_cmd
-            ny, nz = ny * scale, nz * scale
+            ny *= scale
+            nz *= scale
 
-        # 2. 空气动力学计算 (不变)
+        # === 2. 空气动力学计算 ===
         H = y_pos
-        T_H = 288.15 - 0.0065 * H
-        rho = 1.225 * (T_H / 288.15) ** (self.g / (287 * 0.0065) - 1)
-        a_sound = np.sqrt(1.4 * 287 * T_H)
-        Ma = V / (a_sound + 1e-6)
+        Temper = 15.0
+        T_H = 273 + Temper - 0.6 * H / 100
+        P_H = (1 - H / 44300) ** 5.256
+        rho = 1.293 * P_H * (273 / T_H)
+        Ma = V / 340
+
         Cx = get_Cx_AIM9X(Ma)
         S = np.pi * (self.diameter ** 2) / 4
         q = 0.5 * rho * V ** 2
         F_drag = Cx * q * S
 
-        # 3. <<< 新增：判断发动机是否工作 >>>
-        current_thrust = self.thrust if current_flight_time <= self.boost_time else 0.0
+        # === 3. 积分与状态更新 ===
+        v_dot = -F_drag / self.mass - self.g * np.sin(theta)
+        V_next = V + v_dot * dt + 1e-8
 
-        # 4. 积分与状态更新 (合力计算发生变化)
-        # v_dot = (合力) / 质量
-        # 合力 = 推力 - 阻力 - 重力在速度方向的分量
-        v_dot = (current_thrust - F_drag) / self.mass - self.g * np.sin(theta)
-        V_next = V + v_dot * dt
-
-        # 为了防止仿真不稳定，可以在这里加一个马赫数上限
-        if V_next > 2.5 * a_sound:
-            V_next = 2.5 * a_sound
-
-        V_next = max(V_next, 1.0)
+        # 防止速度过小导致除零错误
+        # V_for_calc = max(V_next, 10.0)
 
         theta_dot = (ny * self.g - self.g * np.cos(theta)) / V_next
-        psi_c_dot = (nz * self.g) / (V_next * np.cos(theta) + 1e-6)
+        psi_c_dot = (nz * self.g) / (V_next * np.cos(theta))
 
-        theta_next = np.clip(theta + theta_dot * dt, -np.pi / 2, np.pi / 2)
-        psi_c_next = (psi_c + psi_c_dot * dt + np.pi) % (2 * np.pi) - np.pi
+        theta_next = theta + theta_dot * dt
+        psi_c_next = psi_c + psi_c_dot * dt
 
+        theta_next = np.clip(theta_next, -np.deg2rad(89), np.deg2rad(89))
+
+        if psi_c_next > np.pi:
+            psi_c_next -= 2 * np.pi
+        if psi_c_next < -np.pi:
+            psi_c_next += 2 * np.pi
+
+        # (中文) 您的旧代码中，位置更新使用的是积分前的速度矢量。
+        # 更精确的做法是使用平均速度或积分后的速度矢量。这里我们保持与您旧代码一致的简化。
         dx = V_next * np.cos(theta_next) * np.cos(psi_c_next)
         dy = V_next * np.sin(theta_next)
         dz = V_next * np.cos(theta_next) * np.sin(psi_c_next)
+
         pos_next = np.array([x_pos, y_pos, z_pos]) + np.array([dx, dy, dz]) * dt
 
         return np.array([V_next, theta_next, psi_c_next, *pos_next])

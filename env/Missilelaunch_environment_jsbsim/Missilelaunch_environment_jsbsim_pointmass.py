@@ -1,3 +1,5 @@
+from typing import Union, Tuple
+
 import numpy as np
 import time
 import math
@@ -263,10 +265,10 @@ class AirCombatEnv:
 
         # 测试时的状态
         blue_initial_state = np.array([
-            10000.0, 5000.0, -1000.0,  # pos (x, y, z) -> 北=0, 天=随机, 东=0
+            10000.0, 5000.0, 0.0,  # pos (x, y, z) -> 北=0, 天=随机, 东=0
             300.0,  # Vel (m/s) -> 随机速度
             0.0,  # theta (pitch) -> 随机俯仰角
-            np.deg2rad(-90),  # psi (heading) -> 默认朝向西
+            np.deg2rad(90),  # psi (heading) -> 默认朝向西
             0.0,  # phi (roll)
             0.0  # roll rate
         ])
@@ -283,6 +285,14 @@ class AirCombatEnv:
         self.blue_aircraft.color = "Blue"
         self.blue_aircraft.missile_ammo = self.initial_missiles  # 手动添加弹药属性
         self.blue_aircraft.flare_ammo = self.initial_flares  # 手动添加诱饵弹属性
+
+        # --- <<< 核心修正：手动删除上一回合的标签 >>> ---
+        if hasattr(self.red_aircraft, 'tacview_destroyed'):
+            delattr(self.red_aircraft, 'tacview_destroyed')
+
+        # (对蓝方也做同样处理，以保持代码一致性)
+        if hasattr(self.blue_aircraft, 'tacview_destroyed'):
+            delattr(self.blue_aircraft, 'tacview_destroyed')
 
         if self.tacview_enabled:
             self._stream_tacview_frame()
@@ -551,16 +561,23 @@ class AirCombatEnv:
                 # 这意味着，在本帧的某个时刻 (无论是在 _check_threat_escaped 还是在 m.update 中)，
                 # 导弹的状态从 True 变成了 False。
                 print(f">>> 导弹 {m.name} 已失效 (原因: {m.inactive_reason})。")
+                # --- <<< 核心修正：给导弹“打标签” >>> ---
+                setattr(m, 'tacview_destroyed', True)
+
                 if self.tacview_enabled:
                     self.tacview.stream_explosion(
                         t_explosion=self.tacview_global_time,
-                        missile_pos=m.pos,
+                        explosion_pos=m.pos,
                         is_hit=False,
                         destroy_object=m
                     )
 
             # 4. 更新“上一帧”的标志，为下一帧做准备
             m.was_active_in_prev_frame = m.is_active
+
+            # 在 env -> _update_all_missiles 的循环末尾
+            m.pos_prev = np.copy(m.pos)
+            m.target_pos_prev = np.copy(target_ac.pos)
 
         # # 更新红方导弹
         # for m in self.red_missiles:
@@ -582,46 +599,118 @@ class AirCombatEnv:
         """
         # --- 1. 检查导弹命中和飞机坠毁事件 ---
         # (这部分逻辑与 V3 完全相同，负责更新 self.red_alive 和 self.blue_alive 的状态)
+        # if self.blue_alive:
+        #     for m in self.red_missiles:
+        #         if not m.is_active: continue
+        #         if np.linalg.norm(m.pos - self.blue_aircraft.pos) < self.R_kill:
+        #             # print(f"\n>>> 蓝方飞机被红方导弹 {m.name} 击中！")
+        #             self.blue_alive = False
+        #             m.is_active = False
+        #             # --- <<< 核心修正：为“命中”事件触发爆炸 >>> ---
+        #             if self.tacview_enabled:
+        #                 self.tacview.stream_explosion(
+        #                     t_explosion=self.tacview_global_time,
+        #                     aircraft_pos=self.blue_aircraft.pos,
+        #                     missile_pos=m.pos,
+        #                     is_hit=True,  # 这是一个真实的命中
+        #                     # --- <<< 核心修正：传递要销毁的对象 >>> ---
+        #                     destroy_object = m
+        #                 )
+        #             break
+        #             # if self.tacview_enabled:
+        #             #     self.tacview.stream_explosion(self.tacview_global_time, self.blue_aircraft.pos, m.pos)
+        #             break
+        #
+        # if self.red_alive:
+        #     for m in self.blue_missiles:
+        #         if not m.is_active: continue
+        #         if np.linalg.norm(m.pos - self.red_aircraft.pos) < self.R_kill:
+        #             # print(f"\n>>> 红方飞机被蓝方导弹 {m.name} 击中！")
+        #             self.red_alive = False
+        #             m.is_active = False
+        #             if self.tacview_enabled:
+        #                 self.tacview.stream_explosion(
+        #                     t_explosion=self.tacview_global_time,
+        #                     aircraft_pos=self.red_aircraft.pos,
+        #                     missile_pos=m.pos,
+        #                     is_hit=True,  # 这是一个真实的命中
+        #                     # --- <<< 核心修正：传递要销毁的对象 >>> ---
+        #                     destroy_object = m
+        #                 )
+        #             # if self.tacview_enabled:
+        #             #     self.tacview.stream_explosion(self.tacview_global_time, self.red_aircraft.pos, m.pos)
+        #             break
+
+        # --- 使用新的命中检测函数 ---
+        dt_for_check = self.dt_normal  # 明确一下用于检查的步长
+
+        # 检查红方导弹对蓝方的命中
         if self.blue_alive:
             for m in self.red_missiles:
                 if not m.is_active: continue
-                if np.linalg.norm(m.pos - self.blue_aircraft.pos) < self.R_kill:
-                    # print(f"\n>>> 蓝方飞机被红方导弹 {m.name} 击中！")
+
+                # (重要前提：您需要在 Missile 类和 _update_all_missiles 中添加 pos_prev 和 target_pos_prev 的记录)
+                # 调用新的【内部】方法
+                hit_details = self._check_interpolated_hit_details(
+                    T1=m.target_pos_prev, T2=self.blue_aircraft.pos,
+                    M1=m.pos_prev, M2=m.pos,
+                    dt=dt_for_check
+                )
+
+                if hit_details:
+                    # --- 命中！---
+                    tau, missile_pos_impact, aircraft_pos_impact = hit_details
+
+                    print(f"\n>>> 蓝方飞机被红方导弹 {m.name} 击中！")
                     self.blue_alive = False
                     m.is_active = False
-                    # --- <<< 核心修正：为“命中”事件触发爆炸 >>> ---
+                    # --- <<< 核心修正：给被击落的飞机和导弹都“打上标签” >>> ---
+                    setattr(self.blue_aircraft, 'tacview_destroyed', True)
+                    setattr(m, 'tacview_destroyed', True)
+
                     if self.tacview_enabled:
+                        precise_explosion_time = (self.tacview_global_time) + tau
+                        # --- <<< 核心修正：提供所有必需的参数 (命中) >>> ---
                         self.tacview.stream_explosion(
-                            t_explosion=self.tacview_global_time,
-                            aircraft_pos=self.blue_aircraft.pos,
-                            missile_pos=m.pos,
-                            is_hit=True,  # 这是一个真实的命中
-                            # --- <<< 核心修正：传递要销毁的对象 >>> ---
-                            destroy_object = m
+                            t_explosion=precise_explosion_time,
+                            explosion_pos=missile_pos_impact,
+                            is_hit=True,
+                            hit_object=self.blue_aircraft,
+                            destroy_object=m,
+                            hit_object_pos=aircraft_pos_impact
                         )
                     break
-                    # if self.tacview_enabled:
-                    #     self.tacview.stream_explosion(self.tacview_global_time, self.blue_aircraft.pos, m.pos)
-                    break
 
+        # (对蓝方导弹对红方的命中做完全相同的修改)
         if self.red_alive:
             for m in self.blue_missiles:
                 if not m.is_active: continue
-                if np.linalg.norm(m.pos - self.red_aircraft.pos) < self.R_kill:
-                    # print(f"\n>>> 红方飞机被蓝方导弹 {m.name} 击中！")
+                hit_details = self._check_interpolated_hit_details(
+                    T1=m.target_pos_prev, T2=self.red_aircraft.pos,
+                    M1=m.pos_prev, M2=m.pos,
+                    dt=dt_for_check
+                )
+                if hit_details:
+                    # --- 命中！---
+                    tau, missile_pos_impact, aircraft_pos_impact = hit_details
+
+                    print(f"\n>>> 红方飞机被蓝方导弹 {m.name} 击中！")
                     self.red_alive = False
                     m.is_active = False
+                    # --- <<< 核心修正：给被击落的飞机和导弹都“打上标签” >>> ---
+                    setattr(self.red_aircraft, 'tacview_destroyed', True)
+                    setattr(m, 'tacview_destroyed', True)
+
                     if self.tacview_enabled:
+                        precise_explosion_time = (self.tacview_global_time) + tau
                         self.tacview.stream_explosion(
-                            t_explosion=self.tacview_global_time,
-                            aircraft_pos=self.red_aircraft.pos,
-                            missile_pos=m.pos,
-                            is_hit=True,  # 这是一个真实的命中
-                            # --- <<< 核心修正：传递要销毁的对象 >>> ---
-                            destroy_object = m
+                            t_explosion=precise_explosion_time,
+                            explosion_pos=missile_pos_impact,
+                            is_hit=True,
+                            hit_object=self.red_aircraft,  # <<<
+                            destroy_object=m,  # <<<
+                            hit_object_pos=aircraft_pos_impact  # <<<
                         )
-                    # if self.tacview_enabled:
-                    #     self.tacview.stream_explosion(self.tacview_global_time, self.red_aircraft.pos, m.pos)
                     break
 
         if self.red_alive and (self.red_aircraft.pos[1] < 100 or self.red_aircraft.velocity < 110):
@@ -680,6 +769,54 @@ class AirCombatEnv:
                     if not self.log_flags['blue_continue_evade_logged']:
                         print(">>> 红方已被击落，但其导弹威胁仍在，蓝方需继续规避...")
                         self.log_flags['blue_continue_evade_logged'] = True  # 打印后，立即将标志位设为True
+
+    # ==========================================================================
+    # --- <<< 新增：将命中检测函数作为环境的一个方法 >>> ---
+    # ==========================================================================
+    def _check_interpolated_hit_details(self, T1: np.ndarray, T2: np.ndarray,
+                                        M1: np.ndarray, M2: np.ndarray, dt: float
+                                        ) -> Union[Tuple[float, np.ndarray, np.ndarray], None]:
+        """
+        检查两个时间步之间的插值脱靶量，并在命中时返回详细信息。
+        这是一个独立的物理计算方法。
+
+        Returns:
+            None: 如果没有命中。
+            Tuple[float, np.ndarray, np.ndarray]: 如果命中，返回 (碰撞时刻的相对时间tau, 碰撞时导弹的位置, 碰撞时目标的位置)。
+                                                 tau 是一个在 [0, dt] 范围内的时间偏移。
+        """
+        # (函数体内的逻辑完全不变，只是现在它可以访问 self)
+
+        # 我们可以稍微优化一下，让它使用 self.R_kill
+        kill_radius = self.R_kill
+
+        if np.linalg.norm(T2 - M2) > 500:  # 粗略检查
+            return None
+
+        M1_M2 = M2 - M1
+        T1_T2 = T2 - T1
+        M1_T1 = T1 - M1
+
+        relative_velocity_sq = np.linalg.norm(T1_T2 - M1_M2) ** 2
+
+        if relative_velocity_sq < 1e-6:
+            interpolated_miss_distance = np.linalg.norm(M1_T1)
+            tau_ratio = 0.0
+        else:
+            tau_ratio = -np.dot(M1_T1, T1_T2 - M1_M2) / relative_velocity_sq
+            if not (0 <= tau_ratio <= 1):
+                return None  # 最近点不在步长区间内
+            relative_pos_at_closest = M1_T1 + tau_ratio * (T1_T2 - M1_M2)
+            interpolated_miss_distance = np.linalg.norm(relative_pos_at_closest)
+
+        # 检查引信是否触发
+        if interpolated_miss_distance < kill_radius:
+            tau_relative = tau_ratio * dt
+            missile_pos_at_impact = M1 + tau_ratio * M1_M2
+            target_pos_at_impact = T1 + tau_ratio * T1_T2
+            return tau_relative, missile_pos_at_impact, target_pos_at_impact
+
+        return None
 
     def _check_threat_escaped(self, missile: Missile, target_aircraft: Aircraft, dt: float) -> bool:
         """
@@ -1020,29 +1157,61 @@ class AirCombatEnv:
             if m.id not in self.history['blue_missiles']: self.history['blue_missiles'][m.id] = []
             self.history['blue_missiles'][m.id].append(m.state_vector.copy())
 
+    # def _stream_tacview_frame(self):
+    #     """发送当前世界状态到Tacview"""
+    #     if not self.tacview_enabled or not self.tacview.is_connected or self.tacview.tacview_final_frame_sent:
+    #         return
+    #
+    #     # --- 修正部分 ---
+    #     # 直接根据 red_alive 和 blue_alive 标志来构建列表，更简单且不会出错
+    #     all_aircraft = []
+    #     if self.red_alive and self.red_aircraft:
+    #         all_aircraft.append(self.red_aircraft)
+    #     if self.blue_alive and self.blue_aircraft:
+    #         all_aircraft.append(self.blue_aircraft)
+    #     # --- 修正结束 ---
+    #
+    #     all_missiles = [m for m in self.red_missiles if m.is_active] + [m for m in self.blue_missiles if m.is_active]
+    #     all_flares = self.red_flare_manager.flares + self.blue_flare_manager.flares
+    #     # --- <<< 核心修正：传递两个时间参数 >>> ---
+    #     self.tacview.stream_multi_object_frame(
+    #         global_t=self.tacview_global_time,  # Tacview时间轴使用全局时间
+    #         episode_t=self.t_now,  # 物理计算使用回合内时间
+    #         aircraft_list=all_aircraft,
+    #         missile_list=all_missiles,
+    #         flare_list=all_flares
+    #     )
+
     def _stream_tacview_frame(self):
-        """发送当前世界状态到Tacview"""
-        if not self.tacview_enabled or not self.tacview.is_connected or self.tacview.tacview_final_frame_sent:
+        """发送当前世界状态到Tacview，并【过滤掉】已打上“销毁”标签的对象。"""
+        if not self.tacview_enabled or not self.tacview.is_connected:
             return
 
-        # --- 修正部分 ---
-        # 直接根据 red_alive 和 blue_alive 标志来构建列表，更简单且不会出错
-        all_aircraft = []
-        if self.red_alive and self.red_aircraft:
-            all_aircraft.append(self.red_aircraft)
-        if self.blue_alive and self.blue_aircraft:
-            all_aircraft.append(self.blue_aircraft)
-        # --- 修正结束 ---
+        # --- <<< 核心修正：在构建列表时进行过滤 >>> ---
 
-        all_missiles = [m for m in self.red_missiles if m.is_active] + [m for m in self.blue_missiles if m.is_active]
-        all_flares = self.red_flare_manager.flares + self.blue_flare_manager.flares
-        # --- <<< 核心修正：传递两个时间参数 >>> ---
+        # a) 构建飞机列表
+        aircraft_list = []
+        if self.red_alive and not getattr(self.red_aircraft, 'tacview_destroyed', False):
+            aircraft_list.append(self.red_aircraft)
+        if self.blue_alive and not getattr(self.blue_aircraft, 'tacview_destroyed', False):
+            aircraft_list.append(self.blue_aircraft)
+
+        # b) 构建导弹列表
+        missile_list = [
+            m for m in (self.red_missiles + self.blue_missiles)
+            if m.is_active and not getattr(m, 'tacview_destroyed', False)
+        ]
+
+        # c) 诱饵弹列表 (不变)
+        flare_list = self.red_flare_manager.flares + self.blue_flare_manager.flares
+
+        # --- 调用 Tacview 接口 (不变) ---
         self.tacview.stream_multi_object_frame(
-            global_t=self.tacview_global_time,  # Tacview时间轴使用全局时间
-            episode_t=self.t_now,  # 物理计算使用回合内时间
-            aircraft_list=all_aircraft,
-            missile_list=all_missiles,
-            flare_list=all_flares
+            global_t=self.tacview_global_time,
+            episode_t=self.t_now,
+            aircraft_list=aircraft_list,
+            missile_list=missile_list,
+            flare_list=flare_list
         )
 
     def render(self, view_init_elev=20, view_init_azim=-150):

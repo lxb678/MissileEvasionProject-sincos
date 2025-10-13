@@ -145,75 +145,179 @@ class TacviewInterface:
     #         f"#{t_explosion:.2f}\n{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},Type=Misc+Explosion,Name=Hit\n")
     #     self._send(f"#{t_explosion + 2.0:.2f}\n-{explosion_id}\n")
     # --- <<< 核心修正：增强 stream_explosion 方法 >>> ---
+    # def stream_explosion(self, t_explosion: float,
+    #                      aircraft_pos: np.ndarray = None,
+    #                      missile_pos: np.ndarray = None,
+    #                      is_hit: bool = True,
+    #                     destroy_object: object = None): # <<< 新增参数
+    #     """
+    #     发送一个自我清理的爆炸效果。
+    #     (V2: 修改了签名以接受 missile_pos，并能处理其为None的情况)
+    #
+    #     Args:
+    #         t_explosion (float): 爆炸发生的全局时间。
+    #         aircraft_pos (np.ndarray, optional): 如果是命中，可以提供飞机位置。
+    #         missile_pos (np.ndarray, optional): 爆炸发生的中心位置 (通常是导弹位置)。
+    #         is_hit (bool): 标志是真实命中还是导弹自毁。
+    #     """
+    #     """
+    #     发送一个自我清理的爆炸效果，并可选择立即销毁一个关联的对象。
+    #
+    #     Args:
+    #         ...
+    #         destroy_object (object, optional): 需要在爆炸后立即从Tacview中移除的对象 (例如导弹)。
+    #     """
+    #     # --- 确定爆炸中心位置 ---
+    #     # 优先级：优先使用 missile_pos，如果未提供，则使用 aircraft_pos
+    #     if missile_pos is not None:
+    #         explosion_center_pos = missile_pos
+    #     elif aircraft_pos is not None:
+    #         explosion_center_pos = aircraft_pos
+    #     else:
+    #         # 如果两个位置都未提供，则无法创建爆炸，直接返回
+    #         print("[警告][Tacview] stream_explosion被调用，但未提供任何位置信息。")
+    #         return
+    #
+    #     explosion_id = self._get_next_event_id()
+    #     lon_e, lat_e, alt_e = self._pos_to_lon_lat_alt(explosion_center_pos)
+    #
+    #     # 根据事件类型选择不同的名称和效果 (逻辑不变)
+    #     if is_hit:
+    #         explosion_name = "Hit"
+    #         explosion_type = "Misc+Explosion"
+    #     else:
+    #         explosion_name = "Missile_End"
+    #         explosion_type = "Misc+Explosion"
+    #
+    #     data_str = f"#{t_explosion:.2f}\n"
+    #
+    #     # 1. 创建爆炸对象
+    #     data_str += (f"{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},"
+    #                  f"Type={explosion_type},Name={explosion_name}\n")
+    #
+    #     # --- <<< 核心修正：立即删除关联对象 >>> ---
+    #     # 2. 如果指定了要销毁的对象，则查找其ID并发送删除指令
+    #     # if destroy_object is not None:
+    #     #     py_id = id(destroy_object)
+    #     #     if py_id in self.object_ids:
+    #     #         object_to_destroy_id = self.object_ids[py_id]
+    #     #         data_str += f"-{object_to_destroy_id}\n"
+    #     #         # 从我们的ID映射中也移除它，防止未来复用
+    #     #         del self.object_ids[py_id]
+    #     self._send(data_str)
+    #
+    #     # # 发送创建爆炸对象的帧
+    #     # self._send(
+    #     #     f"#{t_explosion:.2f}\n"
+    #     #     f"{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},"
+    #     #     f"Type={explosion_type},Name={explosion_name}\n"
+    #     # )
+    #     # 发送2秒后自动删除爆炸对象的帧
+    #     # self._send(f"#{t_explosion + 2.0:.2f}\n-{explosion_id}\n")
+
+    # # --- <<< 核心修正：最终的、统一的 stream_explosion 方法 >>> ---
+    # def stream_explosion(self, t_explosion: float,
+    #                      explosion_pos: np.ndarray,
+    #                      is_hit: bool,
+    #                      hit_object: object = None,
+    #                      destroy_object: object = None,
+    #                      hit_object_pos: np.ndarray = None):
+    #     """
+    #     发送一个统一的爆炸效果。
+    #     - 如果是命中 (is_hit=True)，会创建大爆炸，并在爆炸前发送位置修正帧。
+    #     - 如果是自毁 (is_hit=False)，会创建小爆炸。
+    #     - 总是会销毁 destroy_object (通常是导弹)。
+    #
+    #     Args:
+    #         t_explosion (float): 爆炸发生的精确插值时间。
+    #         explosion_pos (np.ndarray): 爆炸发生的中心位置 (导弹的精确位置)。
+    #         is_hit (bool): 标志是真实命中还是导弹自毁。
+    #         hit_object (object, optional): 【仅命中时提供】被命中的对象 (飞机)。
+    #         destroy_object (object, optional): 需要立即销毁的对象 (导弹)。
+    #         hit_object_pos (np.ndarray, optional): 【仅命中时提供】被命中对象在碰撞时的精确位置。
+    #     """
+    #     # --- 步骤 1: (仅命中时) 发送位置修正帧 ---
+    #     if is_hit and hit_object is not None and destroy_object is not None and hit_object_pos is not None:
+    #         correction_str = f"#{t_explosion:.3f}\n"
+    #         missile_id = self._get_or_create_id(destroy_object)
+    #         aircraft_id = self._get_or_create_id(hit_object)
+    #         lon_m, lat_m, alt_m = self._pos_to_lon_lat_alt(explosion_pos)
+    #         lon_a, lat_a, alt_a = self._pos_to_lon_lat_alt(hit_object_pos)
+    #         correction_str += f"{missile_id},T={lon_m:.8f}|{lat_m:.8f}|{alt_m:.1f}\n"
+    #         correction_str += f"{aircraft_id},T={lon_a:.8f}|{lat_a:.8f}|{alt_a:.1f}\n"
+    #         self._send(correction_str)
+    #
+    #     # --- 步骤 2: 创建爆炸特效并销毁对象 ---
+    #     explosion_id = self._get_next_event_id()
+    #     lon_e, lat_e, alt_e = self._pos_to_lon_lat_alt(explosion_pos)
+    #
+    #     if is_hit:
+    #         explosion_name = "Hit"
+    #         explosion_type = "Misc+Explosion"
+    #     else:
+    #         explosion_name = "Missile_End"
+    #         explosion_type = "Misc+Explosion"
+    #
+    #     data_str = f"#{t_explosion:.3f}\n"
+    #     data_str += (f"{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},"
+    #                  f"Type={explosion_type},Name={explosion_name}\n")
+    #
+    #     # # 销毁导弹 (总是执行)
+    #     # if destroy_object is not None:
+    #     #     py_id = id(destroy_object)
+    #     #     if py_id in self.object_ids:
+    #     #         object_id = self.object_ids[py_id];
+    #     #         data_str += f"-{object_id}\n";
+    #     #         del self.object_ids[py_id]
+    #     #
+    #     # # 销毁被命中的飞机 (仅命中时执行)
+    #     # if is_hit and hit_object is not None:
+    #     #     py_id = id(hit_object)
+    #     #     if py_id in self.object_ids:
+    #     #         object_id = self.object_ids[py_id];
+    #     #         data_str += f"-{object_id}\n";
+    #     #         del self.object_ids[py_id]
+    #
+    #     self._send(data_str)
+
+    # --- <<< 核心修正：最终的、功能完备的 stream_explosion 方法 >>> ---
     def stream_explosion(self, t_explosion: float,
-                         aircraft_pos: np.ndarray = None,
-                         missile_pos: np.ndarray = None,
-                         is_hit: bool = True,
-                        destroy_object: object = None): # <<< 新增参数
+                         explosion_pos: np.ndarray,
+                         is_hit: bool,
+                         hit_object: object = None,
+                         destroy_object: object = None,
+                         hit_object_pos: np.ndarray = None):
         """
-        发送一个自我清理的爆炸效果。
-        (V2: 修改了签名以接受 missile_pos，并能处理其为None的情况)
+        发送一个统一的爆炸效果，并在命中时发送精确的位置修正帧。
+        所有创建的对象都将在回合结束时被统一清理。
+        """
+        # --- 步骤 1: (仅命中时) 发送精确位置修正帧 ---
+        if is_hit and hit_object is not None and destroy_object is not None and hit_object_pos is not None:
+            correction_str = f"#{t_explosion:.3f}\n"  # 使用高精度时间戳
+            missile_id = self._get_or_create_id(destroy_object)
+            aircraft_id = self._get_or_create_id(hit_object)
+            lon_m, lat_m, alt_m = self._pos_to_lon_lat_alt(explosion_pos)
+            lon_a, lat_a, alt_a = self._pos_to_lon_lat_alt(hit_object_pos)
+            correction_str += f"{missile_id},T={lon_m:.8f}|{lat_m:.8f}|{alt_m:.1f}\n"
+            correction_str += f"{aircraft_id},T={lon_a:.8f}|{lat_a:.8f}|{alt_a:.1f}\n"
+            self._send(correction_str)
 
-        Args:
-            t_explosion (float): 爆炸发生的全局时间。
-            aircraft_pos (np.ndarray, optional): 如果是命中，可以提供飞机位置。
-            missile_pos (np.ndarray, optional): 爆炸发生的中心位置 (通常是导弹位置)。
-            is_hit (bool): 标志是真实命中还是导弹自毁。
-        """
-        """
-        发送一个自我清理的爆炸效果，并可选择立即销毁一个关联的对象。
-
-        Args:
-            ...
-            destroy_object (object, optional): 需要在爆炸后立即从Tacview中移除的对象 (例如导弹)。
-        """
-        # --- 确定爆炸中心位置 ---
-        # 优先级：优先使用 missile_pos，如果未提供，则使用 aircraft_pos
-        if missile_pos is not None:
-            explosion_center_pos = missile_pos
-        elif aircraft_pos is not None:
-            explosion_center_pos = aircraft_pos
-        else:
-            # 如果两个位置都未提供，则无法创建爆炸，直接返回
-            print("[警告][Tacview] stream_explosion被调用，但未提供任何位置信息。")
-            return
-
+        # --- 步骤 2: 创建持久化的爆炸特效 ---
+        # --- 步骤 2: 创建持久化的爆炸特效 ---
+        # !!! 关键：为爆炸事件调用【专属的】事件ID生成器 !!!
         explosion_id = self._get_next_event_id()
-        lon_e, lat_e, alt_e = self._pos_to_lon_lat_alt(explosion_center_pos)
+        # explosion_dummy_object = f"explosion_{t_explosion}_{np.random.rand()}"
+        # explosion_id = self._get_or_create_id(explosion_dummy_object)
+        lon_e, lat_e, alt_e = self._pos_to_lon_lat_alt(explosion_pos)
 
-        # 根据事件类型选择不同的名称和效果 (逻辑不变)
-        if is_hit:
-            explosion_name = "Hit"
-            explosion_type = "Misc+Explosion"
-        else:
-            explosion_name = "Missile_End"
-            explosion_type = "Misc+Explosion"
+        explosion_name = "Hit" if is_hit else "Missile_End"
+        explosion_type = "Misc+Explosion"
 
-        data_str = f"#{t_explosion:.2f}\n"
-
-        # 1. 创建爆炸对象
+        data_str = f"#{t_explosion:.3f}\n"  # 使用高精度时间戳
         data_str += (f"{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},"
                      f"Type={explosion_type},Name={explosion_name}\n")
-
-        # --- <<< 核心修正：立即删除关联对象 >>> ---
-        # 2. 如果指定了要销毁的对象，则查找其ID并发送删除指令
-        # if destroy_object is not None:
-        #     py_id = id(destroy_object)
-        #     if py_id in self.object_ids:
-        #         object_to_destroy_id = self.object_ids[py_id]
-        #         data_str += f"-{object_to_destroy_id}\n"
-        #         # 从我们的ID映射中也移除它，防止未来复用
-        #         del self.object_ids[py_id]
         self._send(data_str)
 
-        # # 发送创建爆炸对象的帧
-        # self._send(
-        #     f"#{t_explosion:.2f}\n"
-        #     f"{explosion_id},T={lon_e:.8f}|{lat_e:.8f}|{alt_e:.1f},"
-        #     f"Type={explosion_type},Name={explosion_name}\n"
-        # )
-        # 发送2秒后自动删除爆炸对象的帧
-        # self._send(f"#{t_explosion + 2.0:.2f}\n-{explosion_id}\n")
 
     # --- 关键修改 2: 提供环境正在调用的正确方法名和健壮的签名 ---
     def end_of_episode(self, t_now: float, **kwargs):
