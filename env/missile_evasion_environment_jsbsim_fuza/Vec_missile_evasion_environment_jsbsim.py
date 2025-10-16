@@ -16,7 +16,8 @@ from .tacview_interface import TacviewInterface
 
 # <<< 新增 >>> 从PPO代码文件导入动作空间定义，确保一致性
 # 注意：这里的路径可能需要根据您的项目结构调整
-from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import CONTINUOUS_DIM, DISCRETE_DIMS, DISCRETE_ACTION_MAP
+from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import CONTINUOUS_DIM, DISCRETE_DIMS, \
+    DISCRETE_ACTION_MAP
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']
 matplotlib.rcParams['axes.unicode_minus'] = False
@@ -74,9 +75,9 @@ class AirCombatEnv(gym.Env):
 
         # --- (中文) 新增：补全缺失的内部循环参数 ---
         # 这些参数决定了在 step 方法内部的物理仿真是如何运行的
-        self.dt_normal = 0.02  # 大步长 (当距离远时)
-        self.dt_small = 0.02 # 小步长 (当距离近时)
-        self.dt_flare = 0.02  # 投放诱饵弹时的步长
+        self.dt_normal = 0.05  # 大步长 (当距离远时)
+        self.dt_small = 0.05  # 小步长 (当距离近时)
+        self.dt_flare = 0.05  # 投放诱饵弹时的步长
         self.R_switch = 500  # (米) 切换大小步长的距离阈值
 
         # (中文) 从您的主脚本中看到您还引用了 dt_dec，这里也为您补上
@@ -106,8 +107,8 @@ class AirCombatEnv(gym.Env):
         self.done = False
         self.success = False
         self.miss_distance = None
-        self.o_ir = 24  # 初始诱饵弹数量
-        self.N_infrared = 24
+        self.o_ir = 30  # 初始诱饵弹数量
+        self.N_infrared = 30
 
         # 用于存储历史状态，以计算变化率 (如速度变化、距离变化)
         self.prev_aircraft_state = None
@@ -125,7 +126,7 @@ class AirCombatEnv(gym.Env):
         self.episode_count = 0
         # <<< 新增 >>> 将仿真步长 dt 存储为成员变量，以便传递给飞机
         # JSBSim需要知道物理仿真的时间步长
-        self.physical_dt = 0.02  # 假设您的 dt_normal/small/flare 都是0.1
+        self.physical_dt = 0.05  # 假设您的 dt_normal/small/flare 都是0.1
         # 如果它们不同，需要在 run_one_step 中传递正确的 dt
 
     def reset(self, seed=None, options=None) -> tuple:
@@ -193,8 +194,6 @@ class AirCombatEnv(gym.Env):
         # <<< 核心更改 >>> Aircraft类的实例化变得简单
         # 只需要传递 physical_dt 和标准单位的 initial_state
         self.aircraft.reset(initial_state=initial_aircraft_state)
-
-
 
         # 计算初始视线角，让导弹直接对准飞机
         R_vec = self.aircraft.pos - np.array([x_m, y_m, z_m])
@@ -268,7 +267,7 @@ class AirCombatEnv(gym.Env):
         R_rel_start = self.prev_R_rel
         if R_rel_start < self.R_switch:
             num_steps, step_dt = int(round(self.dt_dec / self.dt_small)), self.dt_small
-        elif self.flare_manager.schedule: # 检查是否有待投放的计划
+        elif self.flare_manager.schedule:  # 检查是否有待投放的计划
             num_steps, step_dt = int(round(self.dt_dec / self.dt_flare)), self.dt_flare
         else:
             num_steps, step_dt = int(round(self.dt_dec / self.dt_normal)), self.dt_normal
@@ -331,7 +330,7 @@ class AirCombatEnv(gym.Env):
         # <<< 逻辑修正：现在只更新诱饵弹状态，并根据 schedule 创建新的 >>>
         # FlareManager 的 update 方法内部会检查 self.schedule 列表，
         # 如果当前时间 t 匹配了计划中的某个时间点，它会自动创建新的 Flare 实例。
-        self.flare_manager.update(self.t_now, dt, self.aircraft) # 注意：这里传入的是 t 时刻的 aircraft 对象
+        self.flare_manager.update(self.t_now, dt, self.aircraft)  # 注意：这里传入的是 t 时刻的 aircraft 对象
 
         # c) 导引头：根据【当前】的飞机和导弹状态，计算导引目标
         target_pos_equiv = self._calculate_equivalent_target()
@@ -361,11 +360,9 @@ class AirCombatEnv(gym.Env):
         self._check_fuze_condition(dt)
         # if self.done: return  # 如果引信引爆，立即返回
 
-
         # --- 2. (新时序) 【同步】更新所有对象的状态 ---
         # self.aircraft.state = aircraft_state_next
         self.missile.state = missile_state_next
-
 
         # 3. 【最后】，才更新用于下一轮计算的【历史状态】
         if target_pos_equiv is not None:
@@ -374,41 +371,95 @@ class AirCombatEnv(gym.Env):
             # self.last_valid_theta_dot = theta_L_dot
             # self.last_valid_phi_dot = phi_L_dot
 
-
         # --- 5. (核心修正) 在这里检查所有其他的终止条件 ---
         self._check_termination_conditions(dt)  # 传入正确的物理步长 dt
 
         # --- 6. (可选) Tacview 更新 ---
         if self.tacview_enabled:
             if not self.missile_exploded:
-                self.tacview.stream_frame(self.tacview_global_time, self.aircraft, self.missile, self.flare_manager.flares)
+                self.tacview.stream_frame(self.tacview_global_time, self.aircraft, self.missile,
+                                          self.flare_manager.flares)
 
-    # <<< 新增 >>> 辅助方法，用于执行复杂的投放程序
+    # # <<< 新增 >>> 辅助方法，用于执行复杂的投放程序
+    # def _execute_flare_program(self, salvo_idx, intra_idx, num_groups_idx, inter_idx):
+    #     """
+    #     将离散动作索引转换为物理参数，并安排投放计划。(追加模式）
+    #     """
+    #     # 1. 使用 DISCRETE_ACTION_MAP 将索引转换为实际值
+    #     program = {
+    #         'salvo_size': DISCRETE_ACTION_MAP['salvo_size'][salvo_idx],
+    #         'intra_interval': DISCRETE_ACTION_MAP['intra_interval'][intra_idx],
+    #         'num_groups': DISCRETE_ACTION_MAP['num_groups'][num_groups_idx],
+    #         'inter_interval': DISCRETE_ACTION_MAP['inter_interval'][inter_idx]
+    #     }
+    #
+    #     # 2. 计算这个程序总共需要多少发诱饵弹
+    #     total_flares_needed = program['salvo_size'] * program['num_groups']
+    #
+    #     # 3. 检查是否有足够的诱饵弹
+    #     if self.o_ir >= total_flares_needed:
+    #         # 4. 如果足够，则更新剩余数量并安排计划
+    #         self.o_ir -= total_flares_needed
+    #         self.flare_manager.schedule_program(self.t_now, program)
+    #         print(f"[{self.t_now:.2f}s] 已安排投放程序: {program}, 剩余诱饵弹: {self.o_ir}")
+    #     else:
+    #         # 如果不够，则不执行任何操作
+    #         # print(f"[{self.t_now:.2f}s] 诱饵弹不足，无法执行投放程序。需要 {total_flares_needed}, 剩余 {self.o_ir}")
+    #         pass
+
     def _execute_flare_program(self, salvo_idx, intra_idx, num_groups_idx, inter_idx):
         """
-        将离散动作索引转换为物理参数，并安排投放计划。
+        (V6 - 终极修正版：彻底清空，精确记账)
         """
-        # 1. 使用 DISCRETE_ACTION_MAP 将索引转换为实际值
-        program = {
+        # --- 步骤 1: 计算当前总可用弹药 ---
+        future_schedule = [t for t in self.flare_manager.schedule if t >= self.t_now]
+        refunded_flares = len(future_schedule)
+        current_available_flares = self.o_ir + refunded_flares
+
+        # --- 步骤 2: 将智能体请求转换为理想的投放时间戳列表 ---
+        ideal_program = {
             'salvo_size': DISCRETE_ACTION_MAP['salvo_size'][salvo_idx],
             'intra_interval': DISCRETE_ACTION_MAP['intra_interval'][intra_idx],
             'num_groups': DISCRETE_ACTION_MAP['num_groups'][num_groups_idx],
             'inter_interval': DISCRETE_ACTION_MAP['inter_interval'][inter_idx]
         }
 
-        # 2. 计算这个程序总共需要多少发诱饵弹
-        total_flares_needed = program['salvo_size'] * program['num_groups']
+        ideal_release_times = []
+        if ideal_program['num_groups'] > 0 and ideal_program['salvo_size'] > 0:
+            for group_idx in range(ideal_program['num_groups']):
+                for salvo_idx in range(ideal_program['salvo_size']):
+                    group_start_time = self.t_now + group_idx * ideal_program['inter_interval']
+                    release_time = group_start_time + salvo_idx * ideal_program['intra_interval']
+                    ideal_release_times.append(release_time)
 
-        # 3. 检查是否有足够的诱饵弹
-        if self.o_ir >= total_flares_needed:
-            # 4. 如果足够，则更新剩余数量并安排计划
-            self.o_ir -= total_flares_needed
-            self.flare_manager.schedule_program(self.t_now, program)
-            print(f"[{self.t_now:.2f}s] 已安排投放程序: {program}, 剩余诱饵弹: {self.o_ir}")
-        else:
-            # 如果不够，则不执行任何操作
-            # print(f"[{self.t_now:.2f}s] 诱饵弹不足，无法执行投放程序。需要 {total_flares_needed}, 剩余 {self.o_ir}")
-            pass
+        # --- 步骤 3: 根据可用弹药，截取实际要执行的计划 ---
+        num_to_release = min(len(ideal_release_times), current_available_flares)
+        final_release_times = ideal_release_times[:num_to_release]
+
+        # --- 步骤 4: 更新最终的投放计划和库存 (核心修正) ---
+
+        # a. 彻底清空未来的旧计划，只保留已经过去的
+        past_schedule = [t for t in self.flare_manager.schedule if t < self.t_now]
+
+        # b. 将新计算出的最终计划与过去的历史合并
+        self.flare_manager.schedule = past_schedule + final_release_times
+
+        # c. 排序以保证时间顺序
+        self.flare_manager.schedule.sort()
+
+        # d. 用最直接的方式更新最终库存
+        self.o_ir = current_available_flares - num_to_release
+
+        # --- 调试日志 ---
+        # if num_to_release > 0:
+        #     if num_to_release < len(ideal_release_times):
+        #         print(
+        #             f"[{self.t_now:.2f}s] 弹药不足！请求: {len(ideal_release_times)}, 可用: {current_available_flares}. "
+        #             f"实际安排: {num_to_release} 发。")
+        #     else:
+        #         print(f"[{self.t_now:.2f}s] 已安排投放 {num_to_release} 发诱饵弹。")
+        #
+        # print(f"[{self.t_now:.2f}s] 更新后剩余诱饵弹 (o_ir): {self.o_ir}")
 
     def _calculate_los_rate(self, target_pos: np.ndarray, prev_los_angles: tuple, dt: float) -> tuple:
         """
@@ -493,9 +544,9 @@ class AirCombatEnv(gym.Env):
                 # 确保插值时刻在有效范围内
                 if t1 <= t_star <= self.t_now:
                     interpolated_miss_distance = np.linalg.norm(M1_T1 + (t_star - t1) * (T1_T2 - M1_M2) / dt)
-                # else:
-                #     interpolated_miss_distance = R_rel_now
-                #     t_star = self.t_now  # 如果不在区间内，则认为最近点就是当前时刻
+                    # else:
+                    #     interpolated_miss_distance = R_rel_now
+                    #     t_star = self.t_now  # 如果不在区间内，则认为最近点就是当前时刻
 
                     # --- 2. 检查引信是否触发 ---
                     if interpolated_miss_distance < self.R_kill:
@@ -560,7 +611,7 @@ class AirCombatEnv(gym.Env):
             #      [sin,  cos]]
             # 我们只关心水平面 xz (北-东)
             # 3. 计算飞机指向导弹的相对位置矢量，并投影到水平面
-            R_vec_beta = x_missile[3:6] - x_target[0:3]# 水平面上的 (x, z) 分量
+            R_vec_beta = x_missile[3:6] - x_target[0:3]  # 水平面上的 (x, z) 分量
             R_proj_world = np.array([R_vec_beta[0], R_vec_beta[2]])
             # 4. 将这个相对位置矢量旋转到以飞机为参考的坐标系下
             # [x_rel_body] = [cos, -sin] * [x_rel_world]

@@ -10,6 +10,7 @@ import numpy as np
 import os
 import re
 import time
+from torch.cuda.amp import GradScaler, autocast
 
 # --- 动作空间配置 ---
 # 定义连续动作的维度
@@ -42,11 +43,15 @@ TOTAL_ACTION_DIM_BUFFER = CONTINUOUS_DIM + len(DISCRETE_DIMS)  # 4 + 5 = 9
 #     'inter_interval': [0.5, 1.0, 2.0]  # index 0 -> 0.5s 组间隔, ...
 # }
 DISCRETE_ACTION_MAP = {
-    'salvo_size': [2, 4, 6],          # 投放数量：低、中、高强度
-    'intra_interval': [0.02, 0.04, 0.1], # 组内间隔(秒)：密集(欺骗)、标准、稍疏
-# 'intra_interval': [0.05, 0.1, 0.2], # 组内间隔(秒)：密集(欺骗)、标准、稍疏
-    'num_groups': [1, 2, 3],          # 投放组数：单次反应、标准程序、持续程序
-    'inter_interval': [0.5, 1.0, 2.0]  # 组间间隔(秒)：紧急连续、标准连续、预防/遮蔽
+#     'salvo_size': [2, 4, 6],          # 投放数量：低、中、高强度
+#     'intra_interval': [0.02, 0.04, 0.1], # 组内间隔(秒)：密集(欺骗)、标准、稍疏
+# # 'intra_interval': [0.05, 0.1, 0.2], # 组内间隔(秒)：密集(欺骗)、标准、稍疏
+#     'num_groups': [1, 2, 3],          # 投放组数：单次反应、标准程序、持续程序
+#     'inter_interval': [0.5, 1.0, 2.0]  # 组间间隔(秒)：紧急连续、标准连续、预防/遮蔽
+    'salvo_size': [1, 2, 3],  # 修改为发射1、2、3枚
+    'intra_interval': [0.05, 0.1, 0.15],
+    'num_groups': [1, 2, 3],
+    'inter_interval': [0.2, 0.5, 1.0]
 }
 
 # --- 动作范围定义 (仅用于连续动作缩放) ---
@@ -67,10 +72,35 @@ class Actor(Module):
         super(Actor, self).__init__()
         self.input_dim = ACTOR_PARA.input_dim
         # <<< 更改 >>> 输出维度现在是 (连续*2) + 新的logits总数
-        self.output_dim = (CONTINUOUS_DIM * 2) + TOTAL_DISCRETE_LOGITS
+        # 注意：这里不再需要一个总的 output_dim
+        # self.output_dim = (CONTINUOUS_DIM * 2) + TOTAL_DISCRETE_LOGITS
         self.log_std_min = -20.0
         self.log_std_max = 2.0
-        self.init_model()
+
+        # 定义共享骨干网络
+        # 负责从原始状态中提取高级特征
+        shared_layers_dims = [self.input_dim] + ACTOR_PARA.model_layer_dim
+        self.shared_network = Sequential()
+        for i in range(len(shared_layers_dims) - 1):
+            # 添加线性层
+            self.shared_network.add_module(f'fc_{i}', Linear(shared_layers_dims[i], shared_layers_dims[i + 1]))
+            # --- 在此处添加 LayerNorm ---
+            # LayerNorm 的输入维度是前一个线性层的输出维度
+            self.shared_network.add_module(f'LayerNorm_{i}', LayerNorm(shared_layers_dims[i + 1]))
+            # 添加激活函数
+            self.shared_network.add_module(f'LeakyReLU_{i}', LeakyReLU())
+
+        # 骨干网络的输出维度，将作为各个头部的输入
+        shared_output_dim = ACTOR_PARA.model_layer_dim[-1]
+        # --- 独立头部网络 ---
+        # 1. 连续动作头部：输出均值和标准差
+        self.continuous_head = Linear(shared_output_dim, CONTINUOUS_DIM * 2)
+
+        # 2. 离散动作头部：输出所有离散决策所需的 logits
+        self.discrete_head = Linear(shared_output_dim, TOTAL_DISCRETE_LOGITS)
+
+        # self.init_model()
+        # --- 优化器和设备设置 ---
         self.optim = torch.optim.Adam(self.parameters(), ACTOR_PARA.lr)
         self.actor_scheduler = lr_scheduler.LinearLR(
             self.optim,
@@ -97,29 +127,35 @@ class Actor(Module):
         if obs_tensor.dim() == 1:
             obs_tensor = obs_tensor.unsqueeze(0)
 
-        output = self.network(obs_tensor)
+        # 1. 通过共享骨干网络提取通用特征
+        shared_features = self.shared_network(obs_tensor)
 
-        # 1. 切分连续动作参数 (均值和标准差)
-        cont_params = output[:, :CONTINUOUS_DIM * 2]
-        # 2. 切分所有离散动作的 logits
-        all_disc_logits = output[:, CONTINUOUS_DIM * 2:]
+        # 2. 将共享特征分别送入不同的头部网络
+        cont_params = self.continuous_head(shared_features)
+        all_disc_logits = self.discrete_head(shared_features)
 
-        # 3. <<< 更改 >>> 按新的 DISCRETE_DIMS 结构将所有logits切分为5个部分
+        # 3. 按 DISCRETE_DIMS 结构将所有logits切分为5个部分
         split_sizes = list(DISCRETE_DIMS.values())
         logits_parts = torch.split(all_disc_logits, split_sizes, dim=1)
 
-        trigger_logits = logits_parts[0]
-        salvo_size_logits = logits_parts[1]
-        intra_interval_logits = logits_parts[2]
-        num_groups_logits = logits_parts[3]
-        inter_interval_logits = logits_parts[4]
+        # 为每个部分分配合理的变量名
+        trigger_logits, salvo_size_logits, intra_interval_logits, num_groups_logits, inter_interval_logits = logits_parts
 
         # 4. 【动作掩码】逻辑 (只作用于触发器，如果没诱饵弹则不能投放)
+        # 假设 obs_tensor 的第 7 个特征 (索引为7) 代表红外诱饵弹数量
         has_flares_info = obs_tensor[:, 7]
         mask = (has_flares_info == 0)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
+            # 将没有诱饵弹的样本对应的 logit 设置为一个极小值，阻止选择该动作
             trigger_logits_masked[mask] = torch.finfo(torch.float32).min
+            # --- 这是修改后的正确代码 ---
+            # 获取 trigger_logits_masked 张量自身的数据类型 (dtype)
+            # 然后获取该 dtype 对应的极小值
+            # fill_value = torch.finfo(trigger_logits_masked.dtype).min
+            # trigger_logits_masked[mask] = fill_value
+            # 使用一个在 FP16 表示范围内且足够小的安全值
+            # trigger_logits_masked[mask] = -1e4  # -10000.0
 
         # 5. 创建所有动作分布对象
         # 5.1 连续动作分布
@@ -128,14 +164,14 @@ class Actor(Module):
         std = torch.exp(log_std)
         continuous_base_dist = Normal(mu, std)
 
-        # 5.2 <<< 更改 >>> 创建新的5个离散分布
+        # 5.2  创建新的5个离散分布
         trigger_dist = Bernoulli(logits=trigger_logits_masked.squeeze(-1))
         salvo_size_dist = Categorical(logits=salvo_size_logits)
         intra_interval_dist = Categorical(logits=intra_interval_logits)
         num_groups_dist = Categorical(logits=num_groups_logits)
         inter_interval_dist = Categorical(logits=inter_interval_logits)
 
-        # 6. <<< 更改 >>> 返回包含所有新分布的字典
+        # 6.返回包含所有新分布的字典
         distributions = {
             'continuous': continuous_base_dist,
             'trigger': trigger_dist,
@@ -168,18 +204,31 @@ class Critic(Module):
         self.to(CRITIC_PARA.device)
 
     def init_model(self):
-        """初始化神经网络结构"""
+        """初始化 Critic 网络结构，并加入 LayerNorm 以增强稳定性"""
         self.network = Sequential()
-        for i in range(len(CRITIC_PARA.model_layer_dim) + 1):
-            if i == 0:
-                self.network.add_module('fc_{}'.format(i), Linear(self.input_dim, CRITIC_PARA.model_layer_dim[0]))
-                self.network.add_module('LeakyReLU_{}'.format(i), LeakyReLU())
-            elif i < len(CRITIC_PARA.model_layer_dim):
-                self.network.add_module('fc_{}'.format(i),
-                                        Linear(CRITIC_PARA.model_layer_dim[i - 1], CRITIC_PARA.model_layer_dim[i]))
-                self.network.add_module('LeakyReLU_{}'.format(i), LeakyReLU())
-            else:
-                self.network.add_module('fc_{}'.format(i), Linear(CRITIC_PARA.model_layer_dim[-1], self.output_dim))
+
+        # 1. 定义所有层的维度列表，从输入层到最后一个隐藏层
+        # 例如: input_dim=10, model_layer_dim=[256, 256]
+        # -> layers_dims 会是 [10, 256, 256]
+        layers_dims = [self.input_dim] + CRITIC_PARA.model_layer_dim
+
+        # 2. 循环构建所有的隐藏层
+        # 这个循环将构建从 input->256 和 256->256 的部分
+        for i in range(len(layers_dims) - 1):
+            # 添加线性层
+            self.network.add_module(f'fc_{i}', Linear(layers_dims[i], layers_dims[i + 1]))
+
+            # 在线性层之后、激活函数之前添加 LayerNorm
+            # LayerNorm 的维度是其前面线性层的输出维度
+            self.network.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
+
+            # 添加激活函数
+            self.network.add_module(f'LeakyReLU_{i}', LeakyReLU())
+
+        # 3. 单独添加最后的输出层
+        # 它的输入是最后一个隐藏层的维度，输出是 self.output_dim (通常为1)
+        # 最后的输出层通常不需要 LayerNorm 或激活函数
+        self.network.add_module('fc_out', Linear(layers_dims[-1], self.output_dim))
 
     def forward(self, obs):
         """前向传播，计算状态价值"""
@@ -197,12 +246,18 @@ class PPO_continuous(object):
         super(PPO_continuous, self).__init__()
         self.Actor = Actor()
         self.Critic = Critic()
+
+
+        # 只需要在 agent 初始化时创建一次
+        self.actor_scaler = GradScaler()
+        self.critic_scaler = GradScaler()
+
         self.buffer = Buffer()
         self.gamma = AGENTPARA.gamma
         self.gae_lambda = AGENTPARA.lamda
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
-        self.training_start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
+        self.training_start_time = time.strftime("PPO_%Y-%m-%d_%H-%M-%S")
         self.base_save_dir = "../../save/save_evade_fuza"
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
         if load_able:
@@ -282,9 +337,52 @@ class PPO_continuous(object):
         if np.any(np.abs(arr) > threshold):
             print(f"[警告] {name} 数值过大 (> {threshold}). 值: {arr.max()}, {arr.min()}")
 
+    def map_discrete_actions(self, discrete_actions_indices):
+        """
+        将离散动作的索引张量映射到其物理值。
+        Args:
+            discrete_actions_indices (dict): 一个包含各离散动作索引张量的字典。
+        Returns:
+            np.ndarray: 一个包含所有离散动作物理值的 numpy 数组。
+        """
+        # 0. 获取触发器动作 (形状: [B])
+        trigger_action = discrete_actions_indices['trigger'].cpu().numpy()
+
+        # 1. 初始化一个用于存放物理值的数组 (形状: [B, 4])
+        # 对应 salvo_size, intra_interval, num_groups, inter_interval
+        batch_size = trigger_action.shape[0]
+        physical_actions = np.zeros((batch_size, 4), dtype=np.float32)
+
+        # 2. 遍历每个 Categorical 动作
+        action_keys = ['salvo_size', 'intra_interval', 'num_groups', 'inter_interval']
+        for i, key in enumerate(action_keys):
+            # 获取该动作的索引 (形状: [B])
+            indices = discrete_actions_indices[key].cpu().numpy()
+            # 获取映射表
+            mapping = DISCRETE_ACTION_MAP[key]
+            # 使用索引从映射表中查找物理值
+            physical_actions[:, i] = np.array([mapping[idx] for idx in indices])
+
+        # 3. 应用触发器逻辑：如果 trigger=0，则所有其他参数无效 (可以设为0)
+        # 触发器为0的位置的掩码 (broadcastable to physical_actions)
+        trigger_mask = (trigger_action == 0)[:, np.newaxis]
+        physical_actions[np.repeat(trigger_mask, 4, axis=1)] = 0.0
+
+        # 4. 最终将 trigger (0/1) 和其他物理值组合起来
+        # 最终输出的离散动作数组 (形状: [B, 5])
+        final_discrete_env_actions = np.hstack([
+            trigger_action[:, np.newaxis],
+            physical_actions
+        ])
+
+        return final_discrete_env_actions
+
     def choose_action(self, state, deterministic=False):
         """
         根据当前状态选择动作，这是与环境交互的核心。
+        - 支持确定性/随机性采样。
+        - 支持批处理。
+        - 当不投放诱饵弹时，智能地将相关参数置零。
         """
         state_tensor = torch.as_tensor(state, dtype=torch.float32, device=ACTOR_PARA.device)
         is_batch = state_tensor.dim() > 1
@@ -298,18 +396,35 @@ class PPO_continuous(object):
             # 2. 处理连续动作
             continuous_base_dist = dists['continuous']
             u = continuous_base_dist.mean if deterministic else continuous_base_dist.rsample()
-            action_cont_tanh = torch.tanh(u)  # 压缩到[-1, 1]
+            action_cont_tanh = torch.tanh(u)
             log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
 
-            # 3. <<< 更改 >>> 从所有5个离散分布中采样
-            trigger_action = dists['trigger'].sample()
-            salvo_size_action = dists['salvo_size'].sample()
-            intra_interval_action = dists['intra_interval'].sample()
-            num_groups_action = dists['num_groups'].sample()
-            inter_interval_action = dists['inter_interval'].sample()
+            # 3. 从所有5个离散分布中采样或选择最优动作
+            sampled_actions_dict = {}
+            for key, dist in dists.items():
+                if key == 'continuous':
+                    continue
+                if deterministic:
+                    if isinstance(dist, Categorical):
+                        # 选择概率最高的动作索引
+                        sampled_actions_dict[key] = torch.argmax(dist.probs, dim=-1)
+                    elif isinstance(dist, Bernoulli):
+                        # 选择概率大于0.5的动作 (0或1)
+                        # sampled_actions_dict[key] = (dist.probs > 0.5).float()
+                        # 按概率采样 (0或1)
+                        sampled_actions_dict[key] = dist.sample()
+                else:
+                    # 随机采样
+                    sampled_actions_dict[key] = dist.sample()
 
-            # 4. <<< 更改 >>> 计算并加总所有5个离散动作的对数概率
-            # 联合概率的对数等于各独立部分对数概率之和
+            # 为了方便后续使用，将字典中的动作解包到单独的变量
+            trigger_action = sampled_actions_dict['trigger']
+            salvo_size_action = sampled_actions_dict['salvo_size']
+            intra_interval_action = sampled_actions_dict['intra_interval']
+            num_groups_action = sampled_actions_dict['num_groups']
+            inter_interval_action = sampled_actions_dict['inter_interval']
+
+            # 4. 计算并加总所有5个离散动作的对数概率
             log_prob_disc = (dists['trigger'].log_prob(trigger_action) +
                              dists['salvo_size'].log_prob(salvo_size_action) +
                              dists['intra_interval'].log_prob(intra_interval_action) +
@@ -319,32 +434,38 @@ class PPO_continuous(object):
             # 5. 计算总的对数概率
             total_log_prob = log_prob_cont + log_prob_disc
 
-            # 6. <<< 更改 >>> 准备要存入Buffer的动作向量
-            # Buffer中存储连续动作的原始值u和离散动作的索引
+            # 6. 准备要存入Buffer的动作向量 (存储原始值u和原始采样索引)
             action_disc_to_store = torch.stack([
                 trigger_action, salvo_size_action, intra_interval_action,
                 num_groups_action, inter_interval_action
             ], dim=-1).float()
             action_to_store = torch.cat([u, action_disc_to_store], dim=-1)
 
-            # 7. <<< 更改 >>> 准备发送到环境的最终动作向量
-            # 如果不投放(trigger=0)，则其他投放参数应为0，方便环境解析
+            # 7. 准备发送到环境的最终动作向量 (应用置零逻辑)
+            env_action_cont = self.scale_action(action_cont_tanh)
+
+            # 创建一个掩码，用于识别哪些样本的 trigger_action 为 0
+            zero_mask = (trigger_action == 0)
+
+            # 使用 clone() 避免原地修改影响 buffer 中存储的动作
             env_salvo_size_action = salvo_size_action.clone()
             env_intra_interval_action = intra_interval_action.clone()
             env_num_groups_action = num_groups_action.clone()
             env_inter_interval_action = inter_interval_action.clone()
 
-            if trigger_action.item() == 0:
-                env_salvo_size_action.zero_()
-                env_intra_interval_action.zero_()
-                env_num_groups_action.zero_()
-                env_inter_interval_action.zero_()
+            # 应用掩码，将不投放的样本的参数置零
+            env_salvo_size_action[zero_mask] = 0
+            env_intra_interval_action[zero_mask] = 0
+            env_num_groups_action[zero_mask] = 0
+            env_inter_interval_action[zero_mask] = 0
 
-            env_action_cont = self.scale_action(action_cont_tanh)
+            # 拼接成最终发送给环境的离散动作部分
             final_env_action_disc = torch.stack([
                 trigger_action, env_salvo_size_action, env_intra_interval_action,
                 env_num_groups_action, env_inter_interval_action
             ], dim=-1).float()
+
+            # 拼接连续和离散部分
             final_env_action_tensor = torch.cat([env_action_cont, final_env_action_disc], dim=-1)
 
         # 8. 将所有结果转换为Numpy数组
@@ -380,11 +501,12 @@ class PPO_continuous(object):
 
     def learn(self):
         """
-        执行 PPO 的学习和更新步骤。
+        执行 PPO 的学习和更新步骤，已适配多部分离散动作空间。
         """
         torch.autograd.set_detect_anomaly(True)
         states, values, actions, old_probs, rewards, dones = self.buffer.sample()
         advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones)
+
         train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'adv_targ': [], 'ratio': []}
 
         for _ in range(self.ppo_epoch):
@@ -392,54 +514,117 @@ class PPO_continuous(object):
                 state = check(states[batch]).to(**ACTOR_PARA.tpdv)
                 action_batch = check(actions[batch]).to(**ACTOR_PARA.tpdv)
                 old_prob = check(old_probs[batch]).to(**ACTOR_PARA.tpdv).view(-1)
-                advantage = check(advantages[batch]).to(**ACTOR_PARA.tpdv).view(-1, 1)
+                advantage = check(advantages[batch]).to(**ACTOR_PARA.tpdv)
+                # advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)  # Mini-batch advantage normalization
+                advantage = advantage.view(-1, 1)
 
-                # <<< 更改 >>> 从Buffer中分解出连续动作和5个离散动作
+                # --- 1. 从 Buffer 中分离出连续和离散动作 ---
                 u_from_buffer = action_batch[:, :CONTINUOUS_DIM]
-                disc_actions_from_buffer = action_batch[:, CONTINUOUS_DIM:]
-                trigger_action = disc_actions_from_buffer[:, 0]
-                salvo_size_action = disc_actions_from_buffer[:, 1].long()
-                intra_interval_action = disc_actions_from_buffer[:, 2].long()
-                num_groups_action = disc_actions_from_buffer[:, 3].long()
-                inter_interval_action = disc_actions_from_buffer[:, 4].long()
+                # 离散动作的索引从第 CONTINUOUS_DIM 列开始
+                discrete_actions_from_buffer = {
+                    'trigger': action_batch[:, CONTINUOUS_DIM],
+                    'salvo_size': action_batch[:, CONTINUOUS_DIM + 1].long(),
+                    'intra_interval': action_batch[:, CONTINUOUS_DIM + 2].long(),
+                    'num_groups': action_batch[:, CONTINUOUS_DIM + 3].long(),
+                    'inter_interval': action_batch[:, CONTINUOUS_DIM + 4].long(),
+                }
+
+                # ######################### Actor 训练 #########################
+                # # 1. 将前向传播包裹在 autocast 中
+                # with autocast():
+                #     # 2. 使用当前策略重新评估旧动作的概率
+                #     new_dists = self.Actor(state)
+                #
+                #     # 3. 重新计算新策略下，旧动作的组合 log_prob
+                #     new_log_prob_cont = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+                #     new_log_prob_disc = sum(
+                #         new_dists[key].log_prob(discrete_actions_from_buffer[key])
+                #         for key in discrete_actions_from_buffer
+                #     )
+                #     new_prob = new_log_prob_cont + new_log_prob_disc
+                #
+                #     # 4. 计算组合策略熵
+                #     entropy_cont = new_dists['continuous'].entropy().sum(dim=-1)
+                #     entropy_disc = sum(
+                #         dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
+                #     )
+                #     total_entropy = (entropy_cont + entropy_disc).mean()
+                #
+                #     # 5. 计算重要性采样比率和PPO clipped loss (后续逻辑不变)
+                #     log_ratio = new_prob - old_prob
+                #     ratio = torch.exp(torch.clamp(log_ratio, -20.0, 20.0))
+                #     surr1 = ratio * advantage.squeeze(-1)
+                #     surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage.squeeze(-1)
+                #     actor_loss = -torch.min(surr1, surr2).mean() - AGENTPARA.entropy * total_entropy
+                #
+                # # 6. Actor梯度更新, 使用 scaler
+                # self.Actor.optim.zero_grad(set_to_none=True) # 使用 set_to_none=True 略微提升性能
+                # # 用 scaler.scale 来缩放 loss
+                # self.actor_scaler.scale(actor_loss).backward()
+                # # --- 正确的梯度裁剪流程 ---
+                # # 1. Unscale 梯度
+                # self.actor_scaler.unscale_(self.Actor.optim)
+                # # 2. 在 unscaled 的梯度上进行裁剪
+                # torch.nn.utils.clip_grad_norm_(self.Actor.parameters(), max_norm=1.0)
+                # # 3. 执行优化器步骤和 scaler 更新
+                # self.actor_scaler.step(self.Actor.optim)
+                # self.actor_scaler.update()
+                #
+                #
+                # ######################### Critic 训练 #########################
+                # # 3. 将 Critic 的前向传播也包裹在 autocast 中
+                # with autocast():
+                #     # 7. 计算价值目标并更新Critic (逻辑不变)
+                #     old_value_from_buffer = check(values[batch]).to(**CRITIC_PARA.tpdv).view(-1, 1)
+                #     return_ = advantage + old_value_from_buffer
+                #     new_value = self.Critic(state)
+                #     critic_loss = torch.nn.functional.mse_loss(new_value, return_)
+                # # 4. Critic 梯度更新，使用另一个 scaler
+                # self.Critic.optim.zero_grad(set_to_none=True)
+                # self.critic_scaler.scale(critic_loss).backward()
+                # # --- 同样地，对 Critic 也执行正确的裁剪流程 ---
+                # # 1. Unscale 梯度
+                # self.critic_scaler.unscale_(self.Critic.optim)
+                # # 2. 在 unscaled 的梯度上进行裁剪
+                # torch.nn.utils.clip_grad_norm_(self.Critic.parameters(), max_norm=1.0)
+                # # 3. 执行优化器步骤和 scaler 更新
+                # self.critic_scaler.step(self.Critic.optim)
+                # self.critic_scaler.update()
 
                 ######################### Actor 训练 #########################
-                # 1. 使用当前策略(新网络)重新评估旧动作的概率
+                # 2. 使用当前策略重新评估旧动作的概率
                 new_dists = self.Actor(state)
+
+                # 3. 重新计算新策略下，旧动作的组合 log_prob
                 new_log_prob_cont = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+                new_log_prob_disc = sum(
+                    new_dists[key].log_prob(discrete_actions_from_buffer[key])
+                    for key in discrete_actions_from_buffer
+                )
+                new_prob = new_log_prob_cont + new_log_prob_disc
 
-                # 2. <<< 更改 >>> 重新计算并加总所有5个离散动作的log_prob
-                new_prob = (new_log_prob_cont +
-                            new_dists['trigger'].log_prob(trigger_action) +
-                            new_dists['salvo_size'].log_prob(salvo_size_action) +
-                            new_dists['intra_interval'].log_prob(intra_interval_action) +
-                            new_dists['num_groups'].log_prob(num_groups_action) +
-                            new_dists['inter_interval'].log_prob(inter_interval_action))
-
-                # 3. <<< 更改 >>> 计算所有分布的总熵，用于鼓励探索
+                # 4. 计算组合策略熵
                 entropy_cont = new_dists['continuous'].entropy().sum(dim=-1)
-                entropy_disc = (new_dists['trigger'].entropy() +
-                                new_dists['salvo_size'].entropy() +
-                                new_dists['intra_interval'].entropy() +
-                                new_dists['num_groups'].entropy() +
-                                new_dists['inter_interval'].entropy())
+                entropy_disc = sum(
+                    dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
+                )
                 total_entropy = (entropy_cont + entropy_disc).mean()
 
-                # 4. 计算重要性采样比率和PPO clipped loss (后续逻辑不变)
+                # 5. 计算重要性采样比率和PPO clipped loss (后续逻辑不变)
                 log_ratio = new_prob - old_prob
                 ratio = torch.exp(torch.clamp(log_ratio, -20.0, 20.0))
                 surr1 = ratio * advantage.squeeze(-1)
                 surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage.squeeze(-1)
                 actor_loss = -torch.min(surr1, surr2).mean() - AGENTPARA.entropy * total_entropy
 
-                # 5. Actor梯度更新
+                # 6. Actor梯度更新, 使用 scaler
                 self.Actor.optim.zero_grad()
                 actor_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.Actor.parameters(), max_norm=1.0)
                 self.Actor.optim.step()
 
                 ######################### Critic 训练 #########################
-                # 6. 计算价值目标并更新Critic (逻辑不变)
+                # 7. 计算价值目标并更新Critic (逻辑不变)
                 old_value_from_buffer = check(values[batch]).to(**CRITIC_PARA.tpdv).view(-1, 1)
                 return_ = advantage + old_value_from_buffer
                 new_value = self.Critic(state)
@@ -449,7 +634,52 @@ class PPO_continuous(object):
                 torch.nn.utils.clip_grad_norm_(self.Critic.parameters(), max_norm=1.0)
                 self.Critic.optim.step()
 
-                # 7. 记录训练信息
+                # # 1️⃣ 计算旧 value（来自 buffer）
+                # old_value_from_buffer = check(values[batch]).to(**CRITIC_PARA.tpdv).view(-1, 1)
+                #
+                # # 2️⃣ 目标回报 (return_t = advantage + V_old)
+                # return_ = advantage + old_value_from_buffer
+                #
+                # # 3️⃣ 重新评估新 value
+                # new_value = self.Critic(state)
+                #
+                # # 4️⃣ --- Value Clipping ---
+                # # # 限制新预测与旧值的偏差不超过 epsilon
+                # # value_clipped = old_value_from_buffer + torch.clamp(
+                # #     new_value - old_value_from_buffer,
+                # #     -AGENTPARA.epsilon,
+                # #     AGENTPARA.epsilon
+                # #     # - AGENTPARA.epsilon * old_value_from_buffer.abs(),  # 相对比例 clip,
+                # #     # AGENTPARA.epsilon * old_value_from_buffer.abs()  # 相对比例 clip
+                # # )
+                #
+                # #保持原 reward 量级，但改成“相对比例裁剪”解释：
+                # # 当 V_old=50 时，允许变化 ±10；
+                # # 当 V_old=2 时，允许变化 ±0.4；
+                # # 当 V_old≈0 时，会太小，可以加一个下限：
+                # scale = torch.clamp(torch.abs(old_value_from_buffer), min=1.0)  # 防止太小
+                # value_clipped = old_value_from_buffer + torch.clamp(
+                #     new_value - old_value_from_buffer,
+                #     -AGENTPARA.epsilon * scale,
+                #     +AGENTPARA.epsilon * scale
+                # )
+                #
+                # # 5️⃣ --- 计算两种误差 ---
+                # # 普通 MSE loss
+                # value_losses = (new_value - return_) ** 2
+                # # 裁剪后的 loss（使用裁剪值）
+                # value_losses_clipped = (value_clipped - return_) ** 2
+                #
+                # # 6️⃣ --- 取两者的最大值（防止过度更新）---
+                # critic_loss = 0.5 * torch.max(value_losses, value_losses_clipped).mean()
+                #
+                # # 7️⃣ --- 优化器更新 ---
+                # self.Critic.optim.zero_grad()
+                # critic_loss.backward()
+                # torch.nn.utils.clip_grad_norm_(self.Critic.parameters(), max_norm=1.0)
+                # self.Critic.optim.step()
+
+                # 8. 记录训练信息
                 train_info['critic_loss'].append(critic_loss.item())
                 train_info['actor_loss'].append(actor_loss.item())
                 train_info['dist_entropy'].append(total_entropy.item())

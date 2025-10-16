@@ -1,4 +1,4 @@
-from missile_evasion_environment_jsbsim.missile_evasion_environment_jsbsim import AirCombatEnv
+from missile_evasion_environment_jsbsim_fuza.missile_evasion_environment_jsbsim import AirCombatEnv
 import keyboard
 import time
 import numpy as np

@@ -149,36 +149,48 @@ class FlareManager:
 
     def update(self, t: float, dt: float, aircraft: Aircraft):
         """
+        (V2 - 稳健的时间戳匹配)
         在每个时间步被调用：
         1. 检查计划列表，创建并释放新的诱饵弹。
         2. 更新所有在空中的诱饵弹的物理状态。
         """
         # --- 1. 创建并释放新的诱饵弹 ---
-        # 找出在当前时间步 t 应该被释放的诱饵弹
-        newly_scheduled_times = [sch_time for sch_time in self.schedule if abs(t - sch_time) < dt / 2]
+
+        # <<< 核心修正：使用稳健的时间区间判断 >>>
+        # a. 定义当前物理时间步所覆盖的时间区间
+        t_start_of_step = t
+        t_end_of_step = t + dt
+
+        # b. 找出所有落在这个时间区间内的计划时间点
+        #    我们使用 t_start_of_step <= sch_time < t_end_of_step
+        #    左闭右开区间确保每个时间点只被触发一次。
+        newly_scheduled_times = [sch_time for sch_time in self.schedule if t_start_of_step <= sch_time < t_end_of_step]
 
         if newly_scheduled_times:
-            # 获取飞机当前状态
+            # 获取飞机当前状态 (只在需要释放时获取一次)
             aircraft_pos = aircraft.pos
             aircraft_vel_vec = aircraft.get_velocity_vector()
-            _, psi, theta = aircraft.attitude_rad
+            phi, theta, psi = aircraft.attitude_rad  # 确保顺序正确: roll, pitch, yaw
 
-            # --- 计算释放方向 (与您原代码逻辑一致) ---
+            # --- 计算释放方向 ---
             # 机体坐标系下的“后下方”方向向量 (x前, y上, z右)
             v_b = np.array([-1.0, -1.0, 0.0])
             v_b /= np.linalg.norm(v_b)
 
-            # (中文) 您的代码中使用了简化的旋转矩阵，这里保持一致
-            # 更精确的模型会使用完整的欧拉角或四元数旋转
-            R_pitch = np.array([[np.cos(theta), -np.sin(theta), 0],
-                                [np.sin(theta), np.cos(theta), 0],
-                                [0, 0, 1]])
-            R_yaw = np.array([[np.cos(psi), 0, np.sin(psi)],
-                              [0, 1, 0],
-                              [-np.sin(psi), 0, np.cos(psi)]])
-            R_bn = R_yaw @ R_pitch
+            # (中文) 使用更标准的 ZYX 欧拉角旋转顺序 (Yaw-Pitch-Roll)
+            # 这通常比分别应用旋转矩阵更稳健
+            cr, sr = np.cos(phi), np.sin(phi)
+            cp, sp = np.cos(theta), np.sin(theta)
+            cy, sy = np.cos(psi), np.sin(psi)
 
-            release_dir_inertial = R_bn @ v_b
+            # 从机体到世界的旋转矩阵 R_b_to_n
+            R_b_to_n = np.array([
+                [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
+                [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
+                [-sp, sr * cp, cr * cp]
+            ])
+
+            release_dir_inertial = R_b_to_n @ v_b
 
             # 合成诱饵弹初始速度
             v_rel = self.release_speed * release_dir_inertial
@@ -186,12 +198,18 @@ class FlareManager:
 
             # 为每个计划好的时间点创建 Flare 对象
             for release_time in newly_scheduled_times:
+                # 使用 release_time 作为创建 Flare 的精确时间戳
                 new_flare = Flare(aircraft_pos, initial_flare_velocity, release_time)
                 self.flares.append(new_flare)
+
+                # <<< 调试日志：确认实际释放 >>>
+                # print(
+                #     f"*** [{t:.4f}s] 成功匹配并释放了计划在 {release_time:.4f}s 的诱饵弹！已释放总数: {len(self.flares)} ***")
 
             # 从计划列表中移除已处理的项
             self.schedule = [sch_time for sch_time in self.schedule if sch_time not in newly_scheduled_times]
 
         # --- 2. 更新所有在空中的诱饵弹 ---
+        # 更新时，应该传入当前步的结束时间 t_end_of_step
         for flare in self.flares:
-            flare.update(t, dt)
+            flare.update(t_end_of_step, dt)

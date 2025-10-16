@@ -22,8 +22,8 @@ class RewardCalculator:
         self.U = -50  # 失败固定惩罚
 
         # [高度惩罚参数]
-        self.SAFE_ALTITUDE_M = 1000.0
-        self.DANGER_ALTITUDE_M = 500.0
+        self.SAFE_ALTITUDE_M = 3000.0 #1000.0
+        self.DANGER_ALTITUDE_M = 1500.0 #500.0
         self.KV_MS = 0.2 * 340
         self.MAX_ALTITUDE_M = 12000.0
         self.OVER_ALTITUDE_PENALTY_FACTOR = 0.5
@@ -55,12 +55,31 @@ class RewardCalculator:
         self.prev_velocity_vec = None
         self.MAX_G_LIMIT = -5.0  # 假设飞机的结构极限
 
+        # --- 为 Tau 加速度奖励新增的状态变量 ---
+        self.prev_tau = None  # 上一时间步的Tau值
+        self.prev_delta_tau = None  # 上一时间步的Tau变化量 (delta_tau)
+        # 在 RewardCalculator 类的 __init__ 方法中添加：
+        self.prev_ata_rad = None
+        # <<< 新增 >>> 为新的奖励函数创建历史状态变量
+        self.prev_taa_rad = None
+        # 为此函数添加一个历史状态变量
+        self.prev_closing_velocity = None
+
     def reset(self):
-        """为新回合重置状态变量。"""
-        self.prev_missile_v_mag = None
-        self.prev_los_vec = None
-        # 注意：持续滚转的计时器现在不在这个类里，因为它依赖于环境的dt，
-        # 最好由主环境管理。或者在这里接收dt进行更新。为简化，我们先假设它在主环境中。
+            """为新回合重置状态变量。"""
+            self.prev_missile_v_mag = None
+            self.prev_los_vec = None
+            # --- 重置 Tau 加速度奖励的状态 ---
+            self.prev_tau = None
+            self.prev_delta_tau = None
+            # 在 RewardCalculator 类的 reset 方法中添加：
+            self.prev_ata_rad = None
+            # <<< 新增 >>> 在每回合开始时重置
+            self.prev_taa_rad = None
+            # 为此函数添加一个历史状态变量
+            self.prev_closing_velocity = None
+            # 注意：持续滚转的计时器现在不在这个类里，因为它依赖于环境的dt，
+            # 最好由主环境管理。或者在这里接收dt进行更新。为简化，我们先假设它在主环境中。
 
     # --- (中文) 稀疏奖励接口 ---
     def get_sparse_reward(self, miss_distance: float, R_kill: float) -> float:
@@ -86,20 +105,37 @@ class RewardCalculator:
         flare_trigger_action = action['discrete_actions'][0]
 
         # 1. 计算所有独立的奖励/惩罚组件
-        reward_posture = 1.0 * self._compute_missile_posture_reward_blend(missile, aircraft)
+        reward_posture = 1.0 * self._compute_missile_posture_reward_blend(missile, aircraft) #尾后和三九
+        # reward_posture = 1.0 * self._compute_missile_posture_reward_pure_posture(missile, aircraft) # 纯尾后
         reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #高度惩罚阶跃
         # <<< 核心修正 >>> ---
         # 将提取出的 flare_trigger_action 传递给资源惩罚函数
-        reward_resource = 0.1 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares)
+        reward_resource = 0.2 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares)
         reward_roll_penalty = 0.8 * self._penalty_for_roll_rate_magnitude(aircraft)
         reward_speed_penalty = 1.0 * self._penalty_for_dropping_below_speed_floor(aircraft)
         reward_survivaltime = 0.2  # 每步存活奖励
-        reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
+        # reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
         # reward_dive = self._reward_for_tactical_dive_smooth(aircraft, missile)
         reward_coordinated_turn = self._reward_for_coordinated_turn(aircraft, 0.2)
-        reward_dive = self._reward_for_optimal_dive_angle(aircraft, missile)
+        # reward_dive = self._reward_for_optimal_dive_angle(aircraft, missile)
+        # reward_dive = 0.0
 
+        # # 核心威胁降低奖励
+        # w_increase_tau = 4.0  # [核心] 增加命中时间是首要目标
+        # # reward_increase_tau = w_increase_tau * self._reward_for_increasing_tau(aircraft, missile)
+        # # 使用新的 tau 加速度奖励
+        # reward_tau_accel = self._reward_for_tau_acceleration(aircraft, missile)
 
+        # [新] 使用您指定的 ATA Rate 奖励
+        w_ata_rate = 1.0  # [新] 为 ATA Rate 设置一个高权重
+        # reward_ata_rate = w_ata_rate * self._reward_for_ata_rate(aircraft, missile, 0.2)
+
+        # [新] 使用 TAA Rate 奖励 (基于飞机速度矢量)
+        w_taa_rate = 1.0 #0.6 #1.0  # [新] 为 TAA Rate 设置一个高权重
+        reward_taa_rate = w_taa_rate * self._reward_for_taa_rate(aircraft, missile, 0.2)
+
+        # #接近速度奖励
+        reward_closing_velocity = 1.0 * self._reward_for_closing_velocity_change(aircraft, missile)
 
         # 2. 将所有组件按权重加权求和 (权重直接在此处定义，与您的代码一致)
         final_dense_reward = (
@@ -109,24 +145,236 @@ class RewardCalculator:
                 reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的
                 reward_speed_penalty  # reward_for_optimal_speed基准是负的
                 + reward_survivaltime
-                + reward_los
-                + reward_dive
+                # + reward_los
+                # + reward_dive
                 + reward_coordinated_turn
+                # + reward_increase_tau
+                # + reward_tau_accel
+                + reward_closing_velocity
+                # + reward_ata_rate
+                + reward_taa_rate
         )
-        # print(f"reward_posture: {reward_posture:.2f}",
-        #       # f"reward_altitude: {reward_altitude:.2f}",
+        # print(
+        #     f"reward_posture: {reward_posture:.2f}",
+        #       f"reward_altitude: {reward_altitude:.2f}",
         #       # f"reward_resource: {reward_resource:.2f}",
         #       # f"reward_roll_penalty: {reward_roll_penalty:.2f}",
-        #       # f"reward_speed_penalty: {reward_speed_penalty:.2f}",
+        #       f"reward_speed_penalty: {reward_speed_penalty:.2f}",
         #       #   f"reward_survivaltime: {reward_survivaltime:.2f}",
-        #         f"reward_los: {reward_los:.2f}",
-        #         f"reward_dive: {reward_dive:.2f}",
-        #         f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
+        #       #   f"reward_los: {reward_los:.2f}",
+        #       #   f"reward_dive: {reward_dive:.2f}",
+        #       #   f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
+        #       #   f"reward_increase_tau: {reward_increase_tau:.2f}",
+        #       #   f"reward_tau_accel: {reward_tau_accel:.2f}",
+        #         f"reward_closing_velocity: {reward_closing_velocity:.2f}",
+        #         # f"reward_ata_rate: {reward_ata_rate:.2f}",
+        #         f"reward_taa_rate: {reward_taa_rate:.2f}",
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
 
     # --- (中文) 下面是所有从您主环境文件中迁移过来的、正在使用的私有奖励计算方法 ---
+
+    def _reward_for_closing_velocity_change(self, aircraft: Aircraft, missile: Missile):
+        """
+        (V10 - 时间变化版)
+        奖励“接近速度”相对于上一时间步的减小量。
+        这是一个简单、自适应且有效的奖励塑形方法。
+        """
+        # --- 1. 计算当前“实际”接近速度 ---
+        # a) 相对位置和速度矢量
+        relative_pos_vec = aircraft.pos - missile.pos
+        relative_vel_vec = aircraft.get_velocity_vector() - missile.get_velocity_vector()
+
+        distance = np.linalg.norm(relative_pos_vec)
+        if distance < 1e-6:
+            self.prev_closing_velocity = None  # 重置历史
+            return 0.0
+
+        # b) 接近速度 = - (相对速度在视线方向上的投影)
+        closing_velocity_current = -np.dot(relative_vel_vec, relative_pos_vec) / distance
+
+        # --- 2. 计算奖励 ---
+        reward = 0.0
+        if self.prev_closing_velocity is not None:
+            # a) 计算接近速度的变化量
+            delta_V_close = closing_velocity_current - self.prev_closing_velocity
+
+            # b) 核心逻辑：我们奖励“负的变化”，即接近速度的减小
+            #    所以奖励与 -delta_V_close 成正比
+            reward_base = -delta_V_close
+
+            # c) 缩放奖励
+            #    归一化因子可以是导弹速度 * dt，代表了在一个步长时间内可能的最大速度变化尺度
+            dt = 0.2  # <--- 关键！需要传入决策步长 dt
+            normalization_factor = np.linalg.norm(missile.get_velocity_vector()) * dt + 1e-6
+
+            normalized_reward = reward_base / normalization_factor
+
+            reward = np.tanh(normalized_reward * 5.0)  # 乘以系数并用tanh平滑
+
+        # # 调试打印
+        # if self.prev_closing_velocity is not None:
+        #     print(
+        #         f"PrevV_c:{self.prev_closing_velocity:.1f} | CurrV_c:{closing_velocity_current:.1f} | Delta:{delta_V_close:.1f} | Reward:{reward:.3f}")
+
+        # --- 3. 更新历史状态以备下一步使用 ---
+        self.prev_closing_velocity = closing_velocity_current
+
+        return reward
+
+
+
+    def _reward_for_taa_rate(self, aircraft: Aircraft, missile: Missile, dt: float):
+        """
+        (V3 - 基于飞机速度版) 奖励目标姿态角 (TAA) 的变化率。
+        这个函数逻辑上与旧的 _reward_for_ata_rate 完全相同，
+        但计算的是机弹视线矢量与【飞机速度矢量】之间的夹角变化率。
+        """
+        # --- 1. 获取视线矢量和【飞机】速度矢量 ---
+        current_los_vec = aircraft.pos - missile.pos
+        # <<< 核心修改 >>>
+        aircraft_v_vec = aircraft.get_velocity_vector_from_jsbsim()
+
+        norm_los = np.linalg.norm(current_los_vec)
+        # <<< 核心修改 >>>
+        norm_v = np.linalg.norm(aircraft_v_vec)
+
+        if norm_los < 1e-6 or norm_v < 1e-6:
+            self.prev_taa_rad = None  # 重置历史，因为当前值无效
+            return 0.0
+
+        # --- 2. 计算 TAA 角的余弦值 ---
+        # (这里的门控逻辑可以保留，也可以去掉，取决于您的战术意图)
+        # 保留它的意义是：只在飞机大致朝向导弹时（前半球）才奖励机动。
+        # 去掉它的意义是：无论飞机朝向哪里，只要改变姿态就奖励。
+        # 这里我们先按您的要求，保持逻辑不变，所以保留门控。
+        cos_taa = np.dot(current_los_vec, aircraft_v_vec) / (norm_los * norm_v)
+
+        # --- 2. <<< 核心修正：增加前半球门控 >>> ---
+        # a) 计算 ATA 角的余弦值，用于判断前后半球
+        missile_v_vec = missile.get_velocity_vector()
+        cos_ata = np.dot(current_los_vec, missile_v_vec) / (norm_los * norm_v)
+
+        # b) 如果飞机在导弹后半球 (ATA > 90度, cos_ata < 0)，则威胁解除
+        if cos_ata < 0:
+            self.prev_tta_rad = None  # 重置历史，下次进入前半球时重新计算
+            return 0.0  # 不给予任何奖励
+        # --- 修正结束 ---
+
+
+        # 3. 计算当前的 TAA 角
+        # 注意：这个角度现在是 Target Aspect Angle
+        current_taa_rad = np.arccos(np.clip(cos_taa, -1.0, 1.0))
+
+        # 4. 计算 TAA 角的变化率
+        if self.prev_taa_rad is None:
+            self.prev_taa_rad = current_taa_rad
+            return 0.0
+
+        delta_taa_rad = abs(current_taa_rad - self.prev_taa_rad)
+        taa_rate_rad_s = delta_taa_rad / dt if dt > 1e-6 else 0.0
+
+        # 5. 更新历史记录并返回奖励
+        self.prev_taa_rad = current_taa_rad
+
+        # 权重可能需要重新调整，因为 TAA 的变化率可能与 ATA 的变化率尺度不同
+        SCALING_FACTOR = 5.0
+        return taa_rate_rad_s * SCALING_FACTOR
+
+    def _reward_for_ata_rate(self, aircraft: Aircraft, missile: Missile, dt: float):
+        """
+        (V2 - 增加前半球门控) 奖励天线训练角 (ATA) 的变化率。
+        """
+        # --- 1. 获取视线矢量和导弹速度矢量 ---
+        current_los_vec = aircraft.pos - missile.pos
+        missile_v_vec = missile.get_velocity_vector()
+
+        norm_los = np.linalg.norm(current_los_vec)
+        norm_v = np.linalg.norm(missile_v_vec)
+
+        if norm_los < 1e-6 or norm_v < 1e-6:
+            self.prev_ata_rad = None  # 重置历史，因为当前值无效
+            return 0.0
+
+        # --- 2. <<< 核心修正：增加前半球门控 >>> ---
+        # a) 计算 ATA 角的余弦值，用于判断前后半球
+        cos_ata = np.dot(current_los_vec, missile_v_vec) / (norm_los * norm_v)
+
+        # b) 如果飞机在导弹后半球 (ATA > 90度, cos_ata < 0)，则威胁解除
+        if cos_ata < 0:
+            self.prev_ata_rad = None  # 重置历史，下次进入前半球时重新计算
+            return 0.0  # 不给予任何奖励
+        # --- 修正结束 ---
+
+        # 3. 计算当前的 ATA 角
+        current_ata_rad = np.arccos(np.clip(cos_ata, -1.0, 1.0))
+
+        # 4. 计算 ATA 角的变化率
+        if self.prev_ata_rad is None:
+            self.prev_ata_rad = current_ata_rad
+            return 0.0
+
+        delta_ata_rad = abs(current_ata_rad - self.prev_ata_rad)
+        ata_rate_rad_s = delta_ata_rad / dt if dt > 1e-6 else 0.0
+
+        # 5. 更新历史记录并返回奖励
+        self.prev_ata_rad = current_ata_rad
+
+        SCALING_FACTOR = 10.0
+        return ata_rate_rad_s * SCALING_FACTOR
+
+    # 新的奖励函数:
+    def _reward_for_increasing_tau(self, aircraft: Aircraft, missile: Missile):
+        """
+        奖励“命中时间（Tau）”的增加。这是衡量威胁降低的核心指标。
+        """
+        # a) 计算相对位置和速度
+        relative_pos_vec = aircraft.pos - missile.pos
+        relative_vel_vec = aircraft.get_velocity_vector() - missile.get_velocity_vector()
+
+        distance = np.linalg.norm(relative_pos_vec)
+
+        # --- 2. <<< 核心修正：增加前半球门控 >>> ---
+        missile_v_vec = missile.get_velocity_vector()
+        norm_v_missile = np.linalg.norm(missile_v_vec)
+        if distance < 1e-6 or norm_v_missile < 1e-6:
+            self.prev_tau = None
+            return 0.0
+
+        cos_ata = np.dot(relative_pos_vec, missile_v_vec) / (distance * norm_v_missile)
+
+        if cos_ata < 0:  # 飞机在后半球
+            self.prev_tau = None  # 重置历史
+            # 在这种情况下，威胁已经解除，我们可以给予一个固定的、小的正奖励来鼓励维持这种状态
+            # 或者直接返回0，避免干扰其他奖励。返回0更安全。
+            return 0.0
+            # --- 修正结束 ---
+
+        # b) 计算径向趋近速度 (closing velocity)
+        #    正值表示正在靠近，负值表示正在远离
+        closing_velocity = -np.dot(relative_vel_vec, relative_pos_vec) / (distance + 1e-6)
+
+        # c) 计算 Tau
+        if closing_velocity < 1.0:  # 如果不是在靠近，或速度很慢
+            # 视为威胁解除，给予一个大的、固定的奖励
+            # 我们可以用一个很大的Tau值来代表这种情况
+            current_tau = 100.0
+        else:
+            current_tau = distance / closing_velocity
+
+        # d) 计算奖励
+        reward = 0.0
+        if self.prev_tau is not None:
+            # 核心逻辑：奖励Tau的增加量
+            delta_tau = current_tau - self.prev_tau
+            # 使用 tanh 进行平滑缩放，避免奖励爆炸
+            reward = np.tanh(delta_tau)
+
+            # e) 更新状态
+        self.prev_tau = current_tau
+
+        return reward
 
     def _compute_missile_posture_reward(self, missile: Missile, aircraft: Aircraft):
         """
@@ -263,13 +511,13 @@ class RewardCalculator:
             reward_pure = 0.0
 
         # --- 平滑融合 ---
-        if distance <= 4000.0:
+        if distance <= 2000.0: #4000.0:
             return reward_three_nine
-        elif distance >= 5000.0:
+        elif distance >= 3000.0: #5000.0:
             return reward_pure
         else:
             # 在 4-5 km 之间线性混合
-            alpha = (distance - 4000.0) / 1000.0  # 0~1
+            alpha = (distance - 2000.0) / 1000.0  # 0~1
             return (1 - alpha) * reward_three_nine + alpha * reward_pure
 
     def _compute_altitude_reward(self, aircraft: Aircraft):
@@ -596,5 +844,75 @@ class RewardCalculator:
 
         # 调试打印
         # print(f"RollF: {roll_factor:.2f} | NZ: {nz:.2f} | G_F: {g_factor:.2f} | Reward: {reward:.3f}")
+
+        return reward
+
+    def _reward_for_tau_acceleration(self, aircraft: Aircraft, missile: Missile):
+        """
+        (V2 - 加速度版) 奖励“命中时间（Tau）”下降趋势的减缓。
+        核心逻辑：奖励 Tau 变化率的“加速度”。如果 Tau 的下降变慢了，就给予正奖励。
+        """
+        # --- 步骤 1: 计算当前的 Tau 值 ---
+
+        # a) 计算相对位置和速度矢量
+        relative_pos_vec = aircraft.pos - missile.pos
+        relative_vel_vec = aircraft.get_velocity_vector() - missile.get_velocity_vector()
+        distance = np.linalg.norm(relative_pos_vec)
+
+        # b) 安全检查 & 前半球门控 (与您之前的函数逻辑一致)
+        missile_v_vec = missile.get_velocity_vector()
+        norm_v_missile = np.linalg.norm(missile_v_vec)
+        if distance < 1e-6 or norm_v_missile < 1e-6:
+            # 状态无效，重置所有历史记录并返回0
+            self.prev_tau = None
+            self.prev_delta_tau = None
+            return 0.0
+
+        cos_ata = np.dot(relative_pos_vec, missile_v_vec) / (distance * norm_v_missile)
+        if cos_ata < 0:  # 飞机在导弹后半球，威胁解除
+            self.prev_tau = None
+            self.prev_delta_tau = None
+            # 威胁解除时，这是一个非常好的状态，可以给一个小的正奖励
+            # 也可以返回0，让其他奖励函数（如生存奖励）来处理
+            return 0.0
+
+            # c) 计算径向趋近速度
+        closing_velocity = -np.dot(relative_vel_vec, relative_pos_vec) / (distance + 1e-6)
+
+        # d) 计算当前 Tau
+        if closing_velocity < 1.0:  # 如果正在远离或速度很慢
+            current_tau = 100.0  # 使用一个大的常数代表“安全”
+        else:
+            current_tau = distance / closing_velocity
+
+        # --- 步骤 2: 计算奖励 ---
+
+        # a) 如果没有上一步的 Tau 值，则无法计算变化量
+        if self.prev_tau is None:
+            self.prev_tau = current_tau
+            # self.prev_delta_tau 保持为 None
+            return 0.0
+
+        # b) 计算当前步的 Tau 变化量
+        delta_tau = current_tau - self.prev_tau
+
+        # c) 如果没有上一步的 Tau 变化量，则无法计算“加速度”
+        if self.prev_delta_tau is None:
+            self.prev_tau = current_tau
+            self.prev_delta_tau = delta_tau
+            return 0.0
+
+        # d) 核心逻辑：计算 Tau 的“加速度”
+        #    tau_acceleration > 0 意味着 Tau 的下降趋势正在减缓，或者正在转为上升
+        tau_acceleration = delta_tau - self.prev_delta_tau
+
+        # e) 使用 tanh 进行平滑缩放
+        #    需要一个缩放因子，因为 tau_acceleration 的值通常很小
+        ACCELERATION_SCALING_FACTOR = 10.0
+        reward = np.tanh(tau_acceleration * ACCELERATION_SCALING_FACTOR)
+
+        # --- 步骤 3: 更新所有历史状态以备下一步使用 ---
+        self.prev_tau = current_tau
+        self.prev_delta_tau = delta_tau
 
         return reward
