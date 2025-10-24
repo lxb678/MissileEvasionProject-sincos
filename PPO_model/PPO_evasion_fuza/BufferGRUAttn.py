@@ -2,7 +2,7 @@
 
 import numpy as np
 # 从配置文件导入 BUFFERPARA，其中包含了像 BATCH_SIZE 这样的超参数。
-from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
+from Interference_code.PPO_model.PPO_evasion_fuza.ConfigAttn import *
 
 
 class Buffer(object):

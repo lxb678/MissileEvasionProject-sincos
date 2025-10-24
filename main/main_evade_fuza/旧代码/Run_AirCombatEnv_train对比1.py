@@ -1,14 +1,9 @@
-import gym
-import torch
-import numpy as np
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim_SeparateHeads_std_nostate import *
+from Interference_code.PPO_model.PPO_evasion_fuza.旧ppo.Hybrid_PPO_jsbsim_SeparateHeads_mustd import *
 from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
 from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
-from Interference_code.env.AirCombatEnv6_maneuver_flare import *
-from Interference_code.env.missile_evasion_environment.missile_evasion_environment import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
 import time
 

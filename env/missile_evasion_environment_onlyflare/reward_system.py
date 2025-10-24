@@ -4,7 +4,7 @@ import numpy as np
 import math
 
 # (中文) 导入对象类，以便进行类型提示和访问状态
-from .AircraftJSBSim_DirectControl import Aircraft
+from .aircraft import Aircraft
 from .missile import Missile
 
 
@@ -105,18 +105,18 @@ class RewardCalculator:
         flare_trigger_action = action['discrete_actions'][0]
 
         # 1. 计算所有独立的奖励/惩罚组件
-        reward_posture = 1.0 * self._compute_missile_posture_reward_blend(missile, aircraft) #尾后和三九
+        # reward_posture = 1.0 * self._compute_missile_posture_reward_blend(missile, aircraft) #尾后和三九
         # reward_posture = 1.0 * self._compute_missile_posture_reward_pure_posture(missile, aircraft) # 纯尾后
-        reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #高度惩罚阶跃
+        # reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #高度惩罚阶跃
         # <<< 核心修正 >>> ---
         # 将提取出的 flare_trigger_action 传递给资源惩罚函数
         reward_resource = 0.1 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
-        reward_roll_penalty = 0.8 * self._penalty_for_roll_rate_magnitude(aircraft)
-        reward_speed_penalty = 2.0 * self._penalty_for_dropping_below_speed_floor(aircraft)  #1.0速度惩罚还可以再大点感觉，或者加一个速度奖励
+        # reward_roll_penalty = 0.8 * self._penalty_for_roll_rate_magnitude(aircraft)
+        # reward_speed_penalty = 2.0 * self._penalty_for_dropping_below_speed_floor(aircraft)  #1.0速度惩罚还可以再大点感觉，或者加一个速度奖励
         reward_survivaltime = 0.2  # 每步存活奖励
         # reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
         # reward_dive = self._reward_for_tactical_dive_smooth(aircraft, missile)
-        reward_coordinated_turn = self._reward_for_coordinated_turn(aircraft, 0.2)
+        # reward_coordinated_turn = self._reward_for_coordinated_turn(aircraft, 0.2)
         # reward_dive = self._reward_for_optimal_dive_angle(aircraft, missile)
         # reward_dive = 0.0
 
@@ -131,28 +131,28 @@ class RewardCalculator:
         # reward_ata_rate = w_ata_rate * self._reward_for_ata_rate(aircraft, missile, 0.2)
 
         # [新] 使用 TAA Rate 奖励 (基于飞机速度矢量)
-        w_taa_rate = 1.0 #0.6 #1.0  # [新] 为 TAA Rate 设置一个高权重
-        reward_taa_rate = w_taa_rate * self._reward_for_taa_rate(aircraft, missile, 0.2)
+        # w_taa_rate = 1.0 #0.6 #1.0  # [新] 为 TAA Rate 设置一个高权重
+        # reward_taa_rate = w_taa_rate * self._reward_for_taa_rate(aircraft, missile, 0.2)
 
         # #接近速度奖励
-        reward_closing_velocity = 1.0 * self._reward_for_closing_velocity_change(aircraft, missile)
+        # reward_closing_velocity = 1.0 * self._reward_for_closing_velocity_change(aircraft, missile)
 
         # 2. 将所有组件按权重加权求和 (权重直接在此处定义，与您的代码一致)
         final_dense_reward = (
-                reward_posture +
-                reward_altitude +
+                # reward_posture +
+                # reward_altitude +
                 reward_resource +
-                reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的
-                reward_speed_penalty  # reward_for_optimal_speed基准是负的
+                # reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的
+                # reward_speed_penalty  # reward_for_optimal_speed基准是负的
                 + reward_survivaltime
                 # + reward_los
                 # + reward_dive
-                + reward_coordinated_turn
+                # + reward_coordinated_turn
                 # + reward_increase_tau
                 # + reward_tau_accel
-                + reward_closing_velocity
+                # + reward_closing_velocity
                 # + reward_ata_rate
-                + reward_taa_rate
+                # + reward_taa_rate
         )
         # print(
         #     f"reward_posture: {reward_posture:.2f}",

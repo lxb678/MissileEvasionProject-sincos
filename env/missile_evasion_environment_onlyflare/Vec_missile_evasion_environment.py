@@ -1,13 +1,14 @@
 # 文件: environment.py
 
 import numpy as np
+import math
 import matplotlib
 from matplotlib import pyplot as plt
 import gymnasium as gym
 from gymnasium import spaces
 
 # --- (中文) 从我们创建的模块中导入所有需要的类 ---
-from .AircraftJSBSim_DirectControl import Aircraft
+from .aircraft import Aircraft
 from .missile import Missile
 from .decoys import FlareManager
 from .reward_system import RewardCalculator
@@ -15,7 +16,7 @@ from .tacview_interface import TacviewInterface
 
 # <<< 新增 >>> 从PPO代码文件导入动作空间定义，确保一致性
 # 注意：这里的路径可能需要根据您的项目结构调整
-from Interference_code.PPO_model.PPO_evasion_fuza.旧ppo.Hybrid_PPO_jsbsim import CONTINUOUS_DIM, DISCRETE_DIMS, \
+from Interference_code.PPO_model.PPO_evasion_onlyflare.Hybrid_PPO_jsbsim_SeparateHeads_onlyflare import CONTINUOUS_DIM, DISCRETE_DIMS, \
     DISCRETE_ACTION_MAP
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']
@@ -27,6 +28,10 @@ class AirCombatEnv(gym.Env):
     强化学习的空战环境主类。
     负责协调仿真流程、管理对象、计算奖励和提供RL接口(reset, step)。
     (Gymnasium兼容版) 强化学习的空战环境主类。
+    (规则机动 + 复杂动力学模型版)
+    飞机机动由预设规则控制，智能体只负责离散的诱饵弹投放决策。
+    飞机的物理更新使用您提供的 aircraft.py 中的完整动力学模型。
+
     """
 
     def __init__(self, tacview_enabled=False):
@@ -36,12 +41,12 @@ class AirCombatEnv(gym.Env):
         # --- 1. <<< 更改 >>> 定义动作空间 (Action Space) ---
         # 使用 spaces.Dict 来定义结构化的混合动作空间
         self.action_space = spaces.Dict({
-            # 连续机动动作
-            "continuous_actions": spaces.Box(
-                low=np.array([0.0, -1.0, -1.0, -1.0], dtype=np.float32),  # throttle, elevator, aileron, rudder
-                high=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
-                shape=(CONTINUOUS_DIM,)
-            ),
+            # # 连续机动动作
+            # "continuous_actions": spaces.Box(
+            #     low=np.array([0.0, -1.0, -1.0, -1.0], dtype=np.float32),  # throttle, elevator, aileron, rudder
+            #     high=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+            #     shape=(CONTINUOUS_DIM,)
+            # ),
             # 离散投放决策
             "discrete_actions": spaces.MultiDiscrete(
                 # MultiDiscrete 接受一个数组，每个元素代表该维度有多少个选项
@@ -57,13 +62,13 @@ class AirCombatEnv(gym.Env):
         })
 
         # --- 2. 定义观测空间 (Observation Space) ---
-        # 9个观测值，根据 _get_observation() 的输出
+        # 8个观测值，根据 _get_observation() 的输出  预设机动不需要滚转角速度
         # [o_dis, o_beta, o_theta_L, o_av, o_h, o_ae, o_am, o_ir, o_q]
         # 最好使用真实的归一化范围，但为了简单起见，可以先用一个较宽松的范围
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(9,),
+            shape=(8,),
             dtype=np.float64
         )
 
@@ -74,8 +79,8 @@ class AirCombatEnv(gym.Env):
 
         # --- (中文) 新增：补全缺失的内部循环参数 ---
         # 这些参数决定了在 step 方法内部的物理仿真是如何运行的
-        self.dt_normal = 0.02  # 大步长 (当距离远时)
-        self.dt_small = 0.02  # 小步长 (当距离近时)
+        self.dt_normal = 0.1  # 大步长 (当距离远时)
+        self.dt_small = 0.1  # 小步长 (当距离近时)
         self.dt_flare = 0.02  # 投放诱饵弹时的步长
         self.R_switch = 500  # (米) 切换大小步长的距离阈值
 
@@ -88,9 +93,14 @@ class AirCombatEnv(gym.Env):
         self.omega_max_rad_s = 12.0  # 导引头最大角速度 (弧度/秒)
         self.T_max = 60.0  # 导引头最大搜索时间 (秒)
 
+        # --- 规则机动参数 (来自 AirCombatEnv6) ---
+        self.n_ty_max = 9.0 # 飞机最大法向过载
+        self.target_mode = 1  # 默认机动模式
+        self.control_input = None  # 飞机控制函数
+
         # --- 核心组件实例化 ---
-        initial_state = np.array([0, 1000, 0, 200, 0.1, 0.0, 0.0, 0.0])
-        self.aircraft = Aircraft(dt=self.dt_small, initial_state=initial_state)
+        initial_state = np.array([0, 1000, 0, 200, 0.1, 0.0, 0.0, 0.0]) # [x, y, z, Vt, theta, psi, phi, p_real]
+        self.aircraft = Aircraft(initial_state=initial_state)
         self.missile = None
         # <<< 更改 >>> FlareManager现在需要处理更复杂的逻辑，但初始化不变
         # flare_per_group 在新逻辑中不再直接使用，但可以保留
@@ -194,6 +204,7 @@ class AirCombatEnv(gym.Env):
         # 只需要传递 physical_dt 和标准单位的 initial_state
         self.aircraft.reset(initial_state=initial_aircraft_state)
 
+
         # 计算初始视线角，让导弹直接对准飞机
         R_vec = self.aircraft.pos - np.array([x_m, y_m, z_m])
         R_mag = np.linalg.norm(R_vec)
@@ -208,6 +219,33 @@ class AirCombatEnv(gym.Env):
         ])
         self.missile = Missile(initial_missile_state)
         # print(initial_missile_state)
+
+        # <<< GYMNASIUM CHANGE >>> 返回 observation 和一个空的 info 字典
+        observation = self._get_observation()
+        info = {}
+
+        # --- 决定本回合的机动模式 ---
+        R_vec_init = self.aircraft.pos - np.array([x_m, y_m, z_m])
+        Ry_rel_init = R_vec_init[1]
+
+        # 这是一个简化的、基于初始相对位置的机动决策逻辑
+        if np.abs(Ry_rel_init) <= 1000:  # 如果高度差不大，进行水平机动
+            # 这里可以用更复杂的逻辑，例如判断导弹在左侧还是右侧来决定左转或右转
+            o_beta_rad = self.compute_relative_beta2(self.aircraft.state_vector, self.missile.state_vector)
+            if o_beta_rad < np.pi:
+                self.target_mode = 1  # 1=左转
+            else:
+                self.target_mode = 2  # 2=右转
+            # 为简单起见，我们随机选择
+            # self.target_mode = np.random.choice([1, 2])  # 1=左转, 2=右转
+
+        elif Ry_rel_init > 0:  # 导弹在飞机下方，飞机爬升
+            self.target_mode = 3  # 4=俯冲
+        else:  # 导弹在飞机上方，飞机爬升
+            self.target_mode = 4  # 3=爬升
+
+        # 根据机动模式生成控制函数
+        self.control_input = self._generate_control_input(self.aircraft.state_vector, self.n_ty_max, self.target_mode)
 
         # --- 5. 初始化历史状态 ---
         self.prev_aircraft_state = self.aircraft.state_vector.copy()
@@ -230,10 +268,6 @@ class AirCombatEnv(gym.Env):
             self.tacview.tacview_final_frame_sent = False
             self.tacview.stream_frame(0.0, self.aircraft, self.missile, [])
 
-        # <<< GYMNASIUM CHANGE >>> 返回 observation 和一个空的 info 字典
-        observation = self._get_observation()
-        info = {}
-
         return observation, info
 
     def step(self, action: dict) -> tuple:
@@ -242,11 +276,11 @@ class AirCombatEnv(gym.Env):
         内部会根据情况，以不同的小步长多次调用 run_one_step。
         (Gymnasium兼容版) 执行一个决策时间步。
         """
-        # --- 1. <<< 更改 >>> 解析结构化的动作字典 ---
-        continuous_cmds = action["continuous_actions"]
+        # --- 1. <<< 更改 >>> 解析结构化的动作字典   # --- 1. <<< 更改 >>> 解析纯离散动作数组 ---
+        # continuous_cmds = action["continuous_actions"]
         discrete_cmds_indices = action["discrete_actions"]
 
-        throttle_cmd, elevator_cmd, aileron_cmd, rudder_cmd = continuous_cmds
+        # throttle_cmd, elevator_cmd, aileron_cmd, rudder_cmd = continuous_cmds
 
         trigger_cmd_idx = discrete_cmds_indices[0]
         salvo_size_idx = discrete_cmds_indices[1]
@@ -266,21 +300,30 @@ class AirCombatEnv(gym.Env):
 
         # --- 4. 物理仿真循环 (逻辑不变) ---
         R_rel_start = self.prev_R_rel
-        if R_rel_start < self.R_switch:
-            num_steps, step_dt = int(round(self.dt_dec / self.dt_small)), self.dt_small
-        elif self.flare_manager.schedule:  # 检查是否有待投放的计划
+        # if R_rel_start < self.R_switch:
+        #     num_steps, step_dt = int(round(self.dt_dec / self.dt_small)), self.dt_small
+        # elif self.flare_manager.schedule:  # 检查是否有待投放的计划
+        #     num_steps, step_dt = int(round(self.dt_dec / self.dt_flare)), self.dt_flare
+        # else:
+        #     num_steps, step_dt = int(round(self.dt_dec / self.dt_normal)), self.dt_normal
+        if self.flare_manager.schedule:  # 优先保证投放精度
+            # --- 分支 1 (新) ---
             num_steps, step_dt = int(round(self.dt_dec / self.dt_flare)), self.dt_flare
+        elif R_rel_start < self.R_switch:
+            # --- 分支 2 (新) ---
+            num_steps, step_dt = int(round(self.dt_dec / self.dt_small)), self.dt_small
         else:
+            # --- 分支 3 (不变) ---
             num_steps, step_dt = int(round(self.dt_dec / self.dt_normal)), self.dt_normal
 
         # 执行内部物理循环
         for i in range(num_steps):
-            # 飞机机动指令在整个决策步内保持不变
-            aircraft_action = [throttle_cmd, elevator_cmd, aileron_cmd, rudder_cmd]
+            # 飞机机动指令在整个决策步内保持不变 # <<< 更改 >>> 飞机动作不再由AI提供
+            # aircraft_action = [throttle_cmd, elevator_cmd, aileron_cmd, rudder_cmd]
 
             # <<< 更改 >>> release_flare 参数现在不再直接使用，投放由 FlareManager 的 schedule 控制
             # 但 run_one_step 中仍需检查 schedule
-            self.run_one_step(step_dt, aircraft_action)
+            self.run_one_step(step_dt)
 
             if self.done:
                 break
@@ -296,6 +339,8 @@ class AirCombatEnv(gym.Env):
                 self.success = True
             reward += self.reward_calculator.get_sparse_reward(self.miss_distance, self.R_kill)
         else:
+            # 奖励计算中的 action 参数现在是离散的，RewardCalculator 需要能处理
+            # 假设它只需要知道是否投放 (action[0])
             reward += self.reward_calculator.calculate_dense_reward(
                 self.aircraft, self.missile, self.o_ir, self.N_infrared, action
             )
@@ -319,7 +364,7 @@ class AirCombatEnv(gym.Env):
         # return self._get_observation(), reward, self.done, {}, {}
         return observation, reward, terminated, truncated, info
 
-    def run_one_step(self, dt, aircraft_action):
+    def run_one_step(self, dt):
         """
         (修正版) 执行单个物理时间步的更新。
         投放计划的制定已移至 step 方法，这里只负责执行。
@@ -332,6 +377,22 @@ class AirCombatEnv(gym.Env):
         # FlareManager 的 update 方法内部会检查 self.schedule 列表，
         # 如果当前时间 t 匹配了计划中的某个时间点，它会自动创建新的 Flare 实例。
         self.flare_manager.update(self.t_now, dt, self.aircraft)  # 注意：这里传入的是 t 时刻的 aircraft 对象
+
+        # --- 2. <<< 更改 >>> 更新飞机状态（规则机动） ---
+        # 2. <<< MODIFIED >>> 更新飞机状态
+        #   a. 获取规则指令 (n_ty, mu_t)
+        x_current = self.aircraft.state_vector
+        #a.获取规则指令
+        nx_cmd, n_ty_cmd, roll_command, roll_mode = self.control_input(x_current)
+        #   b. 将规则指令“翻译”为动力学模型输入 (nx, nz, target_roll_angle)
+        # <<< SIMPLIFIED >>> 直接使用规则给出的目标滚转角 phi_t_cmd
+        # target_roll_angle_cmd = phi_t_cmd
+        #   c. 调用飞机模型的 update 方法
+        # <<< 修正 >>> 飞机动作现在是 nx_cmd, n_ty_cmd, roll_command, roll_mode
+        aircraft_action = [nx_cmd, n_ty_cmd, roll_command, roll_mode]
+        # self.aircraft.update(dt, aircraft_action)
+        # aircraft_state_next = self.aircraft.state_vector
+
 
         # c) 导引头：根据【当前】的飞机和导弹状态，计算导引目标
         target_pos_equiv = self._calculate_equivalent_target()
@@ -352,8 +413,9 @@ class AirCombatEnv(gym.Env):
         self.t_now += dt
         self.tacview_global_time += dt
         # a) 飞机：直接调用 update，它内部会运行 JSBSim
-        self.aircraft.update(aircraft_action)  # JSBSim的dt在初始化时已设置
-        self.aircraft_history.append(self.aircraft.state_vector.copy())
+        self.aircraft.update(dt, aircraft_action)
+        aircraft_state_next = self.aircraft.state_vector
+        self.aircraft_history.append(aircraft_state_next.copy())
         self.missile_history.append(missile_state_next.copy())
         self.time_history.append(self.t_now)
 
@@ -362,7 +424,7 @@ class AirCombatEnv(gym.Env):
         # if self.done: return  # 如果引信引爆，立即返回
 
         # --- 2. (新时序) 【同步】更新所有对象的状态 ---
-        # self.aircraft.state = aircraft_state_next
+        self.aircraft.state = aircraft_state_next
         self.missile.state = missile_state_next
 
         # 3. 【最后】，才更新用于下一轮计算的【历史状态】
@@ -407,6 +469,89 @@ class AirCombatEnv(gym.Env):
     #         # 如果不够，则不执行任何操作
     #         # print(f"[{self.t_now:.2f}s] 诱饵弹不足，无法执行投放程序。需要 {total_flares_needed}, 剩余 {self.o_ir}")
     #         pass
+
+    # --- 规则机动核心方法 (来自 AirCombatEnv6) ---
+    # def _generate_control_input(self, x0, n_ty_max, mode):
+    #     """生成飞机的控制输入函数。"""
+    #     if mode == 1:  # 左转
+    #         return lambda x: (np.sin(x[4]), n_ty_max, -np.arccos(np.clip(np.cos(x[4]) / n_ty_max, -1, 1)))
+    #     elif mode == 2:  # 右转
+    #         return lambda x: (np.sin(x[4]), n_ty_max, np.arccos(np.clip(np.cos(x[4]) / n_ty_max, -1, 1)))
+    #     elif mode == 3:  # 爬升
+    #         return lambda x: (np.sin(x[4]), (np.cos(x[4]) + n_ty_max) / np.cos(0), 0)
+    #     elif mode == 4:  # 俯冲
+    #         return lambda x: (np.sin(x[4]), (np.cos(x[4]) - n_ty_max) / np.cos(0), 0)
+    #     else:
+    #         raise ValueError('Invalid maneuver mode')
+
+    # <<< 核心更改 >>> 使用您提供的新机动逻辑
+    def _generate_control_input(self, current_state, n_ty_max, mode):
+        """
+        根据指定的机动模式，生成一个状态依赖的控制函数 (lambda)。
+        这个函数在每个时间步被调用，以计算瞬时控制指令。
+        计算并返回一个带模式标志的控制指令列表。
+        [nx, nz, roll_command, roll_mode]
+        """
+        pitch_rad = current_state[4]
+        # 模式标志: 0 表示 roll_command 是目标滚转角
+        ROLL_MODE_ANGLE = 0
+
+        if mode == 1:  # 左转
+            def maneuver_logic(current_state):
+                pitch_rad = current_state[4]
+                nz_cmd = n_ty_max
+                cos_pitch_over_g = np.clip(np.cos(pitch_rad) / nz_cmd, -1.0, 1.0)
+                phi_cmd = -np.arccos(cos_pitch_over_g)
+                nx_cmd = 1.0
+                ROLL_MODE_ANGLE = 0.0   #当设为1.0滚转角速度模式可以实现标准桶滚
+                return [nx_cmd, nz_cmd, phi_cmd, ROLL_MODE_ANGLE]
+
+            return maneuver_logic
+
+        elif mode == 2:  # 右转
+            def maneuver_logic(current_state):
+                pitch_rad = current_state[4]
+                nz_cmd = n_ty_max
+                cos_pitch_over_g = np.clip(np.cos(pitch_rad) / nz_cmd, -1.0, 1.0)
+                phi_cmd = np.arccos(cos_pitch_over_g)
+                nx_cmd = 1.0
+                ROLL_MODE_ANGLE = 0
+                return [nx_cmd, nz_cmd, phi_cmd, ROLL_MODE_ANGLE]
+
+            return maneuver_logic
+
+        elif mode == 3:  # 爬升
+            def maneuver_logic(current_state):
+                # pitch_rad = current_state[4] # 在这个模式下 pitch_rad 未被使用
+                nz_cmd = n_ty_max
+                # phi_cmd = 0.0
+                p_cmd = 0.0 #需要将滚转角速度设为0，以便飞机保持爬升
+                nx_cmd = 1.0
+                ROLL_MODE_ANGLE = 1.0 #1.0表示滚转角速度模式
+                return [nx_cmd, nz_cmd, p_cmd, ROLL_MODE_ANGLE]
+
+            return maneuver_logic
+
+        elif mode == 4:  # 俯冲
+            def maneuver_logic(current_state):
+                # pitch_rad = current_state[4] # 在这个模式下 pitch_rad 未被使用
+                nz_cmd = -5.0
+                # phi_cmd = 0.0
+                p_cmd = 0.0  # 需要将滚转角速度设为0，以便飞机保持爬升
+                nx_cmd = 1.0
+                ROLL_MODE_ANGLE = 1.0  # 1.0表示滚转角速度模式
+                return [nx_cmd, nz_cmd, p_cmd, ROLL_MODE_ANGLE]
+
+            return maneuver_logic
+
+        elif mode == 5:  # 平飞
+            def maneuver_logic(current_state):
+                return [1.0, 1.0, 0.0, 0.0]  # nx=1, nz=1 (平飞), phi_cmd=0, roll_mode=0
+
+            return maneuver_logic
+
+        else:
+            raise ValueError(f'无效的机动模式: {mode}')
 
     def _execute_flare_program(self, salvo_idx, intra_idx, num_groups_idx, inter_idx):
         """
@@ -770,6 +915,36 @@ class AirCombatEnv(gym.Env):
 
     # --- (中文) 私有辅助方法 ---
 
+    def compute_relative_beta2(self,x_target, x_missile):
+        """
+        (v3 - 修正版) 计算导弹相对于飞机机头的方位角 (0-2pi)。
+        该版本使用坐标系旋转和 arctan2，比旧的 arccos+cross_product 方法更健壮。
+        """
+        # 1. 获取飞机的偏航角 (从北向东为正)
+        psi_t = x_target[5]
+        # 2. 计算从世界坐标系 (NUE) 旋转到以飞机机头为前方的参考系所需要的旋转矩阵
+        # 这是一个绕 y 轴 (天轴) 的二维旋转
+        cos_psi, sin_psi = np.cos(-psi_t), np.sin(-psi_t)
+        # 旋转矩阵
+        # R = [[cos, -sin],
+        #      [sin,  cos]]
+        # 我们只关心水平面 xz (北-东)
+        # 3. 计算飞机指向导弹的相对位置矢量，并投影到水平面
+        R_vec_beta = x_missile[3:6] - x_target[0:3]  # 水平面上的 (x, z) 分量
+        R_proj_world = np.array([R_vec_beta[0], R_vec_beta[2]])
+        # 4. 将这个相对位置矢量旋转到以飞机为参考的坐标系下
+        # [x_rel_body] = [cos, -sin] * [x_rel_world]
+        # [z_rel_body]   [sin,  cos]   [z_rel_world]
+        x_rel_body = cos_psi * R_proj_world[0] - sin_psi * R_proj_world[1]
+        z_rel_body = sin_psi * R_proj_world[0] + cos_psi * R_proj_world[1]
+        # 5. 使用 arctan2 直接计算角度
+        # 在这个新的参考系下：
+        # x_rel_body > 0 表示在前半球, < 0 表示在后半球
+        # z_rel_body > 0 表示在右半侧(东), < 0 表示在左半侧(西)
+        # arctan2(z, x) 会给出从 x 轴正方向 (机头) 到该向量的角度
+        threat_angle_rad = np.arctan2(z_rel_body, x_rel_body)
+        return threat_angle_rad + 2 * np.pi if threat_angle_rad < 0 else threat_angle_rad
+
     def _get_observation(self) -> np.ndarray:
         """
         根据当前状态组装并归一化观测向量。
@@ -784,37 +959,8 @@ class AirCombatEnv(gym.Env):
         # b) 计算相对方位角 (beta, 水平面)
         #    这个函数现在应该在 RewardCalculator 或一个独立的 kinematics 模块中
         #    为了自洽，我们暂时在这里重新定义它，但最好的做法是放在外面
-        def compute_relative_beta2(x_target, x_missile):
-            """
-            (v3 - 修正版) 计算导弹相对于飞机机头的方位角 (0-2pi)。
-            该版本使用坐标系旋转和 arctan2，比旧的 arccos+cross_product 方法更健壮。
-            """
-            # 1. 获取飞机的偏航角 (从北向东为正)
-            psi_t = x_target[5]
-            # 2. 计算从世界坐标系 (NUE) 旋转到以飞机机头为前方的参考系所需要的旋转矩阵
-            # 这是一个绕 y 轴 (天轴) 的二维旋转
-            cos_psi, sin_psi = np.cos(-psi_t), np.sin(-psi_t)
-            # 旋转矩阵
-            # R = [[cos, -sin],
-            #      [sin,  cos]]
-            # 我们只关心水平面 xz (北-东)
-            # 3. 计算飞机指向导弹的相对位置矢量，并投影到水平面
-            R_vec_beta = x_missile[3:6] - x_target[0:3]  # 水平面上的 (x, z) 分量
-            R_proj_world = np.array([R_vec_beta[0], R_vec_beta[2]])
-            # 4. 将这个相对位置矢量旋转到以飞机为参考的坐标系下
-            # [x_rel_body] = [cos, -sin] * [x_rel_world]
-            # [z_rel_body]   [sin,  cos]   [z_rel_world]
-            x_rel_body = cos_psi * R_proj_world[0] - sin_psi * R_proj_world[1]
-            z_rel_body = sin_psi * R_proj_world[0] + cos_psi * R_proj_world[1]
-            # 5. 使用 arctan2 直接计算角度
-            # 在这个新的参考系下：
-            # x_rel_body > 0 表示在前半球, < 0 表示在后半球
-            # z_rel_body > 0 表示在右半侧(东), < 0 表示在左半侧(西)
-            # arctan2(z, x) 会给出从 x 轴正方向 (机头) 到该向量的角度
-            threat_angle_rad = np.arctan2(z_rel_body, x_rel_body)
-            return threat_angle_rad + 2 * np.pi if threat_angle_rad < 0 else threat_angle_rad
 
-        o_beta_rad = compute_relative_beta2(self.aircraft.state_vector, self.missile.state_vector)
+        o_beta_rad = self.compute_relative_beta2(self.aircraft.state_vector, self.missile.state_vector)
 
         # c) 计算相对俯仰角 (theta_L_rel, 垂直面)
         #    导弹相对于飞机的俯仰角 (飞机坐标系下)
@@ -864,7 +1010,7 @@ class AirCombatEnv(gym.Env):
             np.array([o_ae_norm]),
             np.array([o_am_norm]),
             np.array([o_ir_norm]),
-            np.array([o_q_norm])
+            # np.array([o_q_norm])
         ))
 
         return observation.astype(np.float32)
@@ -1207,3 +1353,5 @@ class AirCombatEnv(gym.Env):
         # ax.view_init(elev=view_init_elev, azim=view_init_azim)
 
         plt.show()
+
+

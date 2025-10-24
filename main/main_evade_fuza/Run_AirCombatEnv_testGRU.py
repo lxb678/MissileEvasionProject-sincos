@@ -9,7 +9,7 @@ import torch
 import numpy as np
 import random
 # <<< GRU 修改 >>>: 导入包含GRU模型的PPO实现
-from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPOGRU_jsbsim_SeparateHeads import *
+from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPOGRUMLP import *
 from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
 from torch.utils.tensorboard import SummaryWriter
 # <<< 更改 >>>: 确保您正在使用的环境与训练时一致
@@ -92,6 +92,7 @@ for i_episode in range(episodes):
 
             # 2. 将扁平数组打包成字典 (这部分不变)
             action_dict_eval = pack_action_into_dict(action_eval_flat)
+            # print(f"Step {step + 1}, Action: {action_dict_eval}")
 
             # 3. 将打包好的字典传递给环境
             observation_eval, reward_eval, terminated, truncated, info = env.step(action_dict_eval)
@@ -123,7 +124,7 @@ for i_episode in range(episodes):
                 if "miss_distance" in info:
                     print(f"脱靶量: {info['miss_distance']:.2f} m")
 
-                # env.render() # 如果您想在每回合结束时看图，可以取消注释
+                env.render() # 如果您想在每回合结束时看图，可以取消注释
 
     # 在一定回合后打印成功率
     if (i_episode + 1) % 10 == 0:

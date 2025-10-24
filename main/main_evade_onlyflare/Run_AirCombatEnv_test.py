@@ -2,13 +2,13 @@ import gym
 import torch
 import numpy as np
 import random
-from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim_SeparateHeads_std_nostate import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
+from Interference_code.PPO_model.PPO_evasion_onlyflare.Hybrid_PPO_jsbsim_SeparateHeads_onlyflare import *
+from Interference_code.PPO_model.PPO_evasion_onlyflare.Config import *
 from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
 # from env.AirCombatEnv6_maneuver_flare import *
 from Interference_code.env.missile_evasion_environment.missile_evasion_environment import *
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
+from Interference_code.env.missile_evasion_environment_onlyflare.Vec_missile_evasion_environment import *
 import time
 import matplotlib.pyplot as plt
 
@@ -42,7 +42,7 @@ def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
             }
     """
     # 1. 提取连续动作部分
-    continuous_part = flat_action_np[:CONTINUOUS_DIM]
+    # continuous_part = flat_action_np[:CONTINUOUS_DIM]
 
     # 2. 提取离散动作部分
     # PPO输出的已经是离散索引了，但它们是浮点数，需要转换为整数
@@ -50,7 +50,7 @@ def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
 
     # 3. 组装成字典
     action_dict = {
-        "continuous_actions": continuous_part,
+        # "continuous_actions": continuous_part,
         "discrete_actions": discrete_part
     }
 
@@ -67,7 +67,7 @@ set_seed(env)
 # <<< 更改 >>> 确保这里的模型路径与您训练时保存的路径一致
 # 假设您的模型保存在 "../../test/test_evade"
 # model_path = "../../test/test_evade" # 或者您训练模型时使用的其他路径
-model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
+model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_onlyflare"
 # model_path = r"D:\code\规避导弹项目\Interference_code\save\save_evade_fuza\2025-10-15_16-52-20"
 agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_path)
 
