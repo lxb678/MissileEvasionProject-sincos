@@ -1,16 +1,11 @@
 # --- START OF FILE Run_AirCombatEnv_train.py ---
 
-import gym
-import torch
-import numpy as np
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPOGRUAttnMLP多时刻聚合 import *
+from Interference_code.PPO_model.PPO_evasion_fuza.旧ppo.Hybrid_PPOAttnGRUMLP关闭注意力 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.ConfigAttn import *
 from torch.utils.tensorboard import SummaryWriter
 # from env.AirCombatEnv import *
-from Interference_code.env.AirCombatEnv6_maneuver_flare import *
-from Interference_code.env.missile_evasion_environment.missile_evasion_environment import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
 import time
 
@@ -86,7 +81,7 @@ def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
 # ------------------- Tensorboard 设置 -------------------
 # <<< GRU/RNN 修改 >>>: 在日志文件名中加入 RNN 标识
 model_type_str = "GRU_Attn" if USE_RNN_MODEL else "MLP"
-writer_log_dir = f'../../log/log_evade_fuza/PPO_{model_type_str}_{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}_load{LOAD_ABLE}'
+writer_log_dir = f'../../log/log_evade_fuza/PPO_关闭注意力_{model_type_str}_{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}_load{LOAD_ABLE}'
 writer = SummaryWriter(log_dir=writer_log_dir)
 print(f"Tensorboard 日志将保存在: {writer_log_dir}")
 

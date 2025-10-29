@@ -98,7 +98,7 @@ class Actor(Module):
             self.shared_network.add_module(f'fc_{i}', Linear(shared_layers_dims[i], shared_layers_dims[i + 1]))
             # --- 在此处添加 LayerNorm ---
             # LayerNorm 的输入维度是前一个线性层的输出维度
-            self.shared_network.add_module(f'LayerNorm_{i}', LayerNorm(shared_layers_dims[i + 1]))
+            # self.shared_network.add_module(f'LayerNorm_{i}', LayerNorm(shared_layers_dims[i + 1]))
             # 添加激活函数
             self.shared_network.add_module(f'LeakyReLU_{i}', LeakyReLU())
 
@@ -224,7 +224,7 @@ class Critic(Module):
         layers_dims = [self.input_dim] + CRITIC_PARA.model_layer_dim
         for i in range(len(layers_dims) - 1):
             self.network.add_module(f'fc_{i}', Linear(layers_dims[i], layers_dims[i + 1]))
-            self.network.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
+            # self.network.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
             self.network.add_module(f'LeakyReLU_{i}', LeakyReLU())
         # 添加最后的输出层
         self.network.add_module('fc_out', Linear(layers_dims[-1], self.output_dim))
@@ -277,7 +277,7 @@ class Critic(Module):
 
             # 在线性层之后、激活函数之前添加 LayerNorm
             # LayerNorm 的维度是其前面线性层的输出维度
-            self.network.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
+            # self.network.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
 
             # 添加激活函数
             self.network.add_module(f'LeakyReLU_{i}', LeakyReLU())

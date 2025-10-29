@@ -56,7 +56,7 @@ ACTION_RANGES = {
 RNN_HIDDEN_SIZE = 256  # GRU 层的隐藏单元数量
 SEQUENCE_LENGTH = 10  # 训练时从经验池中采样的连续轨迹片段的长度
 # ATTN_NUM_HEADS = 8     # 注意力机制的头数 (必须能被 MLP 输出维度整除)
-ATTN_NUM_HEADS = 4 #1 #2       # <<< 这是您的关键修改
+ATTN_NUM_HEADS = 4 #8 #4 #1 #2       # <<< 这是您的关键修改
 
 # ==============================================================================
 # Original MLP-based Actor and Critic (保留原始版本以供选择)
@@ -247,6 +247,7 @@ class Actor_GRU(Module):
     """
         Actor 网络 (策略网络) - [新结构: GRU -> Attention -> MLP]
         结构为: GRU时序编码 -> Attention聚焦历史 -> MLP深度加工 -> 独立动作头。
+        [✅ 正则化]: 在 Attention 输出端应用轻量级 Dropout，以实现特征层面正则化，
         """
     def __init__(self):
         super(Actor_GRU, self).__init__()
@@ -296,6 +297,10 @@ class Actor_GRU(Module):
         # 我们将用它来实现 Cross-Attention
         assert self.rnn_hidden_size % ATTN_NUM_HEADS == 0, "RNN hidden size must be divisible by ATTN_NUM_HEADS"
         self.attention = MultiheadAttention(embed_dim=self.rnn_hidden_size, num_heads=ATTN_NUM_HEADS, batch_first=True)
+
+        # <<< ✅ 在这里定义 Attention 输出的 Dropout 层 >>>
+        self.attn_dropout = Dropout(p=0.1)
+
         self.attention_layernorm = LayerNorm(self.rnn_hidden_size)
 
         # 💥 在 Attention 和 MLP 之间新增一个 LayerNorm，用于稳定 MLP 的输入
@@ -387,41 +392,57 @@ class Actor_GRU(Module):
         # mu = self.mu_head(gru_out)
         # all_disc_logits = self.discrete_head(gru_out)
 
-        # 1. GRU 处理原始状态序列
-        gru_out, new_hidden = self.gru(obs_tensor, hidden_state)  # gru_out shape: (B, S, H)
+        # 1. GRU
+        gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
 
-        # 2. Attention 聚合时序信息 (Cross-Attention)
-        # query: 当前最重要的信息，即序列的最后一个时间步的隐藏状态
-        # key/value: 整个历史序列，供 query 检索
-        query = gru_out[:, -1:, :]  # (B, 1, H) - 保持序列维度
-        key = gru_out  # (B, S, H)
-        value = gru_out  # (B, S, H)
+        # # 2. 💥 Self-Attention: query, key, value 都是整个序列
+        # query = gru_out
+        # key = gru_out
+        # value = gru_out
+        #
+        # attn_output, _ = self.attention(query, key, value)  # This is the SubLayer
+        #
+        # # 残差连接 + LayerNorm，输出仍是序列  Post-LN
+        # final_context_sequence = self.attention_layernorm(gru_out + attn_output)  # (B, S, H) # Add -> LayerNorm
+        #
+        # # 3. Pre-MLP LayerNorm and MLP，输入和输出都是序列
+        # normed_context_sequence = self.mlp_input_layernorm(final_context_sequence)
+        # shared_features_sequence = self.shared_network(normed_context_sequence)  # (B, S, F_mlp)
 
-        # attn_output 是聚合了历史信息的上下文向量
-        attn_output, _ = self.attention(query, key, value)  # (B, 1, H)
+        # --- Pre-LN Attention Block ---LayerNorm 是在 Add 之前还是之后，是区分 Pre-LN 和 Post-LN 的关键，也是影响训练稳定性的关键。
+        # 2. 先对 GRU 输出进行归一化
+        normed_gru_out = self.attention_layernorm(gru_out)
 
-        # 融合与归一化 (残差连接)
-        # last_step_hidden = gru_out[:, -1, :] # (B, H)
-        # final_context = self.attention_layernorm(last_step_hidden + attn_output.squeeze(1)) # (B, H)
-        final_context = self.attention_layernorm(query.squeeze(1) + attn_output.squeeze(1))
+        # 3. Attention 处理归一化后的数据（SubLayer）
+        attn_output, _ = self.attention(normed_gru_out, normed_gru_out, normed_gru_out)
 
-        assert query.shape == attn_output.shape, "Attention 残差连接维度不匹配"
+        # <<< ✅ 在这里应用 Attention 输出的 Dropout >>>
+        attn_output = self.attn_dropout(attn_output)
 
-        # --- 重要逻辑：处理单步输入和序列输入 ---
-        # 如果原始输入是序列 (is_sequence=True)，我们已经聚合了信息，MLP 应该处理 (B, H)
-        # 如果原始输入是单步 (is_sequence=False)，gru_out 和 final_context 都已经是 (B, H)，可以直接用
+        # 4. 残差连接：将 Attention 输出加回到 *原始* GRU 输出上
+        context_sequence = gru_out + attn_output  # Add is the LAST step
 
+        # --- Pre-LN MLP Block ---
+        # 5. 再对 Attention Block 的输出进行归一化
+        normed_context = self.mlp_input_layernorm(context_sequence)
 
-        # # 3. 将聚合后的上下文向量送入 MLP
-        # shared_features = self.shared_network(final_context)
+        # 6. MLP 处理归一化后的数据
+        mlp_output = self.shared_network(normed_context)
 
-        # 3. 💥 将 Attention 输出通过新增的 LayerNorm，再送入 MLP
-        normed_context = self.mlp_input_layernorm(final_context)
-        shared_features = self.shared_network(normed_context)
+        # 7. 残差连接：将 MLP 输出加回到其输入上 (可选，但推荐)
+        #    要实现这个，MLP的输入输出维度需要一致。
+        #    如果 ACTOR_PARA.model_layer_dim 的最后一层维度与 rnn_hidden_size 相同，则可以实现
+        #    例如 rnn_hidden_size=256, model_layer_dim=[256, 256]。
+        #    如果维度不同，则不能直接相加。为简化，我们暂时省略。
+        shared_features_sequence = mlp_output  # 假设没有 MLP 残差连接
 
-        # 4. 将 MLP 输出送入各个头
-        mu = self.mu_head(shared_features)
-        all_disc_logits = self.discrete_head(shared_features)
+        # 💥 如果输入不是序列，则移除序列维度
+        if not is_sequence:
+            shared_features_sequence = shared_features_sequence.squeeze(1)
+
+        # 4. Heads，输入和输出也都是序列
+        mu = self.mu_head(shared_features_sequence)  # (B, S, D_cont)
+        all_disc_logits = self.discrete_head(shared_features_sequence)  # (B, S, D_disc)
 
         # 后续的分布创建逻辑与原版 Actor 完全相同
         split_sizes = list(DISCRETE_DIMS.values())
@@ -432,11 +453,14 @@ class Actor_GRU(Module):
         # obs_tensor 此时可能是 (batch, seq_len, features) 或 (batch, features)
         # 使用 ... (Ellipsis) 可以优雅地处理这两种情况，它代表任意数量的前导维度。
         # has_flares_info = obs_tensor[..., 7]  # 使用 ... 来处理单步和序列两种情况
-        # 掩码信息来自原始输入 obs_tensor 的最后一个时间步
-        has_flares_info = obs_tensor[:, -1, 7]  # (B,)
+        # 💥 掩码现在作用于整个序列
+        has_flares_info = obs_tensor[..., 7]
         mask = (has_flares_info == 0)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
+            # 确保掩码维度能正确广播
+            if mask.dim() < trigger_logits_masked.dim():
+                mask = mask.unsqueeze(-1)
             trigger_logits_masked[mask] = torch.finfo(torch.float32).min
 
         # mu, log_std = cont_params.chunk(2, dim=-1)
@@ -514,6 +538,10 @@ class Critic_GRU(Module):
         # 2. 注意力层
         assert self.rnn_hidden_size % ATTN_NUM_HEADS == 0
         self.attention = MultiheadAttention(embed_dim=self.rnn_hidden_size, num_heads=ATTN_NUM_HEADS, batch_first=True)
+
+        # <<< ✅ 在这里定义 Attention 输出的 Dropout 层 >>>
+        self.attn_dropout = Dropout(p=0.1)
+
         self.attention_layernorm = LayerNorm(self.rnn_hidden_size)
 
         # 💥 在 Attention 和 MLP 之间新增一个 LayerNorm
@@ -580,34 +608,48 @@ class Critic_GRU(Module):
         # # 3. 输出头计算价值
         # value = self.fc_out(gru_out)
 
+        # #post-LN
+        # # 1. GRU
+        # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+        #
+        # # 2. 💥 Self-Attention
+        # attn_output, _ = self.attention(gru_out, gru_out, gru_out)
+        # final_context_sequence = self.attention_layernorm(gru_out + attn_output)
+        #
+        # # 3. Pre-MLP LayerNorm and MLP
+        # normed_context_sequence = self.mlp_input_layernorm(final_context_sequence)
+        # base_features_sequence = self.network_base(normed_context_sequence)
+
+        #pre-LN
         # 1. GRU
         gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
 
-        # 2. Attention
-        query = gru_out[:, -1:, :]
-        key = gru_out
-        value = gru_out
-        attn_output, _ = self.attention(query, key, value)
-        # final_context = self.attention_layernorm(gru_out[:, -1, :] + attn_output.squeeze(1))
-        final_context = self.attention_layernorm(query.squeeze(1) + attn_output.squeeze(1))
+        # --- 💥 Pre-LN Attention Block (Corrected) ---
+        # 2. 先对 GRU 输出进行归一化
+        normed_gru_out = self.attention_layernorm(gru_out)
 
-        # # 3. MLP
-        # base_features = self.network_base(final_context)
+        # 3. Attention 处理归一化后的数据
+        attn_output, _ = self.attention(normed_gru_out, normed_gru_out, normed_gru_out)
 
-        # 3. 💥 将 Attention 输出通过新增的 LayerNorm，再送入 MLP
-        normed_context = self.mlp_input_layernorm(final_context)
-        base_features = self.network_base(normed_context)
+        # <<< ✅ 在这里应用 Attention 输出的 Dropout >>>
+        attn_output = self.attn_dropout(attn_output)
 
-        # 4. 输出头
-        value = self.fc_out(base_features)  # value shape: (B, 1)
+        # 4. 残差连接：将 Attention 输出加回到 *原始* GRU 输出上
+        context_sequence = gru_out + attn_output
 
-        # # --- 重要修改：确保 learn() 函数中的维度匹配 ---
-        # # 原始代码在 learn() 中期望 new_value 是 (B, S, 1)
-        # # 但现在我们的模型对序列做了聚合，输出是 (B, 1)
-        # # 为了兼容，我们将这个结果在序列维度上复制
-        # if is_sequence:
-        #     seq_len = obs_tensor.size(1)
-        #     value = value.unsqueeze(1).repeat(1, seq_len, 1)  # (B, 1, 1) -> (B, S, 1)
+        # --- Pre-LN MLP Block ---
+        # 5. 再对 Attention Block 的输出进行归一化
+        normed_context = self.mlp_input_layernorm(context_sequence)
+
+        # 6. MLP 处理
+        base_features_sequence = self.network_base(normed_context)
+
+        # 7. Output Head
+        value = self.fc_out(base_features_sequence)  # 💥 value shape: (B, S, 1)
+
+        # 💥 如果输入不是序列，则移除序列维度
+        if not is_sequence:
+            value = value.squeeze(1)
 
         return value, new_hidden
 
@@ -641,7 +683,7 @@ class PPO_continuous(object):
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
         self.training_start_time = time.strftime("PPOGRU_Attn_%Y-%m-%d_%H-%M-%S") # <<< 修改 >>> 更新存档文件夹名称
-        self.base_save_dir = "../../save/save_evade_fuza"
+        self.base_save_dir = "../../../save/save_evade_fuza"
         # 为本次运行创建一个唯一的存档文件夹
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
         # 如果需要加载预训练模型
@@ -651,7 +693,7 @@ class PPO_continuous(object):
                 self.load_models_from_directory(model_dir_path)
             else:
                 print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
-                self.load_models_from_directory("../../test/test_evade")
+                self.load_models_from_directory("../../../test/test_evade")
 
     def load_models_from_directory(self, directory_path: str):
         # This function is correct, no changes needed.
@@ -855,44 +897,15 @@ class PPO_continuous(object):
                     advantage = check(advantages[batch_indices]).to(**ACTOR_PARA.tpdv).view(-1, 1)
                     return_ = check(returns[batch_indices]).to(**CRITIC_PARA.tpdv).view(-1, 1)
                 # # 从批次动作中解析出连续和离散部分
-                # u_from_buffer = action_batch[..., :CONTINUOUS_DIM]
-                # discrete_actions_from_buffer = {
-                #     'trigger': action_batch[..., CONTINUOUS_DIM],
-                #     'salvo_size': action_batch[..., CONTINUOUS_DIM + 1].long(), # 类别索引需要是 long 类型
-                #     'intra_interval': action_batch[..., CONTINUOUS_DIM + 2].long(),
-                #     'num_groups': action_batch[..., CONTINUOUS_DIM + 3].long(),
-                #     'inter_interval': action_batch[..., CONTINUOUS_DIM + 4].long(),
-                # }
-
-                # 💥 针对 RNN 聚合模型，我们需要从序列中提取最后一个时间步的数据
-                if self.use_rnn:
-                    # 从动作序列中只取最后一个时间步的动作
-                    last_step_action_batch = action_batch[:, -1, :]  # Shape: (B, Total_Action_Dim)
-
-                    # 从 log_prob 序列中只取最后一个时间步的 log_prob
-                    last_step_old_prob = old_prob[:, -1]  # Shape: (B,)
-
-                    # 优势函数和回报也只关心最后一个时间步的
-                    last_step_advantage = advantage[:, -1]  # Shape: (B,)
-
-                    # 从批次动作中解析出连续和离散部分
-                    u_from_buffer = last_step_action_batch[:, :CONTINUOUS_DIM]
-                    discrete_actions_from_buffer = {
-                        'trigger': last_step_action_batch[:, CONTINUOUS_DIM],
-                        'salvo_size': last_step_action_batch[:, CONTINUOUS_DIM + 1].long(),
-                        'intra_interval': last_step_action_batch[:, CONTINUOUS_DIM + 2].long(),
-                        'num_groups': last_step_action_batch[:, CONTINUOUS_DIM + 3].long(),
-                        'inter_interval': last_step_action_batch[:, CONTINUOUS_DIM + 4].long(),
-                    }
-                else:  # MLP
-                    u_from_buffer = action_batch[..., :CONTINUOUS_DIM]
-                    discrete_actions_from_buffer = {
-                        'trigger': action_batch[..., CONTINUOUS_DIM],
-                        'salvo_size': action_batch[..., CONTINUOUS_DIM + 1].long(),
-                        'intra_interval': action_batch[..., CONTINUOUS_DIM + 2].long(),
-                        'num_groups': action_batch[..., CONTINUOUS_DIM + 3].long(),
-                        'inter_interval': action_batch[..., CONTINUOUS_DIM + 4].long(),
-                    }
+                # 💥 不再需要切片出最后一个时间步，直接使用完整的序列
+                u_from_buffer = action_batch[..., :CONTINUOUS_DIM]
+                discrete_actions_from_buffer = {
+                    'trigger': action_batch[..., CONTINUOUS_DIM],
+                    'salvo_size': action_batch[..., CONTINUOUS_DIM + 1].long(), # 类别索引需要是 long 类型
+                    'intra_interval': action_batch[..., CONTINUOUS_DIM + 2].long(),
+                    'num_groups': action_batch[..., CONTINUOUS_DIM + 3].long(),
+                    'inter_interval': action_batch[..., CONTINUOUS_DIM + 4].long(),
+                }
 
                 # 4. Actor (策略) 网络训练
                 if self.use_rnn:
@@ -901,6 +914,7 @@ class PPO_continuous(object):
                     new_dists = self.Actor(state)
                 # 计算新策略下，旧动作的对数概率
                 # 💥 现在 u_from_buffer 和 new_dists['continuous'] 的形状都是 (B, 4)，可以匹配了
+                # 计算 log_prob，所有张量都是序列，维度可以正确匹配
                 new_log_prob_cont = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
                 new_log_prob_disc = sum(
                     new_dists[key].log_prob(discrete_actions_from_buffer[key])
@@ -913,15 +927,14 @@ class PPO_continuous(object):
                     dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
                 )).mean()
                 # 计算新旧策略的比率 (importance sampling ratio)
-                # 💥 old_prob 和 advantage 也需要使用最后一个时间步的值
-                current_old_prob = last_step_old_prob if self.use_rnn else old_prob
-                current_advantage = last_step_advantage if self.use_rnn else advantage.squeeze(-1)
-                log_ratio = new_prob - current_old_prob
+                # 💥 使用完整的序列 old_prob 和 advantage
+                # 注意：需要确保它们的形状与 new_prob 匹配
+                log_ratio = new_prob - old_prob
                 ratio = torch.exp(torch.clamp(log_ratio, -20.0, 20.0)) # clamp 防止数值溢出
-                # PPO 的核心：Clipped Surrogate Objective
-                current_advantage_squeezed = current_advantage if current_advantage.dim() > ratio.dim() else current_advantage
-                surr1 = ratio * current_advantage_squeezed
-                surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * current_advantage_squeezed
+                # advantage 可能是 (B, S, 1) 或 (B, S)，需要与 ratio (B, S) 对齐
+                advantage_squeezed = advantage.squeeze(-1) if advantage.dim() > ratio.dim() else advantage
+                surr1 = ratio * advantage_squeezed
+                surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage_squeezed
                 # Actor 的损失是裁剪后的目标函数的负值，加上熵的正则项
                 actor_loss = -torch.min(surr1, surr2).mean() - AGENTPARA.entropy * total_entropy
                 # 反向传播和优化
@@ -935,24 +948,10 @@ class PPO_continuous(object):
                     # 对于 RNN 模型，Critic 输出的是聚合后的单一价值
                     # new_value shape: (B, 1)
                     new_value, _ = self.Critic(state, initial_critic_h)
-
-                    # 💥 只用序列的最后一个时间步的目标回报来计算损失
-                    # return_ shape: (B, S)
-                    last_step_return = return_[:, -1].unsqueeze(-1)  # -> shape: (B, 1)
-
-                    # 计算损失
-                    critic_loss = torch.nn.functional.mse_loss(new_value, last_step_return)
                 else:
                     # 对于 MLP 模型，逻辑保持不变
                     # new_value shape: (B, 1)
                     new_value = self.Critic(state)
-
-                    # return_ shape: (B,) or (B, 1)
-                    # 确保 return_ 形状为 (B, 1)
-                    if return_.dim() == 1:
-                        return_ = return_.unsqueeze(-1)
-
-                    critic_loss = torch.nn.functional.mse_loss(new_value, return_)
 
                 # # ####################################################################
                 # # # <<< FINAL, DEFINITIVE FIX FOR THE BROADCASTING WARNING >>>
@@ -962,11 +961,12 @@ class PPO_continuous(object):
                 # # 确保目标值 `return_` 和网络输出 `new_value` 的维度一致，以避免 PyTorch 的广播警告。
                 # # 例如，`new_value` 可能是 (B, S, 1)，而 `return_` 是 (B, S)，这会导致不明确的广播。
                 # # 通过 unsqueeze(-1) 将 `return_` 变为 (B, S, 1)，使其形状完全匹配。
-                # if new_value.dim() > return_.dim():
-                #     return_ = return_.unsqueeze(-1)
-                # # ####################################################################
-                # # Critic 的损失是预测值和真实回报（returns）之间的均方误差
-                # critic_loss = torch.nn.functional.mse_loss(new_value, return_)
+                # 💥 确保 return_ 维度与 new_value 匹配
+                if new_value.dim() > return_.dim():
+                    return_ = return_.unsqueeze(-1)
+                # ####################################################################
+                # Critic 的损失是预测值和真实回报（returns）之间的均方误差
+                critic_loss = torch.nn.functional.mse_loss(new_value, return_)
                 # 反向传播和优化
                 self.Critic.optim.zero_grad()
                 critic_loss.backward()

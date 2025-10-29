@@ -4,19 +4,13 @@
 # GRU隐藏状态（hidden states）的必要逻辑。
 # ==============================================================================
 
-import gym
-import torch
-import numpy as np
 import random
 # <<< GRU 修改 >>>: 导入包含GRU模型的PPO实现
-from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPOGRUAttn_jsbsim_SeparateHeads import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
-from torch.utils.tensorboard import SummaryWriter
+from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_ATTGRUMLP import *
+from Interference_code.PPO_model.PPO_evasion_fuza.ConfigAttn import *
 # <<< 更改 >>>: 确保您正在使用的环境与训练时一致
-from Interference_code.env.missile_evasion_environment.missile_evasion_environment import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
 import time
-import matplotlib.pyplot as plt
 
 LOAD_ABLE = True  # 是否使用save文件夹中的模型
 # <<< GRU 修改 >>>: 添加开关以明确表示正在使用RNN模型
@@ -53,7 +47,7 @@ set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型
 model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-# model_path = r"D:\code\规避导弹项目\Interference_code\save\save_evade_fuza\GRU_2024-05-20_15-30-00"  # 示例路径
+# model_path = r"D:\code\规避导弹项目\Interference_code\save\save_evade_fuza\PPOGRU_Attn_2025-10-29_20-00-51"  # 示例路径
 print(f"正在加载GRU_Attn模型: {model_path}")
 
 # <<< GRU 修改 >>>: 初始化Agent时，必须传入 use_rnn=True
