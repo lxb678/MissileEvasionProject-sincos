@@ -39,10 +39,16 @@ DISCRETE_ACTION_MAP = {
     # 'intra_interval': [0.02, 0.04, 0.1],
     # 'num_groups': [1, 2, 3],
     # 'inter_interval': [0.5, 1.0, 2.0]
-    'salvo_size': [1, 2, 3],  # 修改为发射1、2、3枚
+    # 'salvo_size': [1, 2, 3],  # 修改为发射1、2、3枚
+    # # 'intra_interval': [0.05, 0.1, 0.15],
+    # 'intra_interval': [0.02, 0.04, 0.08],
+    # 'num_groups': [1, 2, 3],
+    # 'inter_interval': [0.2, 0.5, 1.0]
+
+    'salvo_size': [2, 3, 4],  # 修改为发射2、3、4枚
     # 'intra_interval': [0.05, 0.1, 0.15],
-    'intra_interval': [0.02, 0.04, 0.08],
-    'num_groups': [1, 2, 3],
+    'intra_interval': [0.02, 0.04, 0.06],
+    'num_groups': [2, 3, 4],
     'inter_interval': [0.2, 0.5, 1.0]
 }
 # 连续动作的物理范围，用于将网络输出 (-1, 1) 缩放到实际范围
@@ -57,7 +63,7 @@ ACTION_RANGES = {
 RNN_HIDDEN_SIZE = 256  # GRU 层的隐藏单元数量
 SEQUENCE_LENGTH = 10  # 训练时从经验池中采样的连续轨迹片段的长度
 # ATTN_NUM_HEADS = 8     # 注意力机制的头数 (必须能被 MLP 输出维度整除)
-ATTN_NUM_HEADS = 2  # 2 #3 #4 #8 #4 #1 #2       # <<< 这是您的关键修改：设置注意力机制的头数
+ATTN_NUM_HEADS = 1  # 2 #3 #4 #8 #4 #1 #2       # <<< 这是您的关键修改：设置注意力机制的头数
 
 
 # ==============================================================================
@@ -266,12 +272,12 @@ class Actor_GRU(Module):
         self.input_dim = ACTOR_PARA.input_dim  # D, 状态特征的数量
         self.log_std_min = -20.0
         self.log_std_max = 2.0
-        self.rnn_hidden_size = RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = self.input_dim # RNN_HIDDEN_SIZE # self.input_dim
         self.weight_decay = weight_decay
         self.feature_dim_for_attn = 1  # 每个特征本身是1维标量
 
         # <<< MODIFIED 1/6 >>>: 定义一个新的嵌入维度
-        self.embedding_dim = 64  # 每个特征将被映射到这个维度
+        self.embedding_dim = 1 #1 #32  # 每个特征将被映射到这个维度
 
         # <<< MODIFIED 2/6 >>>: 检查多头注意力的约束
         # 多头注意力的一个要求是：嵌入维度必须能被头的数量整除
@@ -281,7 +287,7 @@ class Actor_GRU(Module):
         # --- 模块定义 ---
         # <<< ADDED BACK 3/6 >>>: 重新引入特征嵌入层
         # 将每个1维特征映射到 embedding_dim 维
-        self.feature_embed = Linear(1, self.embedding_dim)
+        # self.feature_embed = Linear(1, self.embedding_dim)
 
         # 1. 特征级自注意力层
         # 在 D 个特征的嵌入向量之间计算注意力，以捕捉特征间的相互关系
@@ -289,7 +295,7 @@ class Actor_GRU(Module):
                                             num_heads=ATTN_NUM_HEADS,
                                             dropout=0.0,  # 在策略网络中通常不使用 dropout
                                             batch_first=True)  # 输入输出格式为 (Batch, Seq, Feature)
-        # self.attention_layernorm = LayerNorm(self.embedding_dim) # 可选的层归一化
+        # self.attention_layernorm = LayerNorm(self.embedding_dim, elementwise_affine=False) # 可选的层归一化
 
         # <<< 修改 1/3 >>>: 移除池化相关的层
         # self.pooling_query = torch.nn.Parameter(torch.randn(1, self.feature_dim_for_attn))
@@ -314,19 +320,19 @@ class Actor_GRU(Module):
         # 4. 输出头 (Action Heads) (不变)
         self.mu_head = Linear(mlp_output_dim, CONTINUOUS_DIM)  # 连续动作的均值
         # 将对数标准差设为可学习的参数，而不是网络输出，可以增加稳定性
-        self.log_std_param = torch.nn.Parameter(torch.zeros(1, CONTINUOUS_DIM) * -0.5)
+        self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), -0.5))
         self.discrete_head = Linear(mlp_output_dim, TOTAL_DISCRETE_LOGITS)  # 离散动作的 logits
 
-        # --- [新增] 应用初始化 ---
-        self.apply(init_weights)  # 对所有子模块应用通用初始化
+        # # --- [新增] 应用初始化 ---
+        # self.apply(init_weights)  # 对所有子模块应用通用初始化
 
-        # --- [新增] 对输出层进行特殊初始化 ---
-        # 这样做是为了在训练开始时有更稳定、更具探索性的策略
-        init_range = 3e-3
-        self.mu_head.weight.data.uniform_(-init_range, init_range)
-        self.mu_head.bias.data.fill_(0)
-        self.discrete_head.weight.data.uniform_(-init_range, init_range)
-        self.discrete_head.bias.data.fill_(0)
+        # # --- [新增] 对输出层进行特殊初始化 ---
+        # # 这样做是为了在训练开始时有更稳定、更具探索性的策略
+        # init_range = 3e-3
+        # self.mu_head.weight.data.uniform_(-init_range, init_range)
+        # self.mu_head.bias.data.fill_(0)
+        # self.discrete_head.weight.data.uniform_(-init_range, init_range)
+        # self.discrete_head.bias.data.fill_(0)
         # --- 初始化结束 ---
 
         # --- 精细化优化器设置 (不变) ---
@@ -373,7 +379,11 @@ class Actor_GRU(Module):
 
         # <<< ADDED BACK 6/6, part 1 >>>: 应用嵌入层
         # 2. 特征嵌入: (B*S, D, 1) -> (B*S, D, embedding_dim)
-        token_embeds = self.feature_embed(feat_tokens)
+        # token_embeds = self.feature_embed(feat_tokens)
+        token_embeds = feat_tokens
+        #层归一化
+        # token_embeds = self.attention_layernorm(token_embeds)
+
 
         # 3. 自注意力计算
         # query, key, value 都是 token_embeds，进行自注意力计算
@@ -418,15 +428,48 @@ class Actor_GRU(Module):
                 mask = mask.unsqueeze(-1)
             trigger_logits_masked[mask] = torch.finfo(torch.float32).min
 
+        # ===============================================================
+        # 5️⃣ 触发器层次控制：当“不投放”时，屏蔽其他离散动作 logits
+        # ===============================================================
+        # 先得到触发器分布
+        trigger_probs = torch.sigmoid(trigger_logits_masked)  # shape: [B,1]
+
+        # 如果 trigger_probs < 0.5，说明模型倾向于“不投放”
+        # 我们用这个条件生成一个 mask（True=不投放）
+        no_trigger_mask = (trigger_probs < 0.5).squeeze(-1)  # shape: [B]
+
+        # 创建 logits 的副本，避免原地操作污染梯度
+        salvo_size_logits_masked = salvo_size_logits.clone()
+        intra_interval_logits_masked = intra_interval_logits.clone()
+        num_groups_logits_masked = num_groups_logits.clone()
+        inter_interval_logits_masked = inter_interval_logits.clone()
+        # ===============================================================
+        # 当 trigger 不投放时，将其他离散动作 logits 强制为 index=0 (one-hot 形式)
+        # ===============================================================
+        if torch.any(no_trigger_mask):
+            INF = 1e6
+            NEG_INF = -1e6
+            for logits_tensor in [
+                salvo_size_logits_masked,
+                intra_interval_logits_masked,
+                num_groups_logits_masked,
+                inter_interval_logits_masked,
+            ]:
+                logits_sub = logits_tensor[no_trigger_mask]
+                if logits_sub.numel() > 0:
+                    logits_sub[:] = NEG_INF  # 全部置为极小值
+                    logits_sub[:, 0] = INF  # 仅 index=0 置为极大值
+                    logits_tensor[no_trigger_mask] = logits_sub
+
         log_std = torch.clamp(self.log_std_param, self.log_std_min, self.log_std_max)
         std = torch.exp(log_std).expand_as(mu)
         continuous_base_dist = Normal(mu, std)
 
         trigger_dist = Bernoulli(logits=trigger_logits_masked.squeeze(-1))
-        salvo_size_dist = Categorical(logits=salvo_size_logits)
-        intra_interval_dist = Categorical(logits=intra_interval_logits)
-        num_groups_dist = Categorical(logits=num_groups_logits)
-        inter_interval_dist = Categorical(logits=inter_interval_logits)
+        salvo_size_dist = Categorical(logits=salvo_size_logits_masked)
+        intra_interval_dist = Categorical(logits=intra_interval_logits_masked)
+        num_groups_dist = Categorical(logits=num_groups_logits_masked)
+        inter_interval_dist = Categorical(logits=inter_interval_logits_masked)
 
         distributions = {
             'continuous': continuous_base_dist,
@@ -451,7 +494,7 @@ class Critic_GRU(Module):
         # --- 基础参数定义 ---
         self.input_dim = CRITIC_PARA.input_dim  # D
         self.output_dim = CRITIC_PARA.output_dim
-        self.rnn_hidden_size = RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE #self.input_dim
         self.weight_decay = weight_decay
 
         # --- 模块定义 ---
@@ -471,15 +514,15 @@ class Critic_GRU(Module):
         base_output_dim = CRITIC_PARA.model_layer_dim[-1]
         self.fc_out = Linear(base_output_dim, self.output_dim)
 
-        # --- [新增] 应用初始化 ---
-        self.apply(init_weights)  # 对所有子模块应用通用初始化
+        # # --- [新增] 应用初始化 ---
+        # self.apply(init_weights)  # 对所有子模块应用通用初始化
 
-        # --- [新增] 对输出层进行特殊初始化 ---
-        # 这样做是为了在训练开始时有更稳定的价值估计
-        init_range = 3e-3
-        self.fc_out.weight.data.uniform_(-init_range, init_range)
-        self.fc_out.bias.data.fill_(0)
-        # --- 初始化结束 ---
+        # # --- [新增] 对输出层进行特殊初始化 ---
+        # # 这样做是为了在训练开始时有更稳定的价值估计
+        # init_range = 3e-3
+        # self.fc_out.weight.data.uniform_(-init_range, init_range)
+        # self.fc_out.bias.data.fill_(0)
+        # # --- 初始化结束 ---
 
         # 优化器设置
         attention_weight_decay = 1e-3

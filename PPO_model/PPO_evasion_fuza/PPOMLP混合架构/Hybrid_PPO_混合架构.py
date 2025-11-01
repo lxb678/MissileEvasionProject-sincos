@@ -58,7 +58,7 @@ DISCRETE_ACTION_MAP = {
     # 'intra_interval': [0.05, 0.1, 0.15],
     'intra_interval': [0.02, 0.04, 0.06],
     'num_groups': [2, 3, 4],
-    'inter_interval': [0.2, 0.5, 1.0]
+    'inter_interval': [0.2, 0.4, 0.6]
 }
 
 # --- 动作范围定义 (仅用于连续动作缩放) ---
@@ -94,45 +94,58 @@ class Actor(Module):
         self.log_std_min = -20.0
         self.log_std_max = 2.0
 
-        # 定义共享骨干网络
-        # 负责从原始状态中提取高级特征
-        shared_layers_dims = [self.input_dim] + ACTOR_PARA.model_layer_dim
-        self.shared_network = Sequential()
-        for i in range(len(shared_layers_dims) - 1):
-            # 添加线性层
-            self.shared_network.add_module(f'fc_{i}', Linear(shared_layers_dims[i], shared_layers_dims[i + 1]))
-            # --- 在此处添加 LayerNorm ---
-            # LayerNorm 的输入维度是前一个线性层的输出维度
-            # self.shared_network.add_module(f'LayerNorm_{i}', LayerNorm(shared_layers_dims[i + 1]))
-            # 添加激活函数
-            self.shared_network.add_module(f'LeakyReLU_{i}', LeakyReLU())
+        # --- 混合架构定义 ---
 
-        # 骨干网络的输出维度，将作为各个头部的输入
-        shared_output_dim = ACTOR_PARA.model_layer_dim[-1]
-        # --- 独立头部网络 ---
-        # 1. 连续动作头部：只输出均值 (mu)
-        self.continuous_head = Linear(shared_output_dim, CONTINUOUS_DIM)
-        # 独立的、可训练的 log_std 参数（与状态无关）
-        # self.log_std_param = nn.Parameter(torch.zeros(1, CONTINUOUS_DIM) * -0.5) #这会让初始 σ≈0.6，探索强度适中（否则为 σ=1）。
+        # 1. 为每个部分定义层的维度
+        #    !! 重要：请根据你的 Config.py 来调整这里的切片 !!
+        #    假设 model_layer_dim = [256, 256，256]，我们在第2层后拆分
+        split_point = 2  # 在第2层后拆分
+        base_dims = ACTOR_PARA.model_layer_dim[:split_point]  # 例如: [256，256]
+        # tower_dims = ACTOR_PARA.model_layer_dim[split_point:]  # 例如: [256]
+        continuous_tower_dims = ACTOR_PARA.model_layer_dim[split_point:] #[256, 128]  # 连续动作塔楼的维度
+        #【修正后的代码】让离散塔楼的每一层维度都是连续塔楼对应层的一半
+        # 使用列表推导式来实现
+        discrete_tower_dims = [dim // 2 for dim in continuous_tower_dims]  # 例如: [128, 64]
+
+        # 2. 构建共享基座网络 (Shared Base)
+        self.shared_base = Sequential()
+        base_input_dim = self.input_dim
+        for i, dim in enumerate(base_dims):
+            self.shared_base.add_module(f'base_fc_{i}', Linear(base_input_dim, dim))
+            self.shared_base.add_module(f'base_leakyrelu_{i}', LeakyReLU())
+            base_input_dim = dim
+
+        # 共享基座的输出维度
+        base_output_dim = base_dims[-1]
+
+        # 3. 构建连续动作塔楼 (Continuous Tower)
+        self.continuous_tower = Sequential()
+        tower_input_dim = base_output_dim
+        for i, dim in enumerate(continuous_tower_dims):
+            self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(tower_input_dim, dim))
+            self.continuous_tower.add_module(f'cont_tower_leakyrelu_{i}', LeakyReLU())
+            tower_input_dim = dim
+
+        # 4. 构建离散动作塔楼 (Discrete Tower)
+        self.discrete_tower = Sequential()
+        tower_input_dim = base_output_dim  # 输入同样来自共享基座
+        for i, dim in enumerate(discrete_tower_dims):
+            self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(tower_input_dim, dim))
+            self.discrete_tower.add_module(f'disc_tower_leakyrelu_{i}', LeakyReLU())
+            tower_input_dim = dim
+
+        # 5. 定义最终的输出头 (Heads)
+        #    头部的输入维度现在是它们各自塔楼的输出维度
+        continuous_tower_output_dim = continuous_tower_dims[-1] if continuous_tower_dims else base_output_dim
+        self.continuous_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
+        discrete_tower_output_dim = discrete_tower_dims[-1] if discrete_tower_dims else base_output_dim
+        self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
+
+        # 6. 定义与状态无关的连续动作 log_std
+        # self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), -0.5))
         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
 
-        # 2. 离散动作头部：输出所有离散决策所需的 logits
-        self.discrete_head = Linear(shared_output_dim, TOTAL_DISCRETE_LOGITS)
-
-        ## --- [新增] 应用参数初始化 ---
-        ## 首先应用通用的初始化策略
-        # self.shared_network.apply(init_weights)
-
-        # # 然后对输出层进行特殊的、小范围的初始化，以保证初始策略的稳定性
-        # init_range = 3e-3
-        # self.continuous_head.weight.data.uniform_(-init_range, init_range)
-        # self.continuous_head.bias.data.fill_(0)
-        # self.discrete_head.weight.data.uniform_(-init_range, init_range)
-        # self.discrete_head.bias.data.fill_(0)
-        # # --- 初始化结束 ---
-
-        # self.init_model()
-        # --- 优化器和设备设置 ---
+        # --- 优化器和其他设置 (保持不变) ---
         self.optim = torch.optim.Adam(self.parameters(), ACTOR_PARA.lr)
         self.actor_scheduler = lr_scheduler.LinearLR(
             self.optim,
@@ -141,7 +154,6 @@ class Actor(Module):
             total_iters=AGENTPARA.MAX_EXE_NUM
         )
         self.to(ACTOR_PARA.device)
-
     def init_model(self):
         """初始化神经网络结构"""
         self.network = Sequential()
@@ -159,12 +171,16 @@ class Actor(Module):
         if obs_tensor.dim() == 1:
             obs_tensor = obs_tensor.unsqueeze(0)
 
-        # 1. 通过共享骨干网络提取通用特征
-        shared_features = self.shared_network(obs_tensor)
+        # 1. 数据首先流经共享基座
+        base_features = self.shared_base(obs_tensor)
 
-        # 2. 将共享特征分别送入不同的头部网络
-        mu = self.continuous_head(shared_features)
-        all_disc_logits = self.discrete_head(shared_features)
+        # 2. 共享特征被分别送入两个专用塔楼
+        continuous_features = self.continuous_tower(base_features)
+        discrete_features = self.discrete_tower(base_features)
+
+        # 3. 每个头部接收来自其专属塔楼的特征
+        mu = self.continuous_head(continuous_features)
+        all_disc_logits = self.discrete_head(discrete_features)
 
         # 3. 按 DISCRETE_DIMS 结构将所有logits切分为5个部分
         split_sizes = list(DISCRETE_DIMS.values())
@@ -355,7 +371,7 @@ class PPO_continuous(object):
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
         self.training_start_time = time.strftime("PPO_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../save/save_evade_fuza"
+        self.base_save_dir = "../../../save/save_evade_fuza"
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
         if load_able:
             if model_dir_path:
@@ -363,7 +379,7 @@ class PPO_continuous(object):
                 self.load_models_from_directory(model_dir_path)
             else:
                 print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
-                self.load_models_from_directory("../../test/test_evade")
+                self.load_models_from_directory("../../../test/test_evade")
 
     def load_models_from_directory(self, directory_path: str):
         """从指定的文件夹路径加载模型，能自动识别多种命名格式。"""

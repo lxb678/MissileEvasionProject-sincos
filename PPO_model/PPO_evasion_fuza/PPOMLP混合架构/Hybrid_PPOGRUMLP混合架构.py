@@ -47,7 +47,7 @@ DISCRETE_ACTION_MAP = {
     # 'intra_interval': [0.05, 0.1, 0.15],
     'intra_interval': [0.02, 0.04, 0.06],
     'num_groups': [2, 3, 4],
-    'inter_interval': [0.2, 0.5, 1.0]
+    'inter_interval': [0.2, 0.4, 0.6]
 }
 # 连续动作的物理范围，用于将网络输出 (-1, 1) 缩放到实际范围
 ACTION_RANGES = {
@@ -59,8 +59,8 @@ ACTION_RANGES = {
 
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
-RNN_HIDDEN_SIZE = 256  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH = 10  # 训练时从经验池中采样的连续轨迹片段的长度
+RNN_HIDDEN_SIZE = 128  # GRU 层的隐藏单元数量
+SEQUENCE_LENGTH = 5  # 训练时从经验池中采样的连续轨迹片段的长度
 
 
 # ==============================================================================
@@ -263,58 +263,61 @@ class Actor_GRU(Module):
         [💥 修改] 连续动作部分：mu 头状态依赖，log_std 为全局可学习参数。
         """
     """
-        Actor 网络 (策略网络) - [新结构: GRU -> MLP]
-        结构为: GRU 序列处理 -> MLP 特征提取 -> 独立动作头。
-        """
+    Actor 网络 (策略网络) - [最终混合架构: GRU -> Hybrid MLP]
+    结构为: GRU 序列处理 -> 共享MLP基座 -> 专用MLP塔楼 -> 独立动作头。
+    """
     def __init__(self):
         super(Actor_GRU, self).__init__()
         self.input_dim = ACTOR_PARA.input_dim
         self.log_std_min = -20.0
         self.log_std_max = 2.0
-        self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE
+        self.rnn_hidden_size =  self.input_dim #RNN_HIDDEN_SIZE
 
         # 1. GRU 层作为第一层，直接处理原始状态输入
         self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
 
-        # # 💥 在 GRU 和 MLP 之间新增一个 LayerNorm
-        # self.mlp_input_layernorm = LayerNorm(self.rnn_hidden_size)
+        # --- 移植过来的混合架构定义 ---
+        # 这个混合架构现在处理的是 GRU 的输出，而不是原始输入
+        # 2. 定义 MLP 各部分的维度
+        #    假设 model_layer_dim = [256, 256，256], split_point = 1
+        split_point = 2  # 在 MLP 的第2层后拆分
+        base_dims = ACTOR_PARA.model_layer_dim[:split_point]  # 例如: [256,256]
+        continuous_tower_dims = ACTOR_PARA.model_layer_dim[split_point:]  # 例如: [256]
+        # 让离散塔楼的维度是连续塔楼的一半
+        discrete_tower_dims = [dim // 2 for dim in continuous_tower_dims]  # 例如: [128]
 
-        # 2. 共享的 MLP 骨干网络，接收 GRU 的输出
+        # 3. 构建共享MLP基座 (Shared Base MLP)
+        self.shared_base_mlp = Sequential()
         # MLP的输入维度是 GRU 的隐藏层大小
-        # 这个 MLP 负责对每个时间步的状态进行独立的特征提取。
-        shared_layers_dims = [self.rnn_hidden_size] + ACTOR_PARA.model_layer_dim
-        self.shared_network = Sequential()
-        for i in range(len(shared_layers_dims) - 1):
-            self.shared_network.add_module(f'fc_{i}', Linear(shared_layers_dims[i], shared_layers_dims[i + 1]))
-            # self.shared_network.add_module(f'LayerNorm_{i}', LayerNorm(shared_layers_dims[i + 1]))
-            self.shared_network.add_module(f'LeakyReLU_{i}', LeakyReLU())
+        base_input_dim = self.rnn_hidden_size
+        for i, dim in enumerate(base_dims):
+            self.shared_base_mlp.add_module(f'base_fc_{i}', Linear(base_input_dim, dim))
+            self.shared_base_mlp.add_module(f'base_leakyrelu_{i}', LeakyReLU())
+            base_input_dim = dim
+        base_output_dim = base_dims[-1] if base_dims else self.rnn_hidden_size
 
-        # shared_output_dim = ACTOR_PARA.model_layer_dim[-1]
+        # 4. 构建连续动作塔楼 (Continuous Tower)
+        self.continuous_tower = Sequential()
+        tower_input_dim = base_output_dim
+        for i, dim in enumerate(continuous_tower_dims):
+            self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(tower_input_dim, dim))
+            self.continuous_tower.add_module(f'cont_tower_leakyrelu_{i}', LeakyReLU())
+            tower_input_dim = dim
+        continuous_tower_output_dim = continuous_tower_dims[-1] if continuous_tower_dims else base_output_dim
 
-        # MLP 的输出维度
-        mlp_output_dim = ACTOR_PARA.model_layer_dim[-1]
+        # 5. 构建离散动作塔楼 (Discrete Tower)
+        self.discrete_tower = Sequential()
+        tower_input_dim = base_output_dim
+        for i, dim in enumerate(discrete_tower_dims):
+            self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(tower_input_dim, dim))
+            self.discrete_tower.add_module(f'disc_tower_leakyrelu_{i}', LeakyReLU())
+            tower_input_dim = dim
+        discrete_tower_output_dim = discrete_tower_dims[-1] if discrete_tower_dims else base_output_dim
 
-        # 3. 独立头部网络 ，接收 MLP 的输出
-        # 头部网络接收 GRU 的输出，并生成最终的动作分布参数。
-        # self.continuous_head = Linear(self.rnn_hidden_size, CONTINUOUS_DIM * 2)
-
-        # mu 头部，接收 GRU 的输出
-        self.mu_head = Linear(mlp_output_dim, CONTINUOUS_DIM)
-        # log_std 作为独立的、与状态无关的可学习参数
+        # 6. 定义最终的输出头 (Heads)
+        self.mu_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
+        self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
-        self.discrete_head = Linear(mlp_output_dim, TOTAL_DISCRETE_LOGITS)
-
-        # # --- [新增] 应用初始化 ---
-        # self.apply(init_weights)  # 对所有子模块应用通用初始化
-        #
-        # # --- [新增] 对输出层进行特殊初始化 ---
-        # # 这样做是为了在训练开始时有更稳定、更具探索性的策略
-        # init_range = 3e-3
-        # self.mu_head.weight.data.uniform_(-init_range, init_range)
-        # self.mu_head.bias.data.fill_(0)
-        # self.discrete_head.weight.data.uniform_(-init_range, init_range)
-        # self.discrete_head.bias.data.fill_(0)
-        # # --- 初始化结束 ---
 
         # 优化器等设置
         self.optim = torch.optim.Adam(self.parameters(), ACTOR_PARA.lr)
@@ -342,42 +345,25 @@ class Actor_GRU(Module):
             # 如果是单步 (batch_size, features)，增加一个 seq_len=1 的维度
             obs_tensor = obs_tensor.unsqueeze(1)  # -> (batch_size, 1, features)
 
-        # # 1. 通过共享 MLP 提取特征
-        # # 注意：MLP 只能处理 (N, *, H_in) 形状，所以如果输入是序列，它会独立地处理每个时间步
-        # shared_features = self.shared_network(obs_tensor)
-        #
-        # # 2. 将特征序列和隐藏状态送入 GRU
-        # # gru_out 形状: (batch, seq_len, rnn_hidden_size)
-        # # new_hidden 形状: (1, batch, rnn_hidden_size)
-        # gru_out, new_hidden = self.gru(shared_features, hidden_state)
-        #
-        # # 如果原始输入是单步，我们也希望输出是单步的
-        # if not is_sequence:
-        #     gru_out = gru_out.squeeze(1)  # -> (batch_size, rnn_hidden_size)
-        #
-        # # 3. 将 GRU 的输出送入各个头
-        # # cont_params = self.continuous_head(gru_out)
-        # mu = self.mu_head(gru_out)
-        # all_disc_logits = self.discrete_head(gru_out)
-
-        # 1. [新流程] 原始状态序列首先通过 GRU
+        # 1. 原始状态序列首先通过 GRU
         gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
 
-        # # 2. 💥 [新流程] 将 GRU 的输出通过新增的 LayerNorm
-        # normed_gru_out = self.mlp_input_layernorm(gru_out)
-        # # 3. [新流程] GRU 的输出（记忆向量）再通过 MLP 进行特征提取
-        # shared_features = self.shared_network(normed_gru_out)  # MLP 的输入是归一化后的 gru_out
+        # --- 新的混合 MLP 数据流 ---
+        # 2. GRU 的输出流经共享 MLP 基座
+        base_features = self.shared_base_mlp(gru_out)
 
-        # 2. [新流程] GRU 的输出（记忆向量）再通过 MLP 进行特征提取
-        shared_features = self.shared_network(gru_out)
+        # 3. 共享特征被分别送入两个专用塔楼
+        continuous_features = self.continuous_tower(base_features)
+        discrete_features = self.discrete_tower(base_features)
 
-        # 如果原始输入是单步，我们也希望最终用于头部的特征是单步的
+        # 4. 如果是单步输入，压缩特征维度以匹配头部
         if not is_sequence:
-            shared_features = shared_features.squeeze(1)
+            continuous_features = continuous_features.squeeze(1)
+            discrete_features = discrete_features.squeeze(1)
 
-        # 3. [新流程] 将 MLP 的输出送入各个头
-        mu = self.mu_head(shared_features)
-        all_disc_logits = self.discrete_head(shared_features)
+        # 5. 每个头部接收来自其专属塔楼的特征
+        mu = self.mu_head(continuous_features)
+        all_disc_logits = self.discrete_head(discrete_features)
 
         # 后续的分布创建逻辑与原版 Actor 完全相同
         split_sizes = list(DISCRETE_DIMS.values())
@@ -597,7 +583,7 @@ class PPO_continuous(object):
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
         self.training_start_time = time.strftime("PPOGRU_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../save/save_evade_fuza"
+        self.base_save_dir = "../../../save/save_evade_fuza"
         # 为本次运行创建一个唯一的存档文件夹
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
         # 如果需要加载预训练模型
@@ -607,7 +593,7 @@ class PPO_continuous(object):
                 self.load_models_from_directory(model_dir_path)
             else:
                 print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
-                self.load_models_from_directory("../../test/test_evade")
+                self.load_models_from_directory("../../../test/test_evade")
 
     def load_models_from_directory(self, directory_path: str):
         # This function is correct, no changes needed.

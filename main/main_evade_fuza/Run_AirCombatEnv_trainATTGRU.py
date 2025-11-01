@@ -2,7 +2,7 @@
 
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_ATTGRUMLP import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_ATTGRUMLP混合架构 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.ConfigAttn import *
 from torch.utils.tensorboard import SummaryWriter
 # from env.AirCombatEnv import *

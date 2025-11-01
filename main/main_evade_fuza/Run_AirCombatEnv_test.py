@@ -1,16 +1,11 @@
-import gym
-import torch
 import numpy as np
 import random
-from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim_SeparateHeads_std_nostate import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
-from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
 # from env.AirCombatEnv6_maneuver_flare import *
-from Interference_code.env.missile_evasion_environment.missile_evasion_environment import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
 import time
-import matplotlib.pyplot as plt
 
 LOAD_ABLE = True  #是否使用save文件夹中的模型
 
@@ -68,7 +63,7 @@ set_seed(env)
 # 假设您的模型保存在 "../../test/test_evade"
 # model_path = "../../test/test_evade" # 或者您训练模型时使用的其他路径
 model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-# model_path = r"D:\code\规避导弹项目\Interference_code\save\save_evade_fuza\2025-10-15_16-52-20"
+# model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPO_2025-11-01_11-10-46"
 agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_path)
 
 success_num = 0
@@ -96,7 +91,7 @@ for i_episode in range(episodes):
             # 2. <<< 核心更改 >>> 将扁平数组打包成字典
             action_dict_eval = pack_action_into_dict(action_eval_flat)
 
-            # print(f"第 {i_episode + 1} 回合, 第 {step + 1} 步, 动作: {action_dict_eval}")
+            print(f"第 {i_episode + 1} 回合, 第 {step + 1} 步, 动作: {action_dict_eval}")
 
             # 3. 将打包好的字典传递给环境 (这部分改变)
             # <<< 更改 >>> Gymnasium的step返回一个五元组

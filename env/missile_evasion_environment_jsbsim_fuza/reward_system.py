@@ -65,6 +65,12 @@ class RewardCalculator:
         # 为此函数添加一个历史状态变量
         self.prev_closing_velocity = None
 
+        # <<< 新增：为干扰弹投放奖励定义参数 >>>
+        self.FLARE_EFFECTIVE_DISTANCE_M = 3000.0  # 干扰弹有效投放距离阈值 (3km)
+        self.REWARD_FLARE_IN_WINDOW = 0.5  # 在有效窗口内投放的奖励值
+        self.PENALTY_FLARE_OUT_WINDOW = -1.0 #-0.2  # 在窗口外投放的惩罚值
+        # <<< 新增结束 >>>
+
     def reset(self):
             """为新回合重置状态变量。"""
             self.prev_missile_v_mag = None
@@ -137,6 +143,10 @@ class RewardCalculator:
         # #接近速度奖励
         reward_closing_velocity = 1.0 * self._reward_for_closing_velocity_change(aircraft, missile)
 
+        # <<< 新增：调用干扰弹时机奖励函数 >>>
+        # 将新奖励的权重也在这里设置，例如 1.0
+        reward_flare_timing = 1.0 * self._compute_flare_timing_reward(flare_trigger_action, aircraft, missile)
+
         # 2. 将所有组件按权重加权求和 (权重直接在此处定义，与您的代码一致)
         final_dense_reward = (
                 reward_posture +
@@ -153,25 +163,51 @@ class RewardCalculator:
                 + reward_closing_velocity
                 # + reward_ata_rate
                 + reward_taa_rate
+                + reward_flare_timing
         )
         # print(
         #     f"reward_posture: {reward_posture:.2f}",
-        #       f"reward_altitude: {reward_altitude:.2f}",
-        #       # f"reward_resource: {reward_resource:.2f}",
+        #       # f"reward_altitude: {reward_altitude:.2f}",
+        #       f"reward_resource: {reward_resource:.2f}",
         #       # f"reward_roll_penalty: {reward_roll_penalty:.2f}",
-        #       f"reward_speed_penalty: {reward_speed_penalty:.2f}",
+        #       # f"reward_speed_penalty: {reward_speed_penalty:.2f}",
         #       #   f"reward_survivaltime: {reward_survivaltime:.2f}",
         #       #   f"reward_los: {reward_los:.2f}",
         #       #   f"reward_dive: {reward_dive:.2f}",
         #       #   f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
         #       #   f"reward_increase_tau: {reward_increase_tau:.2f}",
         #       #   f"reward_tau_accel: {reward_tau_accel:.2f}",
-        #         f"reward_closing_velocity: {reward_closing_velocity:.2f}",
+        #       #   f"reward_closing_velocity: {reward_closing_velocity:.2f}",
         #         # f"reward_ata_rate: {reward_ata_rate:.2f}",
         #         f"reward_taa_rate: {reward_taa_rate:.2f}",
+        #     f"reward_flare_timing: {reward_flare_timing:.2f}",
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
+
+        # <<< 新增：干扰弹投放时机奖励的计算函数 >>>
+
+    def _compute_flare_timing_reward(self, flare_trigger_action: float, aircraft: Aircraft, missile: Missile) -> float:
+        """
+        根据飞机与导弹的距离，计算干扰弹投放时机的奖励或惩罚。
+        """
+        # 1. 检查是否执行了投放动作
+        #    我们假设 action > 0.5 意味着投放
+        if flare_trigger_action < 0.5:
+            return 0.0  # 如果没有投放，则没有时机奖励/惩罚
+
+        # 2. 计算当前飞机与导弹的距离
+        distance = np.linalg.norm(aircraft.pos - missile.pos)
+
+        # 3. 根据距离判断并返回相应的奖励或惩罚
+        if distance < self.FLARE_EFFECTIVE_DISTANCE_M:
+            # 距离在有效窗口内，给予正奖励
+            return self.REWARD_FLARE_IN_WINDOW
+        else:
+            # 距离在有效窗口外，给予负奖励 (惩罚)
+            return self.PENALTY_FLARE_OUT_WINDOW
+
+    # <<< 新增结束 >>>
 
     # --- (中文) 下面是所有从您主环境文件中迁移过来的、正在使用的私有奖励计算方法 ---
 
@@ -280,7 +316,7 @@ class RewardCalculator:
 
         # 权重可能需要重新调整，因为 TAA 的变化率可能与 ATA 的变化率尺度不同
         SCALING_FACTOR = 5.0
-        return taa_rate_rad_s * SCALING_FACTOR
+        return np.tanh(taa_rate_rad_s * SCALING_FACTOR)
 
     def _reward_for_ata_rate(self, aircraft: Aircraft, missile: Missile, dt: float):
         """
