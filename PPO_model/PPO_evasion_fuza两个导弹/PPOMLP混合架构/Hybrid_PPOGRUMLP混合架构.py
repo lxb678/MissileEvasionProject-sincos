@@ -5,9 +5,9 @@ from torch.nn import *
 from torch.distributions import Bernoulli, Categorical
 from torch.distributions import Normal
 # 导入配置文件，其中包含各种超参数
-from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigGRU import *
 # 导入支持 GRU 的经验回放池
-from Interference_code.PPO_model.PPO_evasion_fuza.BufferGRU import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.BufferGRU import *
 from torch.optim import lr_scheduler
 import numpy as np
 import os
@@ -60,7 +60,7 @@ ACTION_RANGES = {
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
 RNN_HIDDEN_SIZE = 128 #9 #9 #32 #9  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH = 10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
+SEQUENCE_LENGTH = 5 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
 
 
 # ==============================================================================

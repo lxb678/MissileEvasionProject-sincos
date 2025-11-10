@@ -1,10 +1,10 @@
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构 import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_混合架构 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.Config import *
 from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim import *
 import time
 
 LOAD_ABLE = False  #是否使用save文件夹中的模型
@@ -42,7 +42,7 @@ def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
 # writer = SummaryWriter(log_dir='../../log/log_evade/Trans_seed{}_time_{}_loadable_{}'.format(AGENTPARA.RANDOM_SEED,time.strftime("%m_%d_%H_%M_%S", time.localtime()),LOAD_ABLE))
 
 # ------------------- Tensorboard 设置 -------------------
-writer_log_dir = f'../../log/log_evade_fuza/PPO_{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}_load{LOAD_ABLE}'
+writer_log_dir = f'../../log/log_evade_fuza两个导弹/PPO_{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}_load{LOAD_ABLE}'
 writer = SummaryWriter(log_dir=writer_log_dir)
 print(f"Tensorboard 日志将保存在: {writer_log_dir}")
 

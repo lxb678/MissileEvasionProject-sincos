@@ -4,13 +4,19 @@
 # GRU隐藏状态（hidden states）的必要逻辑。
 # ==============================================================================
 
+import gym
+import torch
+import numpy as np
 import random
 # <<< GRU 修改 >>>: 导入包含GRU模型的PPO实现
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_ATTGRUMLP混合架构 import *
-from Interference_code.PPO_model.PPO_evasion_fuza.ConfigAttn import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPOGRUMLP混合架构 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigGRU import *
+from torch.utils.tensorboard import SummaryWriter
 # <<< 更改 >>>: 确保您正在使用的环境与训练时一致
+from Interference_code.env.missile_evasion_environment.missile_evasion_environment import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
 import time
+import matplotlib.pyplot as plt
 
 LOAD_ABLE = True  # 是否使用save文件夹中的模型
 # <<< GRU 修改 >>>: 添加开关以明确表示正在使用RNN模型
@@ -47,8 +53,8 @@ set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型
 # model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPO_ATT_GRU_2025-11-04_11-48-29"  # 示例路径
-print(f"正在加载GRU_Attn模型: {model_path}")
+model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPOGRU_2025-11-10_09-40-22"  # 示例路径
+print(f"正在加载GRU模型: {model_path}")
 
 # <<< GRU 修改 >>>: 初始化Agent时，必须传入 use_rnn=True
 agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_path, use_rnn=USE_RNN_MODEL)
@@ -57,7 +63,7 @@ success_num = 0
 
 # 训练完之后，需要验证模型
 agent.prep_eval_rl()
-print("开始验证GRU_Attn模型")
+print("开始验证GRU模型")
 episode_times = []
 
 episodes = 100  # 总测试回合数
@@ -82,7 +88,7 @@ for i_episode in range(episodes):
                 new_actor_hidden, new_critic_hidden = agent.choose_action(observation_eval,
                                                                           actor_hidden,
                                                                           critic_hidden,
-                                                                          deterministic=True)
+                                                                          deterministic=False)
 
             # 2. 将扁平数组打包成字典 (这部分不变)
             action_dict_eval = pack_action_into_dict(action_eval_flat)
@@ -129,7 +135,7 @@ for i_episode in range(episodes):
         print("-" * 50)
 
 # 最终测试结束
-print("\n" + "=" * 20 + " GRU_Attn模型测试结束 " + "=" * 20)
+print("\n" + "=" * 20 + " GRU模型测试结束 " + "=" * 20)
 print(f"总测试回合数: {episodes}")
 print(f"总成功次数: {success_num}")
 print(f"最终成功率: {success_num / episodes * 100:.2f}%")

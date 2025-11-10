@@ -24,7 +24,7 @@ CONTINUOUS_ACTION_KEYS = ['throttle', 'elevator', 'aileron', 'rudder']
 DISCRETE_DIMS = {
     'flare_trigger': 1,  # 干扰弹触发，伯努利分布 (是/否)，所以是1个 logit
     'salvo_size': 3,  # 齐射数量，3个选项
-    # 'intra_interval': 3,  # 组内间隔，3个选项
+    'intra_interval': 3,  # 组内间隔，3个选项
     'num_groups': 3,  # 组数，3个选项
     'inter_interval': 3,  # 组间间隔，3个选项
 }
@@ -45,7 +45,7 @@ DISCRETE_ACTION_MAP = {
     # 'inter_interval': [0.2, 0.5, 1.0]
     'salvo_size': [2, 3, 4],  # 修改为发射2、3、4枚
     # 'intra_interval': [0.05, 0.1, 0.15],
-    # 'intra_interval': [0.02, 0.04, 0.06],
+    'intra_interval': [0.02, 0.04, 0.06],
     'num_groups': [2, 3, 4],
     'inter_interval': [0.2, 0.4, 0.6]
 }
@@ -59,8 +59,8 @@ ACTION_RANGES = {
 
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
-RNN_HIDDEN_SIZE = 128 #9 #9 #32 #9  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH = 10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
+RNN_HIDDEN_SIZE = 64  # GRU 层的隐藏单元数量
+SEQUENCE_LENGTH = 5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
 
 
 # ==============================================================================
@@ -250,481 +250,170 @@ def init_weights(m, gain=1.0):
                 torch.nn.init.orthogonal_(param.data, gain=gain)
             elif 'bias' in name:
                 param.data.fill_(0)
-# # ==============================================================================
-# # <<< GRU/RNN 修改 >>>: 定义新的基于 GRU 的 Actor 和 Critic
-# #                       [💥 新结构: GRU -> MLP -> Heads]
-# # ==============================================================================
-#
-# class Actor_GRU(Module):
-#     """
-#         Actor 网络 (策略网络) - 基于 GRU 的版本。
-#         结构为: MLP 特征提取 -> GRU 序列处理 -> 独立动作头。
-#         这种结构能够捕捉状态序列中的时间依赖关系。
-#         [💥 修改] 连续动作部分：mu 头状态依赖，log_std 为全局可学习参数。
-#         """
-#     """
-#     Actor 网络 (策略网络) - [最终混合架构: GRU -> Hybrid MLP]
-#     结构为: GRU 序列处理 -> 共享MLP基座 -> 专用MLP塔楼 -> 独立动作头。
-#     """
-#     def __init__(self):
-#         super(Actor_GRU, self).__init__()
-#         self.input_dim = ACTOR_PARA.input_dim
-#         self.log_std_min = -20.0
-#         self.log_std_max = 2.0
-#         self.rnn_hidden_size =  RNN_HIDDEN_SIZE #RNN_HIDDEN_SIZE  self.input_dim
-#
-#         # 1. GRU 层作为第一层，直接处理原始状态输入
-#         self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
-#
-#         # --- 移植过来的混合架构定义 ---
-#         # 这个混合架构现在处理的是 GRU 的输出，而不是原始输入
-#         # 2. 定义 MLP 各部分的维度
-#         #    假设 model_layer_dim = [256, 256，256], split_point = 1
-#         split_point = 2  # 在 MLP 的第2层后拆分
-#         base_dims = ACTOR_PARA.model_layer_dim[:split_point]  # 例如: [256,256]
-#         continuous_tower_dims = ACTOR_PARA.model_layer_dim[split_point:]  # 例如: [256]
-#         discrete_tower_dims = continuous_tower_dims
-#         # 让离散塔楼的维度是连续塔楼的一半
-#         # discrete_tower_dims = [dim // 2 for dim in continuous_tower_dims]  # 例如: [128]
-#
-#         # 3. 构建共享MLP基座 (Shared Base MLP)
-#         self.shared_base_mlp = Sequential()
-#         # MLP的输入维度是 GRU 的隐藏层大小
-#         base_input_dim = self.rnn_hidden_size
-#         for i, dim in enumerate(base_dims):
-#             self.shared_base_mlp.add_module(f'base_fc_{i}', Linear(base_input_dim, dim))
-#             self.shared_base_mlp.add_module(f'base_leakyrelu_{i}', LeakyReLU())
-#             base_input_dim = dim
-#         base_output_dim = base_dims[-1] if base_dims else self.rnn_hidden_size
-#
-#         # 4. 构建连续动作塔楼 (Continuous Tower)
-#         self.continuous_tower = Sequential()
-#         tower_input_dim = base_output_dim
-#         for i, dim in enumerate(continuous_tower_dims):
-#             self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(tower_input_dim, dim))
-#             self.continuous_tower.add_module(f'cont_tower_leakyrelu_{i}', LeakyReLU())
-#             tower_input_dim = dim
-#         continuous_tower_output_dim = continuous_tower_dims[-1] if continuous_tower_dims else base_output_dim
-#
-#         # 5. 构建离散动作塔楼 (Discrete Tower)
-#         self.discrete_tower = Sequential()
-#         tower_input_dim = base_output_dim
-#         for i, dim in enumerate(discrete_tower_dims):
-#             self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(tower_input_dim, dim))
-#             self.discrete_tower.add_module(f'disc_tower_leakyrelu_{i}', LeakyReLU())
-#             tower_input_dim = dim
-#         discrete_tower_output_dim = discrete_tower_dims[-1] if discrete_tower_dims else base_output_dim
-#
-#         # 6. 定义最终的输出头 (Heads)
-#         self.mu_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
-#         self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
-#         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
-#
-#         # <<< MODIFICATION START: 精细化优化器设置 >>>
-#         # 1. 将参数分为 GRU 参数 和 其他参数
-#         gru_params = []
-#         other_params = []
-#         for name, param in self.named_parameters():
-#             if not param.requires_grad:
-#                 continue
-#             # 根据参数名中是否包含 'gru' 来进行分组
-#             if 'gru' in name.lower():
-#                 gru_params.append(param)
-#             else:
-#                 other_params.append(param)
-#
-#         # 2. 创建参数组 (parameter groups) 列表
-#         param_groups = [
-#             {
-#                 'params': gru_params,
-#                 'lr': ACTOR_PARA.gru_lr  # 为 GRU 参数设置专属学习率
-#             },
-#             {
-#                 'params': other_params  # 其他所有参数 (MLP, Heads)
-#                 # 不指定 lr，将使用下面 Adam 构造函数中的默认 lr
-#             }
-#         ]
-#
-#         # 3. 使用参数组初始化优化器
-#         # 默认 lr 将用于 'other_params' 组
-#         self.optim = torch.optim.Adam(param_groups, lr=ACTOR_PARA.lr)
-#
-#         print("--- Actor_GRU Optimizer Initialized with Parameter Groups ---")
-#         print(f"  - GRU Params LR: {ACTOR_PARA.gru_lr}")
-#         print(f"  - Other (MLP) Params LR: {ACTOR_PARA.lr}")
-#         # <<< MODIFICATION END >>>
-#
-#         # 优化器等设置
-#         # self.optim = torch.optim.Adam(self.parameters(), ACTOR_PARA.lr)
-#         self.actor_scheduler = lr_scheduler.LinearLR(self.optim, start_factor=1.0,
-#                                                      end_factor=AGENTPARA.mini_lr / ACTOR_PARA.lr,
-#                                                      total_iters=AGENTPARA.MAX_EXE_NUM)
-#         self.to(ACTOR_PARA.device)
-#
-#     def forward(self, obs, hidden_state):
-#         """
-#         GRU Actor 的前向传播。
-#         这个方法被设计为可以同时处理单个时间步的输入（用于与环境交互）和序列输入（用于训练）。
-#         Args:
-#             obs (Tensor): 观测值。形状可以是 (batch, features) 用于单步，或 (batch, seq_len, features) 用于序列。
-#             hidden_state (Tensor): GRU 的隐藏状态。形状是 (num_layers=1, batch, rnn_hidden_size)。
-#         Returns:
-#             tuple: (包含所有动作分布的字典, 新的隐藏状态)
-#         """
-#         obs_tensor = check(obs).to(**ACTOR_PARA.tpdv)
-#         # 检查输入是单个时间步还是序列，通过判断张量的维度
-#         is_sequence = obs_tensor.dim() == 3
-#
-#         # 统一处理输入形状，使其符合 GRU 的输入要求 (batch, seq_len, features)
-#         if not is_sequence:
-#             # 如果是单步 (batch_size, features)，增加一个 seq_len=1 的维度
-#             obs_tensor = obs_tensor.unsqueeze(1)  # -> (batch_size, 1, features)
-#
-#         # 1. 原始状态序列首先通过 GRU
-#         gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
-#
-#         # --- 新的混合 MLP 数据流 ---
-#         # 2. GRU 的输出流经共享 MLP 基座
-#         base_features = self.shared_base_mlp(gru_out)
-#
-#         # 3. 共享特征被分别送入两个专用塔楼
-#         continuous_features = self.continuous_tower(base_features)
-#         discrete_features = self.discrete_tower(base_features)
-#
-#         # 4. 如果是单步输入，压缩特征维度以匹配头部
-#         if not is_sequence:
-#             continuous_features = continuous_features.squeeze(1)
-#             discrete_features = discrete_features.squeeze(1)
-#
-#         # 5. 每个头部接收来自其专属塔楼的特征
-#         mu = self.mu_head(continuous_features)
-#         all_disc_logits = self.discrete_head(discrete_features)
-#
-#         # 后续的分布创建逻辑与原版 Actor 完全相同
-#         split_sizes = list(DISCRETE_DIMS.values())
-#         logits_parts = torch.split(all_disc_logits, split_sizes, dim=-1)
-#         # trigger_logits, salvo_size_logits, intra_interval_logits, num_groups_logits, inter_interval_logits = logits_parts
-#         trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
-#         # 关键：动作掩码依赖于原始输入 obs_tensor，而不是 GRU 的输出
-#         # 动作掩码逻辑 (需要注意在序列情况下正确索引)
-#         # obs_tensor 此时可能是 (batch, seq_len, features) 或 (batch, features)
-#         # 使用 ... (Ellipsis) 可以优雅地处理这两种情况，它代表任意数量的前导维度。
-#         has_flares_info = obs_tensor[..., 7]  # 使用 ... 来处理单步和序列两种情况
-#         mask = (has_flares_info == 0)
-#         trigger_logits_masked = trigger_logits.clone()
-#         if torch.any(mask):
-#             # unsqueeze a dim to match the mask shape with trigger_logits_masked if they are different
-#             if mask.dim() < trigger_logits_masked.dim():
-#                 mask = mask.unsqueeze(-1)
-#             trigger_logits_masked[mask] = torch.finfo(torch.float32).min
-#
-#         # ===============================================================
-#         # 5️⃣ 触发器层次控制：当“不投放”时，屏蔽其他离散动作 logits
-#         # ===============================================================
-#         # 先得到触发器分布
-#         trigger_probs = torch.sigmoid(trigger_logits_masked)  # shape: [B,1]
-#
-#         # 如果 trigger_probs < 0.5，说明模型倾向于“不投放”
-#         # 我们用这个条件生成一个 mask（True=不投放）
-#         no_trigger_mask = (trigger_probs < 0.5).squeeze(-1)  # shape: [B]
-#
-#         # 创建 logits 的副本，避免原地操作污染梯度
-#         salvo_size_logits_masked = salvo_size_logits.clone()
-#         # intra_interval_logits_masked = intra_interval_logits.clone()
-#         num_groups_logits_masked = num_groups_logits.clone()
-#         inter_interval_logits_masked = inter_interval_logits.clone()
-#         # ===============================================================
-#         # 当 trigger 不投放时，将其他离散动作 logits 强制为 index=0 (one-hot 形式)
-#         # ===============================================================
-#         if torch.any(no_trigger_mask):
-#             INF = 1e6
-#             NEG_INF = -1e6
-#             for logits_tensor in [
-#                 salvo_size_logits_masked,
-#                 # intra_interval_logits_masked,
-#                 num_groups_logits_masked,
-#                 inter_interval_logits_masked,
-#             ]:
-#                 logits_sub = logits_tensor[no_trigger_mask]
-#                 if logits_sub.numel() > 0:
-#                     logits_sub[:] = NEG_INF  # 全部置为极小值
-#                     logits_sub[:, 0] = INF  # 仅 index=0 置为极大值
-#                     logits_tensor[no_trigger_mask] = logits_sub
-#
-#
-#         # mu, log_std = cont_params.chunk(2, dim=-1)
-#         # log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
-#         # std = torch.exp(log_std)
-#         # --- 💥 [修改] 5. 创建连续动作分布 ---
-#         # 使用全局可学习的 log_std 参数
-#         log_std = torch.clamp(self.log_std_param, self.log_std_min, self.log_std_max)
-#         # 使用 .expand_as(mu) 来匹配批次和序列维度
-#         std = torch.exp(log_std).expand_as(mu)
-#         continuous_base_dist = Normal(mu, std)
-#
-#         # Bernoulli 的 logits 需要移除最后一个维度（如果它存在且为1）
-#         trigger_dist = Bernoulli(logits=trigger_logits_masked.squeeze(-1))
-#         salvo_size_dist = Categorical(logits=salvo_size_logits_masked)
-#         # intra_interval_dist = Categorical(logits=intra_interval_logits_masked)
-#         num_groups_dist = Categorical(logits=num_groups_logits_masked)
-#         inter_interval_dist = Categorical(logits=inter_interval_logits_masked)
-#
-#         distributions = {
-#             'continuous': continuous_base_dist,
-#             'trigger': trigger_dist,
-#             'salvo_size': salvo_size_dist,
-#             # 'intra_interval': intra_interval_dist,
-#             'num_groups': num_groups_dist,
-#             'inter_interval': inter_interval_dist
-#         }
-#
-#         return distributions, new_hidden
-#
-#
-# class Critic_GRU(Module):
-#     """
-#     Critic 网络 (价值网络) - 基于 GRU 的版本。
-#     结构为: MLP 特征提取 -> GRU 序列处理 -> 输出头。
-#     用于评估状态序列的价值。
-#     """
-#     """
-#        Critic 网络 (价值网络) - [新结构: GRU -> MLP]
-#        结构为: GRU 序列处理 -> MLP 特征提取 -> 输出头。
-#        """
-#     def __init__(self):
-#         super(Critic_GRU, self).__init__()
-#         self.input_dim = CRITIC_PARA.input_dim
-#         self.output_dim = CRITIC_PARA.output_dim
-#         self.rnn_hidden_size = RNN_HIDDEN_SIZE #RNN_HIDDEN_SIZE  self.input_dim
-#
-#         # # 1. MLP 骨干网络 (与原版 Critic 类似)
-#         # self.network_base = Sequential()
-#         # layers_dims = [self.input_dim] + CRITIC_PARA.model_layer_dim
-#         # for i in range(len(layers_dims) - 1):
-#         #     self.network_base.add_module(f'fc_{i}', Linear(layers_dims[i], layers_dims[i + 1]))
-#         #     self.network_base.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
-#         #     self.network_base.add_module(f'LeakyReLU_{i}', LeakyReLU())
-#         #
-#         # base_output_dim = CRITIC_PARA.model_layer_dim[-1]
-#         #
-#         # # 2. GRU 层
-#         # self.gru = GRU(base_output_dim, self.rnn_hidden_size, batch_first=True)
-#         #
-#         # # 3. 输出头，将 GRU 的输出映射到最终的价值 V(s)
-#         # self.fc_out = Linear(self.rnn_hidden_size, self.output_dim)
-#
-#         # 1. GRU 层作为第一层
-#         self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
-#
-#         # # 💥 在 GRU 和 MLP 之间新增一个 LayerNorm
-#         # self.mlp_input_layernorm = LayerNorm(self.rnn_hidden_size)
-#
-#         # 2. MLP 骨干网络，接收 GRU 的输出
-#         # MLP的输入维度是 GRU 的隐藏层大小
-#         layers_dims = [self.rnn_hidden_size] + CRITIC_PARA.model_layer_dim
-#         self.network_base = Sequential()
-#         for i in range(len(layers_dims) - 1):
-#             self.network_base.add_module(f'fc_{i}', Linear(layers_dims[i], layers_dims[i + 1]))
-#             # self.network_base.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
-#             self.network_base.add_module(f'LeakyReLU_{i}', LeakyReLU())
-#
-#         # MLP 的输出维度
-#         base_output_dim = CRITIC_PARA.model_layer_dim[-1]
-#
-#         # 3. 输出头，接收 MLP 的输出
-#         self.fc_out = Linear(base_output_dim, self.output_dim)
-#
-#         # # --- [新增] 应用初始化 ---
-#         # self.apply(init_weights)  # 对所有子模块应用通用初始化
-#         #
-#         # # --- [新增] 对输出层进行特殊初始化 ---
-#         # # 这样做是为了在训练开始时有更稳定的价值估计
-#         # init_range = 3e-3
-#         # self.fc_out.weight.data.uniform_(-init_range, init_range)
-#         # self.fc_out.bias.data.fill_(0)
-#         # # --- 初始化结束 ---
-#
-#         # <<< MODIFICATION START: 精细化优化器设置 >>>
-#         # 1. 将参数分为 GRU 参数 和 其他参数
-#         gru_params = []
-#         other_params = []
-#         for name, param in self.named_parameters():
-#             if not param.requires_grad:
-#                 continue
-#             if 'gru' in name.lower():
-#                 gru_params.append(param)
-#             else:
-#                 other_params.append(param)
-#
-#         # 2. 创建参数组 (parameter groups) 列表
-#         param_groups = [
-#             {
-#                 'params': gru_params,
-#                 'lr': CRITIC_PARA.gru_lr  # 为 GRU 参数设置专属学习率
-#             },
-#             {
-#                 'params': other_params  # 其他所有参数 (MLP, Head)
-#             }
-#         ]
-#
-#         # 3. 使用参数组初始化优化器
-#         self.optim = torch.optim.Adam(param_groups, lr=CRITIC_PARA.lr)
-#
-#         print("--- Critic_GRU Optimizer Initialized with Parameter Groups ---")
-#         print(f"  - GRU Params LR: {CRITIC_PARA.gru_lr}")
-#         print(f"  - Other (MLP) Params LR: {CRITIC_PARA.lr}")
-#         # <<< MODIFICATION END >>>
-#
-#         # 优化器等设置
-#         # self.optim = torch.optim.Adam(self.parameters(), CRITIC_PARA.lr)
-#         self.critic_scheduler = lr_scheduler.LinearLR(self.optim, start_factor=1.0,
-#                                                       end_factor=AGENTPARA.mini_lr / CRITIC_PARA.lr,
-#                                                       total_iters=AGENTPARA.MAX_EXE_NUM)
-#         self.to(CRITIC_PARA.device)
-#
-#     def forward(self, obs, hidden_state):
-#         """
-#         GRU Critic 的前向传播。
-#         同样支持单步和序列输入。
-#         """
-#         obs_tensor = check(obs).to(**CRITIC_PARA.tpdv)
-#         is_sequence = obs_tensor.dim() == 3
-#
-#         if not is_sequence:
-#             obs_tensor = obs_tensor.unsqueeze(1)
-#         # # 1. MLP 特征提取
-#         # base_features = self.network_base(obs_tensor)
-#         # # 2. GRU 序列处理
-#         # gru_out, new_hidden = self.gru(base_features, hidden_state)
-#         #
-#         # if not is_sequence:
-#         #     gru_out = gru_out.squeeze(1)
-#         # # 3. 输出头计算价值
-#         # value = self.fc_out(gru_out)
-#
-#         # 1. [新流程] 原始状态序列首先通过 GRU
-#         gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
-#
-#         # # 2. 💥 [新流程] 将 GRU 的输出通过新增的 LayerNorm
-#         # normed_gru_out = self.mlp_input_layernorm(gru_out)
-#         # # 3. [新流程] GRU 的输出（记忆向量）再通过 MLP 进行特征提取
-#         # base_features = self.network_base(normed_gru_out)  # MLP 的输入是归一化后的 gru_out
-#
-#         # 2. [新流程] GRU 的输出再通过 MLP
-#         base_features = self.network_base(gru_out)
-#
-#         if not is_sequence:
-#             base_features = base_features.squeeze(1)
-#
-#         # 3. [新流程] MLP 的输出送入输出头计算价值
-#         value = self.fc_out(base_features)
-#         return value, new_hidden
-
 # ==============================================================================
-# <<< 新架构 >>>: 定义基于 MLP -> GRU 的 Actor
-#                       [💥 新结构: 共享MLP -> GRU -> 塔楼MLP -> Heads]
+# <<< GRU/RNN 修改 >>>: 定义新的基于 GRU 的 Actor 和 Critic
+#                       [💥 新结构: GRU -> MLP -> Heads]
 # ==============================================================================
 
 class Actor_GRU(Module):
     """
-    Actor 网络 (策略网络) - [混合架构: MLP -> GRU]
-    结构为: 共享MLP基座 -> GRU 序列处理 -> 专用MLP塔楼 -> 独立动作头。
+        Actor 网络 (策略网络) - 基于 GRU 的版本。
+        结构为: MLP 特征提取 -> GRU 序列处理 -> 独立动作头。
+        这种结构能够捕捉状态序列中的时间依赖关系。
+        [💥 修改] 连续动作部分：mu 头状态依赖，log_std 为全局可学习参数。
+        """
     """
-
+    Actor 网络 (策略网络) - [最终混合架构: GRU -> Hybrid MLP]
+    结构为: GRU 序列处理 -> 共享MLP基座 -> 专用MLP塔楼 -> 独立动作头。
+    """
     def __init__(self):
         super(Actor_GRU, self).__init__()
         self.input_dim = ACTOR_PARA.input_dim
         self.log_std_min = -20.0
         self.log_std_max = 2.0
-        self.rnn_hidden_size = RNN_HIDDEN_SIZE
+        self.rnn_hidden_size =  self.input_dim #RNN_HIDDEN_SIZE  self.input_dim
 
-        # --- 1. 定义 GRU 之前的共享 MLP 特征提取器 (Pre-GRU MLP) ---
-        # 假设我们使用 model_layer_dim 的前两层作为 Pre-GRU MLP
-        # 例如，如果 model_layer_dim = [256, 256, 256]，这里就是 [256, 256]
-        pre_gru_mlp_layers = 2
-        pre_gru_dims = ACTOR_PARA.model_layer_dim[:pre_gru_mlp_layers]  # -> [256, 256]
+        # <<< 💥 MODIFICATION: 在 GRU 前添加线性特征提取器 >>>
+        # 定义特征提取层的输出维度，并让GRU的隐藏层大小与其一致，以形成一个连贯的信息流。
+        feature_extractor_output_dim = 256
+        self.rnn_hidden_size = feature_extractor_output_dim
 
-        self.pre_gru_mlp = Sequential()
-        mlp_input_dim = self.input_dim
-        for i, dim in enumerate(pre_gru_dims):
-            self.pre_gru_mlp.add_module(f'pre_gru_fc_{i}', Linear(mlp_input_dim, dim))
-            self.pre_gru_mlp.add_module(f'pre_gru_leakyrelu_{i}', LeakyReLU())
-            mlp_input_dim = dim
+        # 1. 线性特征提取层 (Linear Feature Extractor)
+        # 作用：将原始状态映射到一个更密集的特征空间，供 GRU 进行时序分析。
+        self.feature_extractor = Sequential(
+            Linear(self.input_dim, feature_extractor_output_dim),
+            LeakyReLU()
+        )
 
-        # Pre-GRU MLP 的输出维度，将作为 GRU 的输入维度
-        pre_gru_output_dim = pre_gru_dims[-1] if pre_gru_dims else self.input_dim
+        # 2. GRU 层，现在接收的是提取后的特征，而不是原始状态
+        self.gru = GRU(feature_extractor_output_dim, self.rnn_hidden_size, batch_first=True)
 
-        # --- 2. GRU 层 ---
-        # GRU 的输入维度现在是 Pre-GRU MLP 的输出维度
-        self.gru = GRU(pre_gru_output_dim, self.rnn_hidden_size, batch_first=True)
+        # # 1. GRU 层作为第一层，直接处理原始状态输入
+        # self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
 
-        # --- 3. 定义 GRU 之后的 MLP 塔楼 (Post-GRU Towers) ---
-        # 这部分与你原有的 Actor_GRU 类似，但输入维度是 GRU 的 hidden_size
-        post_gru_dims = ACTOR_PARA.model_layer_dim[pre_gru_mlp_layers:]  # -> [256]
+        # --- 移植过来的混合架构定义 ---
+        # 这个混合架构现在处理的是 GRU 的输出，而不是原始输入
+        # 2. 定义 MLP 各部分的维度
+        #    假设 model_layer_dim = [256, 256，256], split_point = 1
+        # split_point = 2  # 在 MLP 的第2层后拆分
+        # ACTOR_PARA.model_layer_dim = [256,256]
+        split_point = 1
+        base_dims = ACTOR_PARA.model_layer_dim[:split_point]  # 例如: [256,256]
+        continuous_tower_dims = ACTOR_PARA.model_layer_dim[split_point:]  # 例如: [256]
+        discrete_tower_dims = continuous_tower_dims
+        # 让离散塔楼的维度是连续塔楼的一半
+        # discrete_tower_dims = [dim // 2 for dim in continuous_tower_dims]  # 例如: [128]
 
-        # 连续动作塔楼
+        # 3. 构建共享MLP基座 (Shared Base MLP)
+        self.shared_base_mlp = Sequential()
+        # MLP的输入维度是 GRU 的隐藏层大小
+        base_input_dim = self.rnn_hidden_size
+        for i, dim in enumerate(base_dims):
+            self.shared_base_mlp.add_module(f'base_fc_{i}', Linear(base_input_dim, dim))
+            self.shared_base_mlp.add_module(f'base_leakyrelu_{i}', LeakyReLU())
+            base_input_dim = dim
+        base_output_dim = base_dims[-1] if base_dims else self.rnn_hidden_size
+
+        # 4. 构建连续动作塔楼 (Continuous Tower)
         self.continuous_tower = Sequential()
-        tower_input_dim = self.rnn_hidden_size
-        for i, dim in enumerate(post_gru_dims):
+        tower_input_dim = base_output_dim
+        for i, dim in enumerate(continuous_tower_dims):
             self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(tower_input_dim, dim))
             self.continuous_tower.add_module(f'cont_tower_leakyrelu_{i}', LeakyReLU())
             tower_input_dim = dim
-        continuous_tower_output_dim = post_gru_dims[-1] if post_gru_dims else self.rnn_hidden_size
+        continuous_tower_output_dim = continuous_tower_dims[-1] if continuous_tower_dims else base_output_dim
 
-        # 离散动作塔楼 (可以和连续塔楼结构相同或不同)
+        # 5. 构建离散动作塔楼 (Discrete Tower)
         self.discrete_tower = Sequential()
-        tower_input_dim = self.rnn_hidden_size
-        for i, dim in enumerate(post_gru_dims):
+        tower_input_dim = base_output_dim
+        for i, dim in enumerate(discrete_tower_dims):
             self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(tower_input_dim, dim))
             self.discrete_tower.add_module(f'disc_tower_leakyrelu_{i}', LeakyReLU())
             tower_input_dim = dim
-        discrete_tower_output_dim = post_gru_dims[-1] if post_gru_dims else self.rnn_hidden_size
+        discrete_tower_output_dim = discrete_tower_dims[-1] if discrete_tower_dims else base_output_dim
 
-        # --- 4. 定义最终的输出头 (Heads) ---
+        # 6. 定义最终的输出头 (Heads)
         self.mu_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
         self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
 
-        # --- 5. 优化器设置 (可以保持不变) ---
-        # 仍然可以将 GRU 参数和其他 MLP 参数分开设置不同的学习率
-        gru_params = list(self.gru.parameters())
-        other_params = (
-                list(self.pre_gru_mlp.parameters()) +
-                list(self.continuous_tower.parameters()) +
-                list(self.discrete_tower.parameters()) +
-                list(self.mu_head.parameters()) +
-                list(self.discrete_head.parameters()) +
-                [self.log_std_param]
-        )
+        # <<< MODIFICATION START: 精细化优化器设置 >>>
+        # 1. 将参数分为 GRU 参数 和 其他参数
+        gru_params = []
+        other_params = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            # 根据参数名中是否包含 'gru' 来进行分组
+            if 'gru' in name.lower():
+                gru_params.append(param)
+            else:
+                other_params.append(param)
 
+        # 2. 创建参数组 (parameter groups) 列表
         param_groups = [
-            {'params': gru_params, 'lr': ACTOR_PARA.gru_lr},
-            {'params': other_params, 'lr': ACTOR_PARA.lr}
+            {
+                'params': gru_params,
+                'lr': ACTOR_PARA.gru_lr  # 为 GRU 参数设置专属学习率
+            },
+            {
+                'params': other_params  # 其他所有参数 (MLP, Heads)
+                # 不指定 lr，将使用下面 Adam 构造函数中的默认 lr
+            }
         ]
-        self.optim = torch.optim.Adam(param_groups)
+
+        # 3. 使用参数组初始化优化器
+        # 默认 lr 将用于 'other_params' 组
+        self.optim = torch.optim.Adam(param_groups, lr=ACTOR_PARA.lr)
+
+        print("--- Actor_GRU Optimizer Initialized with Parameter Groups ---")
+        print(f"  - GRU Params LR: {ACTOR_PARA.gru_lr}")
+        print(f"  - Other (MLP) Params LR: {ACTOR_PARA.lr}")
+        # <<< MODIFICATION END >>>
+
+        # 优化器等设置
+        # self.optim = torch.optim.Adam(self.parameters(), ACTOR_PARA.lr)
         self.actor_scheduler = lr_scheduler.LinearLR(self.optim, start_factor=1.0,
                                                      end_factor=AGENTPARA.mini_lr / ACTOR_PARA.lr,
                                                      total_iters=AGENTPARA.MAX_EXE_NUM)
         self.to(ACTOR_PARA.device)
 
     def forward(self, obs, hidden_state):
+        """
+        GRU Actor 的前向传播。
+        这个方法被设计为可以同时处理单个时间步的输入（用于与环境交互）和序列输入（用于训练）。
+        Args:
+            obs (Tensor): 观测值。形状可以是 (batch, features) 用于单步，或 (batch, seq_len, features) 用于序列。
+            hidden_state (Tensor): GRU 的隐藏状态。形状是 (num_layers=1, batch, rnn_hidden_size)。
+        Returns:
+            tuple: (包含所有动作分布的字典, 新的隐藏状态)
+        """
         obs_tensor = check(obs).to(**ACTOR_PARA.tpdv)
+        # 检查输入是单个时间步还是序列，通过判断张量的维度
         is_sequence = obs_tensor.dim() == 3
+
+        # 统一处理输入形状，使其符合 GRU 的输入要求 (batch, seq_len, features)
         if not is_sequence:
-            obs_tensor = obs_tensor.unsqueeze(1)
+            # 如果是单步 (batch_size, features)，增加一个 seq_len=1 的维度
+            obs_tensor = obs_tensor.unsqueeze(1)  # -> (batch_size, 1, features)
 
-        # 1. 原始状态序列首先通过 Pre-GRU MLP 进行特征提取
-        # Sequential 会自动地将 MLP 应用于序列的最后一个维度
-        # 输入: (batch, seq_len, features) -> 输出: (batch, seq_len, pre_gru_output_dim)
-        features_sequence = self.pre_gru_mlp(obs_tensor)
+        # <<< 💥 MODIFICATION: 更新前向传播流程 >>>
+        # 1. 原始状态序列首先通过线性特征提取器
+        extracted_features = self.feature_extractor(obs_tensor)
 
-        # 2. 将提取出的特征序列送入 GRU
-        # 输入: (batch, seq_len, pre_gru_output_dim) -> 输出: (batch, seq_len, rnn_hidden_size)
-        gru_out, new_hidden = self.gru(features_sequence, hidden_state)
+        # 2. 提取出的特征序列再通过 GRU
+        gru_out, new_hidden = self.gru(extracted_features, hidden_state)
 
-        # 3. GRU 的输出被分别送入两个专用塔楼
-        continuous_features = self.continuous_tower(gru_out)
-        discrete_features = self.discrete_tower(gru_out)
+        # # 1. 原始状态序列首先通过 GRU
+        # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+
+        # --- 新的混合 MLP 数据流 ---
+        # 2. GRU 的输出流经共享 MLP 基座
+        base_features = self.shared_base_mlp(gru_out)
+
+        # 3. 共享特征被分别送入两个专用塔楼
+        continuous_features = self.continuous_tower(base_features)
+        discrete_features = self.discrete_tower(base_features)
 
         # 4. 如果是单步输入，压缩特征维度以匹配头部
         if not is_sequence:
@@ -735,42 +424,71 @@ class Actor_GRU(Module):
         mu = self.mu_head(continuous_features)
         all_disc_logits = self.discrete_head(discrete_features)
 
-        # --- 后续的分布创建和掩码逻辑与原版 Actor_GRU 完全相同 ---
-        # ... (此处省略与 Actor_GRU 中完全相同的掩码和分布创建代码) ...
+        # 后续的分布创建逻辑与原版 Actor 完全相同
         split_sizes = list(DISCRETE_DIMS.values())
         logits_parts = torch.split(all_disc_logits, split_sizes, dim=-1)
-        trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
-
-        has_flares_info = obs_tensor[..., 7]
+        trigger_logits, salvo_size_logits, intra_interval_logits, num_groups_logits, inter_interval_logits = logits_parts
+        # 关键：动作掩码依赖于原始输入 obs_tensor，而不是 GRU 的输出
+        # 动作掩码逻辑 (需要注意在序列情况下正确索引)
+        # obs_tensor 此时可能是 (batch, seq_len, features) 或 (batch, features)
+        # 使用 ... (Ellipsis) 可以优雅地处理这两种情况，它代表任意数量的前导维度。
+        has_flares_info = obs_tensor[..., 7]  # 使用 ... 来处理单步和序列两种情况
         mask = (has_flares_info == 0)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
+            # unsqueeze a dim to match the mask shape with trigger_logits_masked if they are different
             if mask.dim() < trigger_logits_masked.dim():
                 mask = mask.unsqueeze(-1)
             trigger_logits_masked[mask] = torch.finfo(torch.float32).min
 
-        # (省略层次化控制逻辑，因为和原来一样)
-        trigger_probs = torch.sigmoid(trigger_logits_masked)
-        no_trigger_mask = (trigger_probs < 0.5).squeeze(-1)
+        # ===============================================================
+        # 5️⃣ 触发器层次控制：当“不投放”时，屏蔽其他离散动作 logits
+        # ===============================================================
+        # 先得到触发器分布
+        trigger_probs = torch.sigmoid(trigger_logits_masked)  # shape: [B,1]
+
+        # 如果 trigger_probs < 0.5，说明模型倾向于“不投放”
+        # 我们用这个条件生成一个 mask（True=不投放）
+        no_trigger_mask = (trigger_probs < 0.5).squeeze(-1)  # shape: [B]
+
+        # 创建 logits 的副本，避免原地操作污染梯度
         salvo_size_logits_masked = salvo_size_logits.clone()
+        intra_interval_logits_masked = intra_interval_logits.clone()
         num_groups_logits_masked = num_groups_logits.clone()
         inter_interval_logits_masked = inter_interval_logits.clone()
+        # ===============================================================
+        # 当 trigger 不投放时，将其他离散动作 logits 强制为 index=0 (one-hot 形式)
+        # ===============================================================
         if torch.any(no_trigger_mask):
             INF = 1e6
             NEG_INF = -1e6
-            for logits_tensor in [salvo_size_logits_masked, num_groups_logits_masked, inter_interval_logits_masked]:
+            for logits_tensor in [
+                salvo_size_logits_masked,
+                intra_interval_logits_masked,
+                num_groups_logits_masked,
+                inter_interval_logits_masked,
+            ]:
                 logits_sub = logits_tensor[no_trigger_mask]
                 if logits_sub.numel() > 0:
-                    logits_sub[:] = NEG_INF
-                    logits_sub[:, 0] = INF
+                    logits_sub[:] = NEG_INF  # 全部置为极小值
+                    logits_sub[:, 0] = INF  # 仅 index=0 置为极大值
                     logits_tensor[no_trigger_mask] = logits_sub
 
+
+        # mu, log_std = cont_params.chunk(2, dim=-1)
+        # log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
+        # std = torch.exp(log_std)
+        # --- 💥 [修改] 5. 创建连续动作分布 ---
+        # 使用全局可学习的 log_std 参数
         log_std = torch.clamp(self.log_std_param, self.log_std_min, self.log_std_max)
+        # 使用 .expand_as(mu) 来匹配批次和序列维度
         std = torch.exp(log_std).expand_as(mu)
         continuous_base_dist = Normal(mu, std)
 
+        # Bernoulli 的 logits 需要移除最后一个维度（如果它存在且为1）
         trigger_dist = Bernoulli(logits=trigger_logits_masked.squeeze(-1))
         salvo_size_dist = Categorical(logits=salvo_size_logits_masked)
+        intra_interval_dist = Categorical(logits=intra_interval_logits_masked)
         num_groups_dist = Categorical(logits=num_groups_logits_masked)
         inter_interval_dist = Categorical(logits=inter_interval_logits_masked)
 
@@ -778,6 +496,7 @@ class Actor_GRU(Module):
             'continuous': continuous_base_dist,
             'trigger': trigger_dist,
             'salvo_size': salvo_size_dist,
+            'intra_interval': intra_interval_dist,
             'num_groups': num_groups_dist,
             'inter_interval': inter_interval_dist
         }
@@ -785,96 +504,163 @@ class Actor_GRU(Module):
         return distributions, new_hidden
 
 
-# ==============================================================================
-# <<< 新架构 >>>: 定义基于 MLP -> GRU 的 Critic
-#                       [💥 新结构: 共享MLP -> GRU -> MLP -> Head]
-# ==============================================================================
-
 class Critic_GRU(Module):
     """
-    Critic 网络 (价值网络) - [混合架构: MLP -> GRU]
-    结构为: 共享MLP特征提取 -> GRU 序列处理 -> MLP -> 输出头。
-    与 Actor_MLP_GRU 的主干结构保持一致。
+    Critic 网络 (价值网络) - 基于 GRU 的版本。
+    结构为: MLP 特征提取 -> GRU 序列处理 -> 输出头。
+    用于评估状态序列的价值。
     """
-
+    """
+       Critic 网络 (价值网络) - [新结构: GRU -> MLP]
+       结构为: GRU 序列处理 -> MLP 特征提取 -> 输出头。
+       """
     def __init__(self):
         super(Critic_GRU, self).__init__()
         self.input_dim = CRITIC_PARA.input_dim
         self.output_dim = CRITIC_PARA.output_dim
-        self.rnn_hidden_size = RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE  self.input_dim
 
-        # --- 1. 定义 GRU 之前的共享 MLP 特征提取器 (Pre-GRU MLP) ---
-        # 使用 Critic 配置中的 MLP 层定义
-        pre_gru_mlp_layers = 2  # 与 Actor 保持一致
-        pre_gru_dims = CRITIC_PARA.model_layer_dim[:pre_gru_mlp_layers]
+        # # 1. MLP 骨干网络 (与原版 Critic 类似)
+        # self.network_base = Sequential()
+        # layers_dims = [self.input_dim] + CRITIC_PARA.model_layer_dim
+        # for i in range(len(layers_dims) - 1):
+        #     self.network_base.add_module(f'fc_{i}', Linear(layers_dims[i], layers_dims[i + 1]))
+        #     self.network_base.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
+        #     self.network_base.add_module(f'LeakyReLU_{i}', LeakyReLU())
+        #
+        # base_output_dim = CRITIC_PARA.model_layer_dim[-1]
+        #
+        # # 2. GRU 层
+        # self.gru = GRU(base_output_dim, self.rnn_hidden_size, batch_first=True)
+        #
+        # # 3. 输出头，将 GRU 的输出映射到最终的价值 V(s)
+        # self.fc_out = Linear(self.rnn_hidden_size, self.output_dim)
 
-        self.pre_gru_mlp = Sequential()
-        mlp_input_dim = self.input_dim
-        for i, dim in enumerate(pre_gru_dims):
-            self.pre_gru_mlp.add_module(f'pre_gru_fc_{i}', Linear(mlp_input_dim, dim))
-            self.pre_gru_mlp.add_module(f'pre_gru_leakyrelu_{i}', LeakyReLU())
-            mlp_input_dim = dim
+        # # 1. GRU 层作为第一层
+        # self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
 
-        pre_gru_output_dim = pre_gru_dims[-1] if pre_gru_dims else self.input_dim
+        # # 💥 在 GRU 和 MLP 之间新增一个 LayerNorm
+        # self.mlp_input_layernorm = LayerNorm(self.rnn_hidden_size)
 
-        # --- 2. GRU 层 ---
-        self.gru = GRU(pre_gru_output_dim, self.rnn_hidden_size, batch_first=True)
+        # <<< 💥 MODIFICATION: 在 GRU 前添加线性特征提取器 >>>
+        feature_extractor_output_dim = 256
+        self.rnn_hidden_size = feature_extractor_output_dim
 
-        # --- 3. 定义 GRU 之后的 MLP (Post-GRU MLP) ---
-        post_gru_dims = CRITIC_PARA.model_layer_dim[pre_gru_mlp_layers:]
-
-        self.post_gru_mlp = Sequential()
-        tower_input_dim = self.rnn_hidden_size
-        for i, dim in enumerate(post_gru_dims):
-            self.post_gru_mlp.add_module(f'post_gru_fc_{i}', Linear(tower_input_dim, dim))
-            self.post_gru_mlp.add_module(f'post_gru_leakyrelu_{i}', LeakyReLU())
-            tower_input_dim = dim
-
-        post_gru_output_dim = post_gru_dims[-1] if post_gru_dims else self.rnn_hidden_size
-
-        # --- 4. 最终的输出头 (Head) ---
-        self.fc_out = Linear(post_gru_output_dim, self.output_dim)
-
-        # --- 5. 优化器设置 (与 Actor 类似，分离 GRU 和其他参数) ---
-        gru_params = list(self.gru.parameters())
-        other_params = (
-                list(self.pre_gru_mlp.parameters()) +
-                list(self.post_gru_mlp.parameters()) +
-                list(self.fc_out.parameters())
+        # 1. 线性特征提取层 (Linear Feature Extractor)
+        self.feature_extractor = Sequential(
+            Linear(self.input_dim, feature_extractor_output_dim),
+            LeakyReLU()
         )
 
+        # 2. GRU 层，接收提取后的特征
+        self.gru = GRU(feature_extractor_output_dim, self.rnn_hidden_size, batch_first=True)
+
+        # 2. MLP 骨干网络，接收 GRU 的输出
+        # MLP的输入维度是 GRU 的隐藏层大小
+        layers_dims = [self.rnn_hidden_size] + CRITIC_PARA.model_layer_dim
+        self.network_base = Sequential()
+        for i in range(len(layers_dims) - 1):
+            self.network_base.add_module(f'fc_{i}', Linear(layers_dims[i], layers_dims[i + 1]))
+            # self.network_base.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
+            self.network_base.add_module(f'LeakyReLU_{i}', LeakyReLU())
+
+        # MLP 的输出维度
+        base_output_dim = CRITIC_PARA.model_layer_dim[-1]
+
+        # 3. 输出头，接收 MLP 的输出
+        self.fc_out = Linear(base_output_dim, self.output_dim)
+
+        # # --- [新增] 应用初始化 ---
+        # self.apply(init_weights)  # 对所有子模块应用通用初始化
+        #
+        # # --- [新增] 对输出层进行特殊初始化 ---
+        # # 这样做是为了在训练开始时有更稳定的价值估计
+        # init_range = 3e-3
+        # self.fc_out.weight.data.uniform_(-init_range, init_range)
+        # self.fc_out.bias.data.fill_(0)
+        # # --- 初始化结束 ---
+
+        # <<< MODIFICATION START: 精细化优化器设置 >>>
+        # 1. 将参数分为 GRU 参数 和 其他参数
+        gru_params = []
+        other_params = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if 'gru' in name.lower():
+                gru_params.append(param)
+            else:
+                other_params.append(param)
+
+        # 2. 创建参数组 (parameter groups) 列表
         param_groups = [
-            {'params': gru_params, 'lr': CRITIC_PARA.gru_lr},
-            {'params': other_params, 'lr': CRITIC_PARA.lr}
+            {
+                'params': gru_params,
+                'lr': CRITIC_PARA.gru_lr  # 为 GRU 参数设置专属学习率
+            },
+            {
+                'params': other_params  # 其他所有参数 (MLP, Head)
+            }
         ]
-        self.optim = torch.optim.Adam(param_groups)
+
+        # 3. 使用参数组初始化优化器
+        self.optim = torch.optim.Adam(param_groups, lr=CRITIC_PARA.lr)
+
+        print("--- Critic_GRU Optimizer Initialized with Parameter Groups ---")
+        print(f"  - GRU Params LR: {CRITIC_PARA.gru_lr}")
+        print(f"  - Other (MLP) Params LR: {CRITIC_PARA.lr}")
+        # <<< MODIFICATION END >>>
+
+        # 优化器等设置
+        # self.optim = torch.optim.Adam(self.parameters(), CRITIC_PARA.lr)
         self.critic_scheduler = lr_scheduler.LinearLR(self.optim, start_factor=1.0,
                                                       end_factor=AGENTPARA.mini_lr / CRITIC_PARA.lr,
                                                       total_iters=AGENTPARA.MAX_EXE_NUM)
         self.to(CRITIC_PARA.device)
 
     def forward(self, obs, hidden_state):
+        """
+        GRU Critic 的前向传播。
+        同样支持单步和序列输入。
+        """
         obs_tensor = check(obs).to(**CRITIC_PARA.tpdv)
         is_sequence = obs_tensor.dim() == 3
+
         if not is_sequence:
             obs_tensor = obs_tensor.unsqueeze(1)
+        # # 1. MLP 特征提取
+        # base_features = self.network_base(obs_tensor)
+        # # 2. GRU 序列处理
+        # gru_out, new_hidden = self.gru(base_features, hidden_state)
+        #
+        # if not is_sequence:
+        #     gru_out = gru_out.squeeze(1)
+        # # 3. 输出头计算价值
+        # value = self.fc_out(gru_out)
 
-        # 1. 原始状态序列通过 Pre-GRU MLP
-        features_sequence = self.pre_gru_mlp(obs_tensor)
+        # # 1. [新流程] 原始状态序列首先通过 GRU
+        # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
 
-        # 2. 特征序列送入 GRU
-        gru_out, new_hidden = self.gru(features_sequence, hidden_state)
+        # <<< 💥 MODIFICATION: 更新前向传播流程 >>>
+        # 1. 原始状态序列首先通过线性特征提取器
+        extracted_features = self.feature_extractor(obs_tensor)
 
-        # 3. GRU 输出通过 Post-GRU MLP
-        post_gru_features = self.post_gru_mlp(gru_out)
+        # 2. 提取出的特征序列再通过 GRU
+        gru_out, new_hidden = self.gru(extracted_features, hidden_state)
 
-        # 处理单步输入的情况
+        # # 2. 💥 [新流程] 将 GRU 的输出通过新增的 LayerNorm
+        # normed_gru_out = self.mlp_input_layernorm(gru_out)
+        # # 3. [新流程] GRU 的输出（记忆向量）再通过 MLP 进行特征提取
+        # base_features = self.network_base(normed_gru_out)  # MLP 的输入是归一化后的 gru_out
+
+        # 2. [新流程] GRU 的输出再通过 MLP
+        base_features = self.network_base(gru_out)
+
         if not is_sequence:
-            post_gru_features = post_gru_features.squeeze(1)
+            base_features = base_features.squeeze(1)
 
-        # 4. MLP 输出送入输出头计算价值
-        value = self.fc_out(post_gru_features)
-
+        # 3. [新流程] MLP 的输出送入输出头计算价值
+        value = self.fc_out(base_features)
         return value, new_hidden
 
 
@@ -1026,8 +812,8 @@ class PPO_continuous(object):
                     if isinstance(dist, Categorical): # 分类分布：取概率最大的类别
                         sampled_actions_dict[key] = torch.argmax(dist.probs, dim=-1)
                     else: # 伯努利分布：取概率大于0.5的
-                        sampled_actions_dict[key] = (dist.probs > 0.5).float()
-                        # sampled_actions_dict[key] = dist.sample()
+                        # sampled_actions_dict[key] = (dist.probs > 0.5).float()
+                        sampled_actions_dict[key] = dist.sample()
                 else:
                     sampled_actions_dict[key] = dist.sample()
             # 计算总的对数概率
@@ -1128,9 +914,9 @@ class PPO_continuous(object):
                 discrete_actions_from_buffer = {
                     'trigger': action_batch[..., CONTINUOUS_DIM],
                     'salvo_size': action_batch[..., CONTINUOUS_DIM + 1].long(), # 类别索引需要是 long 类型
-                    # 'intra_interval': action_batch[..., CONTINUOUS_DIM + 2].long(),
-                    'num_groups': action_batch[..., CONTINUOUS_DIM + 2].long(),
-                    'inter_interval': action_batch[..., CONTINUOUS_DIM + 3].long(),
+                    'intra_interval': action_batch[..., CONTINUOUS_DIM + 2].long(),
+                    'num_groups': action_batch[..., CONTINUOUS_DIM + 3].long(),
+                    'inter_interval': action_batch[..., CONTINUOUS_DIM + 4].long(),
                 }
 
                 # 4. Actor (策略) 网络训练

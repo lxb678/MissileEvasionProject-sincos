@@ -10,7 +10,7 @@ import numpy as np
 import random
 # <<< GRU 修改 >>>: 导入包含GRU模型的PPO实现
 from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOGRUMLP混合架构 import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
+from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
 from torch.utils.tensorboard import SummaryWriter
 # <<< 更改 >>>: 确保您正在使用的环境与训练时一致
 from Interference_code.env.missile_evasion_environment.missile_evasion_environment import *
@@ -52,8 +52,8 @@ env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING)
 set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型
-model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-# model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPOGRU_2025-11-01_11-11-22"  # 示例路径
+# model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
+model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPOGRU_2025-11-10_11-44-27"  # 示例路径
 print(f"正在加载GRU模型: {model_path}")
 
 # <<< GRU 修改 >>>: 初始化Agent时，必须传入 use_rnn=True
@@ -88,7 +88,7 @@ for i_episode in range(episodes):
                 new_actor_hidden, new_critic_hidden = agent.choose_action(observation_eval,
                                                                           actor_hidden,
                                                                           critic_hidden,
-                                                                          deterministic=True)
+                                                                          deterministic=False)
 
             # 2. 将扁平数组打包成字典 (这部分不变)
             action_dict_eval = pack_action_into_dict(action_eval_flat)

@@ -23,7 +23,7 @@ CONTINUOUS_ACTION_KEYS = ['throttle', 'elevator', 'aileron', 'rudder']
 DISCRETE_DIMS = {
     'flare_trigger': 1,  # 是否投放: 1个logit -> Bernoulli (是/否)
     'salvo_size': 3,  # 一组的数量: 3个logit -> Categorical (例如: 2, 4, 6 发)
-    # 'intra_interval': 3,  # 组内每发间隔: 3个logit -> Categorical (例如: 0.1s, 0.2s, 0.5s)
+    'intra_interval': 3,  # 组内每发间隔: 3个logit -> Categorical (例如: 0.1s, 0.2s, 0.5s)
     'num_groups': 3,  # 投放组数: 3个logit -> Categorical (例如: 1, 2, 3 组)
     'inter_interval': 3,  # 组间隔:   3个logit -> Categorical (例如: 0.5s, 1.0s, 2.0s)
 }
@@ -56,17 +56,10 @@ DISCRETE_ACTION_MAP = {
 #     'inter_interval': [0.2, 0.5, 1.0]
     'salvo_size': [2, 3, 4],  # 修改为发射2、3、4枚
     # 'intra_interval': [0.05, 0.1, 0.15],
-    # 'intra_interval': [0.02, 0.04, 0.06],
+    'intra_interval': [0.02, 0.04, 0.06],
     'num_groups': [2, 3, 4],
-    'inter_interval': [0.2, 0.4, 0.6]
+    'inter_interval': [0.2, 0.5, 1.0]
 }
-# <<< 新增 >>> 定义固定的组内投放间隔
-# FIXED_INTRA_INTERVAL = 0.05
-
-# 'salvo_size': [2, 3, 4],  # 修改为发射2、3、4枚
-#     'intra_interval': [0.05],
-#     'num_groups': [2, 3, 4],
-#     'inter_interval': [0.2, 0.4, 0.6]
 
 # --- 动作范围定义 (仅用于连续动作缩放) ---
 ACTION_RANGES = {
@@ -101,59 +94,45 @@ class Actor(Module):
         self.log_std_min = -20.0
         self.log_std_max = 2.0
 
-        # --- 混合架构定义 ---
+        # 定义共享骨干网络
+        # 负责从原始状态中提取高级特征
+        shared_layers_dims = [self.input_dim] + ACTOR_PARA.model_layer_dim
+        self.shared_network = Sequential()
+        for i in range(len(shared_layers_dims) - 1):
+            # 添加线性层
+            self.shared_network.add_module(f'fc_{i}', Linear(shared_layers_dims[i], shared_layers_dims[i + 1]))
+            # --- 在此处添加 LayerNorm ---
+            # LayerNorm 的输入维度是前一个线性层的输出维度
+            # self.shared_network.add_module(f'LayerNorm_{i}', LayerNorm(shared_layers_dims[i + 1]))
+            # 添加激活函数
+            self.shared_network.add_module(f'LeakyReLU_{i}', LeakyReLU())
 
-        # 1. 为每个部分定义层的维度
-        #    !! 重要：请根据你的 Config.py 来调整这里的切片 !!
-        #    假设 model_layer_dim = [256, 256，256]，我们在第2层后拆分
-        split_point = 2  # 在第2层后拆分
-        base_dims = ACTOR_PARA.model_layer_dim[:split_point]  # 例如: [256，256]
-        # tower_dims = ACTOR_PARA.model_layer_dim[split_point:]  # 例如: [256]
-        continuous_tower_dims = ACTOR_PARA.model_layer_dim[split_point:] #[256]  # 连续动作塔楼的维度
-        #【修正后的代码】让离散塔楼的每一层维度都是连续塔楼对应层的一半
-        # 使用列表推导式来实现
-        discrete_tower_dims = continuous_tower_dims
-        # discrete_tower_dims = [dim // 2 for dim in continuous_tower_dims]  # 例如: [128, 64]
-
-        # 2. 构建共享基座网络 (Shared Base)
-        self.shared_base = Sequential()
-        base_input_dim = self.input_dim
-        for i, dim in enumerate(base_dims):
-            self.shared_base.add_module(f'base_fc_{i}', Linear(base_input_dim, dim))
-            self.shared_base.add_module(f'base_leakyrelu_{i}', LeakyReLU())
-            base_input_dim = dim
-
-        # 共享基座的输出维度
-        base_output_dim = base_dims[-1]
-
-        # 3. 构建连续动作塔楼 (Continuous Tower)
-        self.continuous_tower = Sequential()
-        tower_input_dim = base_output_dim
-        for i, dim in enumerate(continuous_tower_dims):
-            self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(tower_input_dim, dim))
-            self.continuous_tower.add_module(f'cont_tower_leakyrelu_{i}', LeakyReLU())
-            tower_input_dim = dim
-
-        # 4. 构建离散动作塔楼 (Discrete Tower)
-        self.discrete_tower = Sequential()
-        tower_input_dim = base_output_dim  # 输入同样来自共享基座
-        for i, dim in enumerate(discrete_tower_dims):
-            self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(tower_input_dim, dim))
-            self.discrete_tower.add_module(f'disc_tower_leakyrelu_{i}', LeakyReLU())
-            tower_input_dim = dim
-
-        # 5. 定义最终的输出头 (Heads)
-        #    头部的输入维度现在是它们各自塔楼的输出维度
-        continuous_tower_output_dim = continuous_tower_dims[-1] if continuous_tower_dims else base_output_dim
-        self.continuous_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
-        discrete_tower_output_dim = discrete_tower_dims[-1] if discrete_tower_dims else base_output_dim
-        self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
-
-        # 6. 定义与状态无关的连续动作 log_std
-        # self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), -0.5))
+        # 骨干网络的输出维度，将作为各个头部的输入
+        shared_output_dim = ACTOR_PARA.model_layer_dim[-1]
+        # --- 独立头部网络 ---
+        # 1. 连续动作头部：只输出均值 (mu)
+        self.continuous_head = Linear(shared_output_dim, CONTINUOUS_DIM)
+        # 独立的、可训练的 log_std 参数（与状态无关）
+        # self.log_std_param = nn.Parameter(torch.zeros(1, CONTINUOUS_DIM) * -0.5) #这会让初始 σ≈0.6，探索强度适中（否则为 σ=1）。
         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
 
-        # --- 优化器和其他设置 (保持不变) ---
+        # 2. 离散动作头部：输出所有离散决策所需的 logits
+        self.discrete_head = Linear(shared_output_dim, TOTAL_DISCRETE_LOGITS)
+
+        ## --- [新增] 应用参数初始化 ---
+        ## 首先应用通用的初始化策略
+        # self.shared_network.apply(init_weights)
+
+        # # 然后对输出层进行特殊的、小范围的初始化，以保证初始策略的稳定性
+        # init_range = 3e-3
+        # self.continuous_head.weight.data.uniform_(-init_range, init_range)
+        # self.continuous_head.bias.data.fill_(0)
+        # self.discrete_head.weight.data.uniform_(-init_range, init_range)
+        # self.discrete_head.bias.data.fill_(0)
+        # # --- 初始化结束 ---
+
+        # self.init_model()
+        # --- 优化器和设备设置 ---
         self.optim = torch.optim.Adam(self.parameters(), ACTOR_PARA.lr)
         self.actor_scheduler = lr_scheduler.LinearLR(
             self.optim,
@@ -162,6 +141,7 @@ class Actor(Module):
             total_iters=AGENTPARA.MAX_EXE_NUM
         )
         self.to(ACTOR_PARA.device)
+
     def init_model(self):
         """初始化神经网络结构"""
         self.network = Sequential()
@@ -179,25 +159,19 @@ class Actor(Module):
         if obs_tensor.dim() == 1:
             obs_tensor = obs_tensor.unsqueeze(0)
 
-        # 1. 数据首先流经共享基座
-        base_features = self.shared_base(obs_tensor)
+        # 1. 通过共享骨干网络提取通用特征
+        shared_features = self.shared_network(obs_tensor)
 
-        # 2. 共享特征被分别送入两个专用塔楼
-        continuous_features = self.continuous_tower(base_features)
-        discrete_features = self.discrete_tower(base_features)
-
-        # 3. 每个头部接收来自其专属塔楼的特征
-        mu = self.continuous_head(continuous_features)
-        all_disc_logits = self.discrete_head(discrete_features)
+        # 2. 将共享特征分别送入不同的头部网络
+        mu = self.continuous_head(shared_features)
+        all_disc_logits = self.discrete_head(shared_features)
 
         # 3. 按 DISCRETE_DIMS 结构将所有logits切分为5个部分
         split_sizes = list(DISCRETE_DIMS.values())
         logits_parts = torch.split(all_disc_logits, split_sizes, dim=1)
 
-        # # 为每个部分分配合理的变量名
-        # trigger_logits, salvo_size_logits, intra_interval_logits, num_groups_logits, inter_interval_logits = logits_parts
-        # <<< 修改 >>> 变量解包，现在只有4个部分
-        trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
+        # 为每个部分分配合理的变量名
+        trigger_logits, salvo_size_logits, intra_interval_logits, num_groups_logits, inter_interval_logits = logits_parts
 
         # 4. 【动作掩码】逻辑 (只作用于触发器，如果没诱饵弹则不能投放)
         # 假设 obs_tensor 的第 7 个特征 (索引为7) 代表红外诱饵弹数量
@@ -216,10 +190,9 @@ class Actor(Module):
             # trigger_logits_masked[mask] = -1e4  # -10000.0
 
         # ===============================================================
-        # 6️⃣ <<< 新增：层级控制逻辑 >>>
-        # 当“不投放”时，屏蔽其他离散动作的 logits
+        # 5️⃣ 触发器层次控制：当“不投放”时，屏蔽其他离散动作 logits
         # ===============================================================
-        # 先根据触发器的 logits 计算出其概率
+        # 先得到触发器分布
         trigger_probs = torch.sigmoid(trigger_logits_masked)  # shape: [B,1]
 
         # 如果 trigger_probs < 0.5，说明模型倾向于“不投放”
@@ -228,7 +201,7 @@ class Actor(Module):
 
         # 创建 logits 的副本，避免原地操作污染梯度
         salvo_size_logits_masked = salvo_size_logits.clone()
-        # intra_interval_logits_masked = intra_interval_logits.clone()
+        intra_interval_logits_masked = intra_interval_logits.clone()
         num_groups_logits_masked = num_groups_logits.clone()
         inter_interval_logits_masked = inter_interval_logits.clone()
         # ===============================================================
@@ -238,22 +211,16 @@ class Actor(Module):
             # print("<<<<<<<<<<<<<<<<<< 警告：强制Mask逻辑被触发！ >>>>>>>>>>>>>>>>>>")
             INF = 1e6
             NEG_INF = -1e6
-            # 遍历所有依赖于触发器的 logits 张量
             for logits_tensor in [
                 salvo_size_logits_masked,
-                # intra_interval_logits_masked,
+                intra_interval_logits_masked,
                 num_groups_logits_masked,
                 inter_interval_logits_masked,
             ]:
-                # 选出那些需要被屏蔽的行 (样本)
                 logits_sub = logits_tensor[no_trigger_mask]
-                # 如果确实有需要屏蔽的行
                 if logits_sub.numel() > 0:
-                    # 将这些行的所有 logits 都设为极小值
                     logits_sub[:] = NEG_INF  # 全部置为极小值
-                    # 然后只把第 0 列 (对应索引 0) 的 logit 设为极大值
                     logits_sub[:, 0] = INF  # 仅 index=0 置为极大值
-                    # 将修改后的 logits 写回原张量
                     logits_tensor[no_trigger_mask] = logits_sub
 
         # 5. 创建所有动作分布对象
@@ -266,7 +233,7 @@ class Actor(Module):
         # 5.2  创建新的5个离散分布
         trigger_dist = Bernoulli(logits=trigger_logits_masked.squeeze(-1))
         salvo_size_dist = Categorical(logits=salvo_size_logits_masked)
-        # intra_interval_dist = Categorical(logits=intra_interval_logits_masked)
+        intra_interval_dist = Categorical(logits=intra_interval_logits_masked)
         num_groups_dist = Categorical(logits=num_groups_logits_masked)
         inter_interval_dist = Categorical(logits=inter_interval_logits_masked)
 
@@ -275,7 +242,7 @@ class Actor(Module):
             'continuous': continuous_base_dist,
             'trigger': trigger_dist,
             'salvo_size': salvo_size_dist,
-            # 'intra_interval': intra_interval_dist,
+            'intra_interval': intra_interval_dist,
             'num_groups': num_groups_dist,
             'inter_interval': inter_interval_dist
         }
@@ -388,19 +355,15 @@ class PPO_continuous(object):
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
         self.training_start_time = time.strftime("PPO_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../../save/save_evade_fuza"
-        win_rate_subdir = "胜率模型"
-        # 拼接成完整的存档路径
+        self.base_save_dir = "../../save/save_evade_fuza"
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
-        self.win_rate_dir = os.path.join(self.run_save_dir, win_rate_subdir)
-
         if load_able:
             if model_dir_path:
                 print(f"--- 正在从指定文件夹加载模型: {model_dir_path} ---")
                 self.load_models_from_directory(model_dir_path)
             else:
                 print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
-                self.load_models_from_directory("../../../test/test_evade")
+                self.load_models_from_directory("../../test/test_evade")
 
     def load_models_from_directory(self, directory_path: str):
         """从指定的文件夹路径加载模型，能自动识别多种命名格式。"""
@@ -576,14 +539,14 @@ class PPO_continuous(object):
             # 为了方便后续使用，将字典中的动作解包到单独的变量
             trigger_action = sampled_actions_dict['trigger']
             salvo_size_action = sampled_actions_dict['salvo_size']
-            # intra_interval_action = sampled_actions_dict['intra_interval']
+            intra_interval_action = sampled_actions_dict['intra_interval']
             num_groups_action = sampled_actions_dict['num_groups']
             inter_interval_action = sampled_actions_dict['inter_interval']
 
             # 4. 计算并加总所有5个离散动作的对数概率
             log_prob_disc = (dists['trigger'].log_prob(trigger_action) +
                              dists['salvo_size'].log_prob(salvo_size_action) +
-                             # dists['intra_interval'].log_prob(intra_interval_action) +
+                             dists['intra_interval'].log_prob(intra_interval_action) +
                              dists['num_groups'].log_prob(num_groups_action) +
                              dists['inter_interval'].log_prob(inter_interval_action))
 
@@ -592,7 +555,7 @@ class PPO_continuous(object):
 
             # 6. 准备要存入Buffer的动作向量 (存储原始值u和原始采样索引)
             action_disc_to_store = torch.stack([
-                trigger_action, salvo_size_action, #intra_interval_action,
+                trigger_action, salvo_size_action, intra_interval_action,
                 num_groups_action, inter_interval_action
             ], dim=-1).float()
             action_to_store = torch.cat([u, action_disc_to_store], dim=-1)
@@ -605,24 +568,19 @@ class PPO_continuous(object):
 
             # 使用 clone() 避免原地修改影响 buffer 中存储的动作
             env_salvo_size_action = salvo_size_action.clone()
-            # env_intra_interval_action = intra_interval_action.clone()
+            env_intra_interval_action = intra_interval_action.clone()
             env_num_groups_action = num_groups_action.clone()
             env_inter_interval_action = inter_interval_action.clone()
 
-            # <<< 新增 >>> 创建一个与其它动作形状相同、值为固定值的张量
-            # fixed_intra_interval_action = torch.full_like(trigger_action, FIXED_INTRA_INTERVAL, dtype=torch.float32)
-
-            # print(fixed_intra_interval_action)
-
             # 应用掩码，将不投放的样本的参数置零
             env_salvo_size_action[zero_mask] = 0
-            # env_intra_interval_action[zero_mask] = 0
+            env_intra_interval_action[zero_mask] = 0
             env_num_groups_action[zero_mask] = 0
             env_inter_interval_action[zero_mask] = 0
 
             # 拼接成最终发送给环境的离散动作部分
             final_env_action_disc = torch.stack([
-                trigger_action, env_salvo_size_action, #fixed_intra_interval_action, #env_intra_interval_action,
+                trigger_action, env_salvo_size_action, env_intra_interval_action,
                 env_num_groups_action, env_inter_interval_action
             ], dim=-1).float()
 
@@ -725,9 +683,9 @@ class PPO_continuous(object):
                 discrete_actions_from_buffer = {
                     'trigger': action_batch[:, CONTINUOUS_DIM],
                     'salvo_size': action_batch[:, CONTINUOUS_DIM + 1].long(),
-                    # 'intra_interval': action_batch[:, CONTINUOUS_DIM + 2].long(),
-                    'num_groups': action_batch[:, CONTINUOUS_DIM + 2].long(),# 索引从 +3 改为 +2
-                    'inter_interval': action_batch[:, CONTINUOUS_DIM + 3].long(), # 索引从 +4 改为 +3
+                    'intra_interval': action_batch[:, CONTINUOUS_DIM + 2].long(),
+                    'num_groups': action_batch[:, CONTINUOUS_DIM + 3].long(),
+                    'inter_interval': action_batch[:, CONTINUOUS_DIM + 4].long(),
                 }
 
                 # ######################### Actor 训练 #########################
@@ -921,60 +879,19 @@ class PPO_continuous(object):
         self.Critic.eval()
 
     def save(self, prefix=""):
-        """
-        保存 Actor 和 Critic 模型的权重。
-        - 如果提供了 prefix，则保存到 '胜率模型' 子目录中。
-        - 否则，保存到主运行目录中。
-        """
-        # --- 3. 初始化时创建所有需要的目录 (推荐做法) ---
+        """将模型保存到以训练开始时间命名的专属文件夹中。"""
         try:
             os.makedirs(self.run_save_dir, exist_ok=True)
-            os.makedirs(self.win_rate_dir, exist_ok=True)
-            print(f"训练存档目录已创建: {self.run_save_dir}")
+            print(f"模型将被保存至: {self.run_save_dir}")
         except Exception as e:
-            print(f"创建存档目录失败: {e}")
+            print(f"创建模型文件夹 {self.run_save_dir} 失败: {e}")
+            return
 
-        # --- 1. 根据 prefix 确定目标保存目录 (逻辑更清晰) ---
-        if prefix:
-            target_dir = self.win_rate_dir
-            print(f"胜率模型将被保存至: {target_dir}")
-        else:
-            target_dir = self.run_save_dir
-            print(f"常规模型将被保存至: {target_dir}")
-
-        # --- 2. 循环保存模型 (代码无重复) ---
-        for net_name in ['Actor', 'Critic']:
+        for net in ['Actor', 'Critic']:
             try:
-                # 获取模型对象
-                net_model = getattr(self, net_name)
-
-                # 构造文件名
-                filename = f"{prefix}_{net_name}.pkl" if prefix else f"{net_name}.pkl"
-                full_path = os.path.join(target_dir, filename)
-
-                # 保存模型的状态字典
-                torch.save(net_model.state_dict(), full_path)
+                filename = f"{prefix}_{net}.pkl" if prefix else f"{net}.pkl"
+                full_path = os.path.join(self.run_save_dir, filename)
+                torch.save(getattr(self, net).state_dict(), full_path)
                 print(f"  - {filename} 保存成功。")
-
-            except AttributeError:
-                print(f"  - 错误: 找不到名为 '{net_name}' 的模型。")
             except Exception as e:
-                print(f"  - 保存模型 {net_name} 到 {full_path} 时发生错误: {e}")
-
-    # def save(self, prefix=""):
-    #     """将模型保存到以训练开始时间命名的专属文件夹中。"""
-    #     try:
-    #         os.makedirs(self.run_save_dir, exist_ok=True)
-    #         print(f"模型将被保存至: {self.run_save_dir}")
-    #     except Exception as e:
-    #         print(f"创建模型文件夹 {self.run_save_dir} 失败: {e}")
-    #         return
-    #
-    #     for net in ['Actor', 'Critic']:
-    #         try:
-    #             filename = f"{prefix}_{net}.pkl" if prefix else f"{net}.pkl"
-    #             full_path = os.path.join(self.run_save_dir, filename)
-    #             torch.save(getattr(self, net).state_dict(), full_path)
-    #             print(f"  - {filename} 保存成功。")
-    #         except Exception as e:
-    #             print(f"  - 保存模型 {net} 到 {full_path} 时发生错误: {e}")
+                print(f"  - 保存模型 {net} 到 {full_path} 时发生错误: {e}")

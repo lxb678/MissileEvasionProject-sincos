@@ -2,8 +2,8 @@
 
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOGRUMLP混合架构 import *
-from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_ATTGRUMLP混合架构 import *
+from Interference_code.PPO_model.PPO_evasion_fuza.ConfigAttn import *
 from torch.utils.tensorboard import SummaryWriter
 # from env.AirCombatEnv import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
@@ -24,6 +24,44 @@ def set_seed(env, seed=AGENTPARA.RANDOM_SEED):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+# def set_seed(env, seed=AGENTPARA.RANDOM_SEED, seed_env=True):
+#     """
+#     设置所有相关库的随机种子以保证实验的可复现性。
+#
+#     Args:
+#         env: 强化学习环境对象。
+#         seed (int): 要设置的随机种子。
+#         seed_env (bool): 是否为环境本身设置种子。
+#     """
+#     # 1. 设置 Python, NumPy, PyTorch 的种子
+#     random.seed(seed)
+#     np.random.seed(seed)
+#     torch.manual_seed(seed)
+#
+#     # # 2. 设置 PyTorch 在 CUDA (GPU) 上的种子
+#     # if torch.cuda.is_available():
+#     #     torch.cuda.manual_seed(seed)
+#     #     torch.cuda.manual_seed_all(seed)  # 适用于多GPU环境
+#     #
+#     # # 3. 设置 cuDNN 的行为，以实现确定性 (可能会牺牲性能)
+#     # #    在追求严格复现时开启，在常规训练中可以注释掉以获得更好的性能
+#     # # torch.backends.cudnn.deterministic = True
+#     # # torch.backends.cudnn.benchmark = False
+#     #
+#     # # 4. 为强化学习环境设置种子
+#     # if seed_env and hasattr(env, 'seed'):
+#     #     try:
+#     #         env.seed(seed)
+#     #     except Exception as e:
+#     #         print(f"Warning: Failed to seed environment. Error: {e}")
+#     #
+#     # # （可选）某些较新的 Gym 环境使用 action_space.seed()
+#     # if seed_env and hasattr(env, 'action_space') and hasattr(env.action_space, 'seed'):
+#     #     try:
+#     #         env.action_space.seed(seed)
+#     #     except Exception as e:
+#     #         print(f"Warning: Failed to seed environment action_space. Error: {e}")
+
 
 def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
     """
@@ -42,7 +80,7 @@ def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
 
 # ------------------- Tensorboard 设置 -------------------
 # <<< GRU/RNN 修改 >>>: 在日志文件名中加入 RNN 标识
-model_type_str = "GRU_MLP" if USE_RNN_MODEL else "MLP"
+model_type_str = "ATTGRU" if USE_RNN_MODEL else "MLP"
 writer_log_dir = f'../../log/log_evade_fuza/PPO_{model_type_str}_{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}_load{LOAD_ABLE}'
 writer = SummaryWriter(log_dir=writer_log_dir)
 print(f"Tensorboard 日志将保存在: {writer_log_dir}")

@@ -4,8 +4,8 @@ from torch.nn import *
 # <<< 更改 >>> 导入 Categorical 分布用于多分类离散动作
 from torch.distributions import Bernoulli, Categorical
 from torch.distributions import Normal
-from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Buffer import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.Config import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.Buffer import *
 from torch.optim import lr_scheduler
 import numpy as np
 import os
@@ -388,7 +388,7 @@ class PPO_continuous(object):
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
         self.training_start_time = time.strftime("PPO_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../../save/save_evade_fuza"
+        self.base_save_dir = "../../../save/save_evade_fuza两个导弹"
         win_rate_subdir = "胜率模型"
         # 拼接成完整的存档路径
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
@@ -400,7 +400,7 @@ class PPO_continuous(object):
                 self.load_models_from_directory(model_dir_path)
             else:
                 print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
-                self.load_models_from_directory("../../../test/test_evade")
+                self.load_models_from_directory("../../../test/test_evade两个导弹")
 
     def load_models_from_directory(self, directory_path: str):
         """从指定的文件夹路径加载模型，能自动识别多种命名格式。"""

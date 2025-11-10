@@ -2,8 +2,8 @@
 
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOGRUMLP混合架构 import *
-from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPOGRUMLP混合架构 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigGRU import *
 from torch.utils.tensorboard import SummaryWriter
 # from env.AirCombatEnv import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *

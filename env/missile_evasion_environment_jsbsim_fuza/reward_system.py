@@ -18,8 +18,8 @@ class RewardCalculator:
         # --- 在这里集中定义所有奖励相关的超参数 ---
 
         # [稀疏奖励参数]
-        self.W = 50  # 成功奖励基准
-        self.U = -50  # 失败固定惩罚
+        self.W = 20 #50  # 成功奖励基准
+        self.U = -20 #-50  # 失败固定惩罚
 
         # [高度惩罚参数]
         self.SAFE_ALTITUDE_M = 3000.0 #1000.0
@@ -35,9 +35,10 @@ class RewardCalculator:
 
         # [滚转惩罚参数] (无阈值版本)
         self.MAX_PHYSICAL_ROLL_RATE_RAD_S = np.deg2rad(240.0)
+        # self.MAX_PHYSICAL_ROLL_RATE_RAD_S = np.deg2rad(324.0)
 
         # [速度惩罚参数]
-        self.OPTIMAL_SPEED_FLOOR_MACH = 0.8
+        self.OPTIMAL_SPEED_FLOOR_MACH = 0.8 #0.8
         self.K_SPEED_FLOOR_PENALTY = -2.0
 
         self.DIVE_OUTER_BOUNDARY_M = 7000.0  # 奖励开始出现的外部边界
@@ -69,6 +70,11 @@ class RewardCalculator:
         self.FLARE_EFFECTIVE_DISTANCE_M = 3000.0  # 干扰弹有效投放距离阈值 (3km)
         self.REWARD_FLARE_IN_WINDOW = 0.5  # 在有效窗口内投放的奖励值
         self.PENALTY_FLARE_OUT_WINDOW = -1.0 #-0.2  # 在窗口外投放的惩罚值
+        # <<< 新增结束 >>>
+
+        # <<< 新增：为高G机动奖励定义参数 >>>
+        self.AIRCRAFT_MAX_G = 9.0  # 飞机的最大正G力过载
+        self.HIGH_G_SENSITIVITY = 4.0  # 奖励函数的敏感度，值越大，低G奖励越少，高G奖励越多
         # <<< 新增结束 >>>
 
     def reset(self):
@@ -111,15 +117,16 @@ class RewardCalculator:
         flare_trigger_action = action['discrete_actions'][0]
 
         # 1. 计算所有独立的奖励/惩罚组件
-        reward_posture = 1.0 * self._compute_missile_posture_reward_blend(missile, aircraft) #尾后和三九
+        reward_posture = 1.0 * self._compute_missile_posture_reward_blend(aircraft,missile) #尾后和三九
+
         # reward_posture = 1.0 * self._compute_missile_posture_reward_pure_posture(missile, aircraft) # 纯尾后
         reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #高度惩罚阶跃
         # <<< 核心修正 >>> ---
         # 将提取出的 flare_trigger_action 传递给资源惩罚函数
-        reward_resource = 0.1 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
-        reward_roll_penalty = 0.8 * self._penalty_for_roll_rate_magnitude(aircraft)
-        reward_speed_penalty = 2.0 * self._penalty_for_dropping_below_speed_floor(aircraft)  #1.0速度惩罚还可以再大点感觉，或者加一个速度奖励
-        reward_survivaltime = 0.2  # 每步存活奖励
+        reward_resource = 0.2 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
+        reward_roll_penalty = 0.5 * self._penalty_for_roll_rate_magnitude(aircraft)
+        # reward_speed_penalty = 0.5 * self._penalty_for_dropping_below_speed_floor(aircraft)  #1.0速度惩罚还可以再大点感觉，或者加一个速度奖励
+        # reward_survivaltime = 0.2  # 每步存活奖励
         # reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
         # reward_dive = self._reward_for_tactical_dive_smooth(aircraft, missile)
         reward_coordinated_turn = self._reward_for_coordinated_turn(aircraft, 0.2)
@@ -134,18 +141,28 @@ class RewardCalculator:
 
         # [新] 使用您指定的 ATA Rate 奖励
         w_ata_rate = 1.0  # [新] 为 ATA Rate 设置一个高权重
-        # reward_ata_rate = w_ata_rate * self._reward_for_ata_rate(aircraft, missile, 0.2)
+        reward_ata_rate = w_ata_rate * self._reward_for_ata_rate(aircraft, missile, 0.2)
 
         # [新] 使用 TAA Rate 奖励 (基于飞机速度矢量)
-        w_taa_rate = 1.0 #0.6 #1.0  # [新] 为 TAA Rate 设置一个高权重
-        reward_taa_rate = w_taa_rate * self._reward_for_taa_rate(aircraft, missile, 0.2)
+        # w_taa_rate = 1.0 #0.6 #1.0  # [新] 为 TAA Rate 设置一个高权重
+        # reward_taa_rate = w_taa_rate * self._reward_for_taa_rate(aircraft, missile, 0.2)
 
         # #接近速度奖励
-        reward_closing_velocity = 1.0 * self._reward_for_closing_velocity_change(aircraft, missile)
+        reward_closing_velocity = 0.5 * self._reward_for_closing_velocity_change(aircraft, missile, dt = 0.2)
 
         # <<< 新增：调用干扰弹时机奖励函数 >>>
         # 将新奖励的权重也在这里设置，例如 1.0
-        reward_flare_timing = 1.0 * self._compute_flare_timing_reward(flare_trigger_action, aircraft, missile)
+        reward_flare_timing = 0.5 * self._compute_flare_timing_reward(flare_trigger_action, aircraft, missile)
+
+        # <<< 新增：调用高G机动奖励函数 >>>
+        # 在这里设置新奖励的权重，例如 0.5
+        reward_high_g = 1.0 * self._reward_for_high_g_maneuver(aircraft)
+
+        # 在主函数 calculate_dense_reward 中
+        # reward_ata_rate = self._reward_for_ata_rate(...) # 假设范围是 [0, 1]
+        # reward_high_g_base = self._reward_for_high_g_maneuver(...) # 假设范围是 [0, 1]
+        # 最终奖励 = 基础G力奖励 * 机动有效性
+        final_high_g_reward = 0.5 * reward_high_g * reward_ata_rate
 
         # 2. 将所有组件按权重加权求和 (权重直接在此处定义，与您的代码一致)
         final_dense_reward = (
@@ -153,8 +170,8 @@ class RewardCalculator:
                 reward_altitude +
                 reward_resource +
                 reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的
-                reward_speed_penalty  # reward_for_optimal_speed基准是负的
-                + reward_survivaltime
+                # reward_speed_penalty  # reward_for_optimal_speed基准是负的
+                # + reward_survivaltime
                 # + reward_los
                 # + reward_dive
                 + reward_coordinated_turn
@@ -162,28 +179,183 @@ class RewardCalculator:
                 # + reward_tau_accel
                 + reward_closing_velocity
                 # + reward_ata_rate
-                + reward_taa_rate
+                # + reward_taa_rate
                 + reward_flare_timing
+                # + reward_high_g  # <<< 新增：将高G奖励加入总和 >>>
+                +final_high_g_reward
         )
         # print(
         #     f"reward_posture: {reward_posture:.2f}",
-        #       # f"reward_altitude: {reward_altitude:.2f}",
+        #       f"reward_altitude: {reward_altitude:.2f}",
         #       f"reward_resource: {reward_resource:.2f}",
-        #       # f"reward_roll_penalty: {reward_roll_penalty:.2f}",
+        #       f"reward_roll_penalty: {reward_roll_penalty:.2f}",
         #       # f"reward_speed_penalty: {reward_speed_penalty:.2f}",
         #       #   f"reward_survivaltime: {reward_survivaltime:.2f}",
         #       #   f"reward_los: {reward_los:.2f}",
         #       #   f"reward_dive: {reward_dive:.2f}",
-        #       #   f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
+        #         f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
         #       #   f"reward_increase_tau: {reward_increase_tau:.2f}",
         #       #   f"reward_tau_accel: {reward_tau_accel:.2f}",
-        #       #   f"reward_closing_velocity: {reward_closing_velocity:.2f}",
-        #         # f"reward_ata_rate: {reward_ata_rate:.2f}",
-        #         f"reward_taa_rate: {reward_taa_rate:.2f}",
+        #         f"reward_closing_velocity: {reward_closing_velocity:.2f}",
+        #         f"reward_ata_rate: {reward_ata_rate:.2f}",
+        #         # f"reward_taa_rate: {reward_taa_rate:.2f}",
         #     f"reward_flare_timing: {reward_flare_timing:.2f}",
+        #     f"reward_high_g: {reward_high_g:.2f}",
+        #     f"final_high_g_reward: {final_high_g_reward:.2f}",
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
+
+    def _compute_missile_posture_reward_blend(self, aircraft: Aircraft, missile: Missile):
+        """
+        (最终版) “先置尾再三九”，两者均基于“飞机速度 vs 机弹位置”夹角。
+        <<< 核心修改：如果飞机在导弹后半球，直接奖励1.0 >>>
+        """
+        # --- 1. 计算基础几何关系 ---
+        # a) 获取飞机速度矢量
+        aircraft_v_vec = aircraft.get_velocity_vector()
+        # b) 获取机弹位置矢量 (从导弹指向飞机)
+        los_vec_m_to_a = aircraft.pos - missile.pos
+        # c) 计算距离
+        distance = np.linalg.norm(los_vec_m_to_a)
+
+        # --- 2. <<< 新增：优先进行后半球安全检查 >>> ---
+        #    这是最优先的判断。如果飞机已经机动到导弹后方，
+        #    视为取得了决定性优势，直接给予最大姿态奖励并返回。
+        missile_v_vec = missile.get_velocity_vector()
+        norm_los = np.linalg.norm(los_vec_m_to_a)
+        norm_missile_v = np.linalg.norm(missile_v_vec)
+
+        if norm_los > 1e-6 and norm_missile_v > 1e-6:
+            cos_ata = np.clip(np.dot(los_vec_m_to_a, missile_v_vec) / (norm_los * norm_missile_v), -1.0, 1.0)
+            if cos_ata < 0:
+                # 如果飞机在导弹后半球 (ATA > 90度)，直接返回 1.0 的高额奖励
+                return 1.0
+        # --- 后半球检查结束 ---
+
+        # --- 3. 计算“飞机速度矢量”与“机弹位置矢量”夹角的余弦值 ---
+        #    (只有在前半球时，才会执行到这里)
+        norm_v = np.linalg.norm(aircraft_v_vec)
+        if norm_v < 1e-6 or norm_los < 1e-6:
+            return 0.0  # 无法计算，返回0
+
+        cos_angle = np.clip(np.dot(aircraft_v_vec, los_vec_m_to_a) / (norm_v * norm_los), -1.0, 1.0)
+
+        # --- 4. 基于同一个cos_angle，计算两种战术奖励 ---
+
+        # a) 远距离“置尾”奖励 (Tail-chase reward)
+        #    目标: 夹角为0° (cos=1)，即直接飞离导弹。
+        reward_tail_chase = cos_angle
+
+        # b) 近距离“三九线”奖励 (Beaming reward)
+        #    目标: 夹角为90° (cos=0)。我们用高斯函数来奖励这个姿态。
+        angle_rad = np.arccos(cos_angle)  # 范围 [0, pi]
+        angle_deg = np.rad2deg(angle_rad)  # 范围 [0, 180]
+        angle_error_deg = abs(angle_deg - 90)  # 与90度的误差
+        reward_three_nine = math.exp(-(angle_error_deg ** 2) / (2 * self.ASPECT_REWARD_WIDTH_DEG ** 2))
+
+        # --- 5. 根据距离进行平滑融合 ---
+        #    (原有的安全检查逻辑已移到函数开头并被强化)
+        if distance <= 3000.0: #2000.0:
+            return reward_three_nine
+        elif distance >= 4000.0: #3000.0:
+            return reward_tail_chase
+        else:
+            # 在 3-4 km 之间线性混合
+            alpha = (distance - 3000.0) / 1000.0  # 0->1
+            # 距离越近，越偏向"三九"；距离越远，越偏向"置尾"
+            return (1 - alpha) * reward_three_nine + alpha * reward_tail_chase
+
+    # def _compute_missile_posture_reward_blend(self, aircraft: Aircraft, missile: Missile):
+    #     """
+    #     (最终版) “先置尾再三九”，两者均基于“飞机速度 vs 机弹位置”夹角。
+    #     """
+    #     # --- 1. 计算基础几何关系 ---
+    #     # a) 获取飞机速度矢量
+    #     aircraft_v_vec = aircraft.get_velocity_vector()
+    #     # b) 获取机弹位置矢量 (从导弹指向飞机)
+    #     los_vec_m_to_a = aircraft.pos - missile.pos
+    #     # c) 计算距离
+    #     distance = np.linalg.norm(los_vec_m_to_a)
+    #
+    #     # d) 计算“飞机速度矢量”与“机弹位置矢量”夹角的余弦值
+    #     norm_v = np.linalg.norm(aircraft_v_vec)
+    #     norm_los = np.linalg.norm(los_vec_m_to_a)
+    #     if norm_v < 1e-6 or norm_los < 1e-6:
+    #         return 0.0  # 无法计算，返回0
+    #
+    #     cos_angle = np.clip(np.dot(aircraft_v_vec, los_vec_m_to_a) / (norm_v * norm_los), -1.0, 1.0)
+    #
+    #     # --- 2. 基于同一个cos_angle，计算两种战术奖励 ---
+    #
+    #     # a) 远距离“置尾”奖励 (Tail-chase reward)
+    #     #    目标: 夹角为0° (cos=1)，即直接飞离导弹。
+    #     reward_tail_chase = cos_angle
+    #
+    #     # b) 近距离“三九线”奖励 (Beaming reward)
+    #     #    目标: 夹角为90° (cos=0)。我们用高斯函数来奖励这个姿态。
+    #     angle_rad = np.arccos(cos_angle)  # 范围 [0, pi]
+    #     angle_deg = np.rad2deg(angle_rad)  # 范围 [0, 180]
+    #     angle_error_deg = abs(angle_deg - 90)  # 与90度的误差
+    #     reward_three_nine = math.exp(-(angle_error_deg ** 2) / (2 * self.ASPECT_REWARD_WIDTH_DEG ** 2))
+    #
+    #     # --- 3. 应用安全检查 ---
+    #     #    如果飞机已在导弹后半球，则取消任何负面惩罚 (仅对"置尾"奖励有效)
+    #     missile_v_vec = missile.get_velocity_vector()
+    #     norm_missile_v = np.linalg.norm(missile_v_vec)
+    #     if norm_missile_v > 1e-6:
+    #         cos_ata = np.dot(los_vec_m_to_a, missile_v_vec) / (norm_los * norm_missile_v)
+    #         if cos_ata < 0:
+    #             # 如果飞机在导弹后半球 (ATA > 90度)，直接返回 1.0 的高额奖励
+    #             return 1.0
+    #         # if cos_ata < 0 and reward_tail_chase < 0:
+    #         #     reward_tail_chase = 0.0
+    #
+    #     # --- 4. 根据距离进行平滑融合 ---
+    #     if distance <= 2000.0:
+    #         return reward_three_nine
+    #     elif distance >= 3000.0:
+    #         return reward_tail_chase
+    #     else:
+    #         # 在 2-3 km 之间线性混合
+    #         alpha = (distance - 2000.0) / 1000.0  # 0->1
+    #         # 距离越近，越偏向"三九"；距离越远，越偏向"置尾"
+    #         return (1 - alpha) * reward_three_nine + alpha * reward_tail_chase
+
+    # <<< 新增：高G机动奖励函数 >>>
+    def _reward_for_high_g_maneuver(self, aircraft: Aircraft) -> float:
+        """
+        奖励飞机执行高G机动。
+        奖励的大小与总法向过载正相关。
+        """
+        try:
+            # 1. 获取当前的法向G力 (nz)
+            #    假设：平飞时 nz=1.0, 3G转弯时 nz=3.0
+            nz = aircraft.get_normal_g_force()
+        except AttributeError:
+            print("错误: 您的 Aircraft 类中没有 get_normal_g_force() 方法。")
+            return 0.0
+
+        # 2. 我们只奖励正G力，不奖励负G（推杆）机动
+        if nz <= 0:
+            return 0.0
+
+        # 3. <<< 核心修改：直接用总G力进行归一化 >>>
+        #    将当前G力映射到 [0, 1] 区间
+        if self.AIRCRAFT_MAX_G <= 1e-6:
+            return 0.0  # 避免除零
+
+        normalized_g = nz / self.AIRCRAFT_MAX_G
+        normalized_g = np.clip(normalized_g, 0.0, 1.0)
+
+        # 4. 使用 tanh 函数进行平滑塑形
+        reward = normalized_g * 1.0
+        # reward = np.tanh(normalized_g * 1.0)
+
+        # # 调试打印
+        # print(f"NZ: {nz:.2f} G, Norm G: {normalized_g:.2f}, Reward: {reward:.3f}")
+
+        return reward
 
         # <<< 新增：干扰弹投放时机奖励的计算函数 >>>
 
@@ -211,53 +383,110 @@ class RewardCalculator:
 
     # --- (中文) 下面是所有从您主环境文件中迁移过来的、正在使用的私有奖励计算方法 ---
 
-    def _reward_for_closing_velocity_change(self, aircraft: Aircraft, missile: Missile):
+    def _reward_for_closing_velocity_change(self, aircraft: Aircraft, missile: Missile, dt: float):
         """
-        (V10 - 时间变化版)
-        奖励“接近速度”相对于上一时间步的减小量。
-        这是一个简单、自适应且有效的奖励塑形方法。
+        (V2 - 健壮版) 奖励“接近速度”的减小。
+        - 移除了硬编码的dt。
+        - 简化了归一化，使用tanh和敏感度参数。
+        - (可选) 增加了前半球门控。
         """
         # --- 1. 计算当前“实际”接近速度 ---
-        # a) 相对位置和速度矢量
         relative_pos_vec = aircraft.pos - missile.pos
         relative_vel_vec = aircraft.get_velocity_vector() - missile.get_velocity_vector()
-
         distance = np.linalg.norm(relative_pos_vec)
-        if distance < 1e-6:
-            self.prev_closing_velocity = None  # 重置历史
+
+        # --- (推荐) 2. 前半球门控 ---
+        missile_v_vec = missile.get_velocity_vector()
+        norm_missile_v = np.linalg.norm(missile_v_vec)
+        if distance < 1e-6 or norm_missile_v < 1e-6:
+            self.prev_closing_velocity = None
             return 0.0
 
-        # b) 接近速度 = - (相对速度在视线方向上的投影)
-        closing_velocity_current = -np.dot(relative_vel_vec, relative_pos_vec) / distance
+        cos_ata = np.dot(relative_pos_vec, missile_v_vec) / (distance * norm_missile_v)
+        if cos_ata < 0:  # 飞机在导弹后半球，威胁解除
+            self.prev_closing_velocity = None  # 重置历史
+            return 1.0  # <<< MODIFIED >>> 给予最大奖励
+            # return 0.0  # 威胁解除时，不计算此奖励
 
-        # --- 2. 计算奖励 ---
+        # --- 3. 计算接近速度 ---
+        # 避免在距离为0时除零
+        closing_velocity_current = -np.dot(relative_vel_vec, relative_pos_vec) / (distance + 1e-6)
+
+        # --- 4. 计算奖励 ---
         reward = 0.0
         if self.prev_closing_velocity is not None:
             # a) 计算接近速度的变化量
             delta_V_close = closing_velocity_current - self.prev_closing_velocity
 
-            # b) 核心逻辑：我们奖励“负的变化”，即接近速度的减小
-            #    所以奖励与 -delta_V_close 成正比
+            # b) 核心逻辑：奖励与“接近速度的减小量”成正比
+            #    即奖励与 -delta_V_close 成正比
             reward_base = -delta_V_close
 
-            # c) 缩放奖励
-            #    归一化因子可以是导弹速度 * dt，代表了在一个步长时间内可能的最大速度变化尺度
-            dt = 0.2  # <--- 关键！需要传入决策步长 dt
-            normalization_factor = np.linalg.norm(missile.get_velocity_vector()) * dt + 1e-6
+            # c) (新) 使用敏感度参数和tanh进行平滑、稳定的缩放
+            #    SENSITIVITY决定了多大的速度变化能让奖励饱和。
+            #    例如，SENSITIVITY=0.1 意味着 +/- 10 m/s 的速度变化就能让奖励接近 +/- 1.0
+            #    这个值需要根据您的环境进行调整。
+            SENSITIVITY = 0.1
+            reward = np.tanh(reward_base * SENSITIVITY)
 
-            normalized_reward = reward_base / normalization_factor
-
-            reward = np.tanh(normalized_reward * 5.0)  # 乘以系数并用tanh平滑
-
-        # # 调试打印
-        # if self.prev_closing_velocity is not None:
-        #     print(
-        #         f"PrevV_c:{self.prev_closing_velocity:.1f} | CurrV_c:{closing_velocity_current:.1f} | Delta:{delta_V_close:.1f} | Reward:{reward:.3f}")
-
-        # --- 3. 更新历史状态以备下一步使用 ---
+        # --- 5. 更新历史状态以备下一步使用 ---
         self.prev_closing_velocity = closing_velocity_current
 
-        return reward
+        if reward < 0.0:
+            return 0.0
+        else:
+            return reward
+
+    # def _reward_for_closing_velocity_change(self, aircraft: Aircraft, missile: Missile):
+    #     """
+    #     (V10 - 时间变化版)
+    #     奖励“接近速度”相对于上一时间步的减小量。
+    #     这是一个简单、自适应且有效的奖励塑形方法。
+    #     """
+    #     # --- 1. 计算当前“实际”接近速度 ---
+    #     # a) 相对位置和速度矢量
+    #     relative_pos_vec = aircraft.pos - missile.pos
+    #     relative_vel_vec = aircraft.get_velocity_vector() - missile.get_velocity_vector()
+    #
+    #     distance = np.linalg.norm(relative_pos_vec)
+    #     if distance < 1e-6:
+    #         self.prev_closing_velocity = None  # 重置历史
+    #         return 0.0
+    #
+    #     # b) 接近速度 = - (相对速度在视线方向上的投影)
+    #     closing_velocity_current = -np.dot(relative_vel_vec, relative_pos_vec) / distance
+    #
+    #     # --- 2. 计算奖励 ---
+    #     reward = 0.0
+    #     if self.prev_closing_velocity is not None:
+    #         # a) 计算接近速度的变化量
+    #         delta_V_close = closing_velocity_current - self.prev_closing_velocity
+    #
+    #         # b) 核心逻辑：我们奖励“负的变化”，即接近速度的减小
+    #         #    所以奖励与 -delta_V_close 成正比
+    #         reward_base = -delta_V_close
+    #
+    #         # if reward_base <= 0:
+    #         #     reward = 0.0
+    #         # else:
+    #         # c) 缩放奖励
+    #         #    归一化因子可以是导弹速度 * dt，代表了在一个步长时间内可能的最大速度变化尺度
+    #         dt = 0.2  # <--- 关键！需要传入决策步长 dt
+    #         normalization_factor = np.linalg.norm(missile.get_velocity_vector()) * dt + 1e-6
+    #
+    #         normalized_reward = reward_base / normalization_factor
+    #
+    #         reward = np.tanh(normalized_reward * 5.0)  # 乘以系数并用tanh平滑
+    #
+    #     # # 调试打印
+    #     # if self.prev_closing_velocity is not None:
+    #     #     print(
+    #     #         f"PrevV_c:{self.prev_closing_velocity:.1f} | CurrV_c:{closing_velocity_current:.1f} | Delta:{delta_V_close:.1f} | Reward:{reward:.3f}")
+    #
+    #     # --- 3. 更新历史状态以备下一步使用 ---
+    #     self.prev_closing_velocity = closing_velocity_current
+    #
+    #     return reward
 
 
 
@@ -294,8 +523,9 @@ class RewardCalculator:
 
         # b) 如果飞机在导弹后半球 (ATA > 90度, cos_ata < 0)，则威胁解除
         if cos_ata < 0:
-            self.prev_tta_rad = None  # 重置历史，下次进入前半球时重新计算
-            return 0.0  # 不给予任何奖励
+            self.prev_taa_rad = None  # 重置历史，下次进入前半球时重新计算
+            return 1.0  # <<< MODIFIED >>> 给予最大奖励
+            # return 0.0  # 不给予任何奖励
         # --- 修正结束 ---
 
 
@@ -340,7 +570,8 @@ class RewardCalculator:
         # b) 如果飞机在导弹后半球 (ATA > 90度, cos_ata < 0)，则威胁解除
         if cos_ata < 0:
             self.prev_ata_rad = None  # 重置历史，下次进入前半球时重新计算
-            return 0.0  # 不给予任何奖励
+            return 1.0  # <<< MODIFIED >>> 给予最大奖励
+            # return 0.0  # 不给予任何奖励
         # --- 修正结束 ---
 
         # 3. 计算当前的 ATA 角
@@ -354,11 +585,26 @@ class RewardCalculator:
         delta_ata_rad = abs(current_ata_rad - self.prev_ata_rad)
         ata_rate_rad_s = delta_ata_rad / dt if dt > 1e-6 else 0.0
 
-        # 5. 更新历史记录并返回奖励
+        # 5. <<< 核心修改：使用 tanh 函数进行归一化 >>>
+        # a) 定义一个敏感度参数。这个参数决定了多大的 ata_rate 能让奖励接近饱和(1.0)。
+        #    你需要根据你的环境来调整这个值。
+        #    例如，如果 ata_rate 通常在 0.1 rad/s 左右，可以设 SENSITIVITY = 10.0
+        SENSITIVITY = 10.0
+
+        normalized_reward = math.tanh(ata_rate_rad_s * SENSITIVITY)
+
+        # 6. 更新历史记录并返回奖励
         self.prev_ata_rad = current_ata_rad
 
-        SCALING_FACTOR = 10.0
-        return ata_rate_rad_s * SCALING_FACTOR
+        # SCALING_FACTOR 可以设为1，因为奖励已经被归一化到 [0, 1] 区间了
+        # 当然也可以再乘以一个因子来调整权重
+        return normalized_reward
+
+        # # 5. 更新历史记录并返回奖励
+        # self.prev_ata_rad = current_ata_rad
+        #
+        # SCALING_FACTOR = 10.0
+        # return ata_rate_rad_s * SCALING_FACTOR
 
     # 新的奖励函数:
     def _reward_for_increasing_tau(self, aircraft: Aircraft, missile: Missile):
@@ -382,9 +628,10 @@ class RewardCalculator:
 
         if cos_ata < 0:  # 飞机在后半球
             self.prev_tau = None  # 重置历史
+            return 1.0  # <<< MODIFIED >>> 给予最大奖励
             # 在这种情况下，威胁已经解除，我们可以给予一个固定的、小的正奖励来鼓励维持这种状态
             # 或者直接返回0，避免干扰其他奖励。返回0更安全。
-            return 0.0
+            # return 0.0
             # --- 修正结束 ---
 
         # b) 计算径向趋近速度 (closing velocity)
@@ -465,7 +712,8 @@ class RewardCalculator:
 
         # d) 如果飞机已经在导弹的后半球 (视为失锁)，并且计算出的奖励是负的，则强制改为0
         if is_aircraft_behind_missile and reward < 0:
-            reward = 0.0
+            return 1.0  # <<< MODIFIED >>> 给予最大奖励
+            # reward = 0.0
 
         # 8. 更新上一步的速度 (原步骤7)
         self.prev_missile_v_mag = missile_v_mag
@@ -516,45 +764,45 @@ class RewardCalculator:
         # 5. 返回最终计算出的奖励值
         return reward * 1.0
 
-    def _compute_missile_posture_reward_blend(self, missile: Missile, aircraft: Aircraft):
-        """
-        (v6 - 平滑融合版)
-        距离阈值：
-            d <= 4 km : 仅使用三九奖励
-            d >= 5 km : 仅使用纯姿态奖励
-            4 km < d < 5 km : 两者线性混合
-        """
-        # 0. 距离计算
-        los_vec_m_to_a = aircraft.pos[0:3] - missile.pos[0:3]
-        distance = np.linalg.norm(los_vec_m_to_a)
-
-        # --- 三九奖励 ---
-        reward_three_nine = self._reward_for_aspect_angle(aircraft, missile)
-
-        # --- 纯姿态奖励 ---
-        missile_v_vec = missile.get_velocity_vector()
-        aircraft_v_vec = aircraft.get_velocity_vector()
-        norm_product = np.linalg.norm(missile_v_vec) * np.linalg.norm(aircraft_v_vec) + 1e-6
-        angle_cos = np.dot(missile_v_vec, aircraft_v_vec) / norm_product
-        angle_cos = np.clip(angle_cos, -1.0, 1.0)
-        reward_pure = angle_cos
-
-        # ATA失锁检查
-        norm_product_ata = np.linalg.norm(los_vec_m_to_a) * np.linalg.norm(missile_v_vec) + 1e-6
-        cos_ata = np.dot(los_vec_m_to_a, missile_v_vec) / norm_product_ata
-        cos_ata = np.clip(cos_ata, -1.0, 1.0)
-        if cos_ata < 0 and reward_pure < 0:
-            reward_pure = 0.0
-
-        # --- 平滑融合 ---
-        if distance <= 2000.0: #4000.0:
-            return reward_three_nine
-        elif distance >= 3000.0: #5000.0:
-            return reward_pure
-        else:
-            # 在 4-5 km 之间线性混合
-            alpha = (distance - 2000.0) / 1000.0  # 0~1
-            return (1 - alpha) * reward_three_nine + alpha * reward_pure
+    # def _compute_missile_posture_reward_blend(self, missile: Missile, aircraft: Aircraft):
+    #     """
+    #     (v6 - 平滑融合版)
+    #     距离阈值：
+    #         d <= 4 km : 仅使用三九奖励
+    #         d >= 5 km : 仅使用纯姿态奖励
+    #         4 km < d < 5 km : 两者线性混合
+    #     """
+    #     # 0. 距离计算
+    #     los_vec_m_to_a = aircraft.pos[0:3] - missile.pos[0:3]
+    #     distance = np.linalg.norm(los_vec_m_to_a)
+    #
+    #     # --- 三九奖励 ---
+    #     reward_three_nine = self._reward_for_aspect_angle(aircraft, missile)
+    #
+    #     # --- 纯姿态奖励 ---
+    #     missile_v_vec = missile.get_velocity_vector()
+    #     aircraft_v_vec = aircraft.get_velocity_vector()
+    #     norm_product = np.linalg.norm(missile_v_vec) * np.linalg.norm(aircraft_v_vec) + 1e-6
+    #     angle_cos = np.dot(missile_v_vec, aircraft_v_vec) / norm_product
+    #     angle_cos = np.clip(angle_cos, -1.0, 1.0)
+    #     reward_pure = angle_cos
+    #
+    #     # ATA失锁检查
+    #     norm_product_ata = np.linalg.norm(los_vec_m_to_a) * np.linalg.norm(missile_v_vec) + 1e-6
+    #     cos_ata = np.dot(los_vec_m_to_a, missile_v_vec) / norm_product_ata
+    #     cos_ata = np.clip(cos_ata, -1.0, 1.0)
+    #     if cos_ata < 0 and reward_pure < 0:
+    #         reward_pure = 0.0
+    #
+    #     # --- 平滑融合 ---
+    #     if distance <= 2000.0: #4000.0:
+    #         return reward_three_nine
+    #     elif distance >= 3000.0: #5000.0:
+    #         return reward_pure
+    #     else:
+    #         # 在 4-5 km 之间线性混合
+    #         alpha = (distance - 2000.0) / 1000.0  # 0~1
+    #         return (1 - alpha) * reward_three_nine + alpha * reward_pure
 
     def _compute_altitude_reward(self, aircraft: Aircraft):
         """
@@ -629,11 +877,12 @@ class RewardCalculator:
         # 从状态向量中获取当前的实际滚转角速度
         p_real_rad_s = aircraft.roll_rate_rad_s
         if self.MAX_PHYSICAL_ROLL_RATE_RAD_S < 1e-6: return 0.0
+        # if np.rad2deg(abs(p_real_rad_s)) < 120 : return 0.0
         # 将当前的滚转速率归一化到 [0, 1] 范围
         #    (当前速率 / 最大速率)
         #    防止除零错误
         normalized_roll_rate = abs(p_real_rad_s) / self.MAX_PHYSICAL_ROLL_RATE_RAD_S
-        return (normalized_roll_rate ** 2) * -1.0  # 返回基准值[0,1]
+        return (normalized_roll_rate) * -1.0  # 返回基准值[0,1]
 
     def _penalty_for_dropping_below_speed_floor(self, aircraft: Aircraft):
         """
@@ -655,7 +904,7 @@ class RewardCalculator:
             # c) 计算最终惩罚
             #    可以使用线性或二次惩罚。二次惩罚 (平方) 会让惩罚随着速度的降低而急剧增加，
             #    这能更强烈地阻止AI进入危险的低速区。
-            penalty_base = normalized_deficit ** 2  # 您的代码使用的是二次惩罚
+            penalty_base = normalized_deficit  # 您的代码使用的是二次惩罚
             return self.K_SPEED_FLOOR_PENALTY * penalty_base
         return 0.0
 
@@ -722,7 +971,8 @@ class RewardCalculator:
         # d) 如果飞机在导弹后半球 (ATA > 90度, cos(ATA) < 0)，则奖励为0
         if cos_ata < 0:
             self.prev_los_vec = current_los_vec  # 仍然需要更新状态以备下一帧
-            return 0.0
+            return 1.0  # <<< MODIFIED >>> 给予最大奖励
+            # return 0.0
         # --- 修正结束 ---
 
         # 如果是第一步，则初始化并返回0
@@ -848,16 +1098,16 @@ class RewardCalculator:
         (V5 - 最终版) 直接从JSBSim读取nz，只奖励正确的拉杆转弯。
         这个版本简单、直接且不会出错。
         """
-        # 1. 计算滚转因子 (请务必最后一次确认滚转角的正确索引，很可能是[3]！)
-        try:
-            roll_rad = aircraft.state_vector[6]  # <--- 滚转角 phi
-        except IndexError:
-            return 0.0
-
-        roll_factor = math.sin(abs(roll_rad))
-        if abs(np.rad2deg(roll_rad)) > 90:
-            roll_factor = math.sin(math.pi - abs(roll_rad))
-        roll_factor = np.clip(roll_factor, 0, 1.0)
+        # # 1. 计算滚转因子 (请务必最后一次确认滚转角的正确索引，很可能是[3]！)
+        # try:
+        #     roll_rad = aircraft.state_vector[6]  # <--- 滚转角 phi
+        # except IndexError:
+        #     return 0.0
+        #
+        # roll_factor = math.sin(abs(roll_rad))
+        # if abs(np.rad2deg(roll_rad)) > 90:
+        #     roll_factor = math.sin(math.pi - abs(roll_rad))
+        # roll_factor = np.clip(roll_factor, 0, 1.0)
 
         # 2. 直接从飞机对象获取法向G力 (nz)
         try:
@@ -876,7 +1126,8 @@ class RewardCalculator:
         g_factor = np.clip(g_factor, 0, 1.0)
 
         # 4. 最终奖励
-        reward = -1.0 * roll_factor * g_factor
+        # reward = -1.0 * roll_factor * g_factor
+        reward = -1.0  * g_factor
 
         # 调试打印
         # print(f"RollF: {roll_factor:.2f} | NZ: {nz:.2f} | G_F: {g_factor:.2f} | Reward: {reward:.3f}")

@@ -1,10 +1,10 @@
 import numpy as np
 import random
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构 import *
-from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_混合架构 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.Config import *
 #from env.AirCombatEnv import *
 # from env.AirCombatEnv6_maneuver_flare import *
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim import *
 import time
 
 LOAD_ABLE = True  #是否使用save文件夹中的模型
@@ -64,8 +64,8 @@ set_seed(env)
 # <<< 更改 >>> 确保这里的模型路径与您训练时保存的路径一致
 # 假设您的模型保存在 "../../test/test_evade"
 # model_path = "../../test/test_evade" # 或者您训练模型时使用的其他路径
-# model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPO_2025-11-09_23-12-34"
+model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
+# model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPO_2025-11-09_23-12-34"
 agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_path)
 
 success_num = 0
