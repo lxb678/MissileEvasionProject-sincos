@@ -6,7 +6,7 @@
 
 import random
 # <<< GRU 修改 >>>: 导入包含GRU模型的PPO实现
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTGRUMLP混合架构 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.旧代码.Hybrid_PPO_ATTGRUMLP混合架构 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 # <<< 更改 >>>: 确保您正在使用的环境与训练时一致
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *

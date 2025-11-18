@@ -29,7 +29,7 @@ class Missile:
         # --- 导引头/引信参数 ---
         self.seeker_max_range = 30000.0  # 导引头最大搜索范围 (m)
         self.seeker_fov_rad = np.deg2rad(90)  # 导引头最大视场角度 (弧度)
-        self.seeker_max_omega_rad_s = 12.0  # 导引头最大角速度 (弧度/秒)
+        self.seeker_max_omega_rad_s = np.deg2rad(90.0)#12.0 #np.deg2rad(100.0) #12.0  # 导引头最大角速度 (弧度/秒)
         self.seeker_max_time = 60.0  # 导引头最大搜索时间 (秒)
 
     def update_with_los_rate(self, dt: float, theta_L_dot: float, phi_L_dot: float):

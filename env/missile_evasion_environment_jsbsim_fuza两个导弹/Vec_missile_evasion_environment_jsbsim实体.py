@@ -10,7 +10,7 @@ from gymnasium import spaces
 from .AircraftJSBSim_DirectControl import Aircraft
 from .missile import Missile
 from .decoys import FlareManager
-from .reward_system import RewardCalculator
+from .reward_system实体 import RewardCalculator
 from .tacview_interface import TacviewInterface
 
 # <<< 新增 >>> 从PPO代码文件导入动作空间定义，确保一致性
@@ -54,21 +54,19 @@ class AirCombatEnv(gym.Env):
             )
         })
 
-        # <<< 核心修改：更新观测空间定义以匹配 sin/cos 格式 >>>
-        # --- 您当前的代码 (Before) ---
-        # # 每个导弹有3个相对观测量: [o_dis, o_beta, o_theta_L]
-        # # 飞机自身有6个观测量: [o_av, o_h, o_ae, o_am, o_ir, o_q]
-        # # 总维度 = 3 * num_missiles + 6
+        # <<< 多导弹更改 >>> 定义观测空间 (Observation Space)
+        # 每个导弹有3个相对观测量: [o_dis, o_beta, o_theta_L]
+        # 飞机自身有6个观测量: [o_av, o_h, o_ae, o_am, o_ir, o_q]
+        # 总维度 = 3 * num_missiles + 6
         # observation_dim = 3 * self.num_missiles + 6
-
-        # --- 修改后的代码 (After) ---
+        # <<< 多导弹更改 >>> 定义观测空间 (Observation Space) - 【核心修改】
         # 每个导弹: o_dis(1) + o_beta(sin,cos)(2) + o_theta_L(sin,cos)(2) = 5
         # 飞机自身: o_av(1) + o_h(1) + o_ae(sin,cos)(2) + o_am(sin,cos)(2) + o_ir(1) + o_q(1) = 8
         # 总维度 = 5 * num_missiles + 8
         observation_dim = 5 * self.num_missiles + 8
 
         self.observation_space = spaces.Box(
-            low=-np.inf,
+            low=-np.inf, # sin/cos 的值域是[-1, 1]，但为保持一致性，可以仍用-inf, inf
             high=np.inf,
             shape=(observation_dim,),
             dtype=np.float64
@@ -84,7 +82,7 @@ class AirCombatEnv(gym.Env):
         self.dt_dec = 0.2
         self.D_max = 30000.0
         self.Angle_IR_rad = np.deg2rad(90)
-        self.omega_max_rad_s = np.deg2rad(90.0) #12.0
+        self.omega_max_rad_s = np.deg2rad(90.0)#12.0 #np.deg2rad(100.0) #12.0
         self.T_max = 60.0
 
         # --- 核心组件实例化 ---
@@ -195,7 +193,7 @@ class AirCombatEnv(gym.Env):
             x_m = R_dist * (-np.cos(theta1))
             z_m = R_dist * np.sin(theta1)
             y_m = y_t + np.random.uniform(-2000, 2000)
-            missile_vel = np.random.uniform(700, 850)
+            missile_vel = np.random.uniform(700, 900)
 
             # 计算初始视线角
             R_vec = self.aircraft.pos - np.array([x_m, y_m, z_m])
@@ -310,6 +308,9 @@ class AirCombatEnv(gym.Env):
                 reward += self.reward_calculator.U
         else:  # 如果回合仍在继续
             # 计算密集奖励
+            # <<< 关键调用修改 >>>
+            # 现在，我们将完整的 `action` 字典（可能包含 "attention_weights"）
+            # 直接传递给奖励计算器。
             reward += self.reward_calculator.calculate_dense_reward(
                 self.aircraft, self.missiles, self.o_ir, self.N_infrared, action, self.t_now
             )
@@ -416,20 +417,18 @@ class AirCombatEnv(gym.Env):
             )
 
     def _get_observation(self) -> np.ndarray:
-        """ <<< 核心修改 (V3 - sin/cos 角度表示法) >>> 组装观测向量 """
+        """ <<< 多导弹更改 (V3 - sin/cos 角度表示法) >>> """
         obs_parts = []
 
         # --- 1. 遍历每个导弹，计算其相对观测值 ---
         for missile in self.missiles:
-            # 检查导弹是否有效（已发射且未终结）
             if missile.terminated or self.t_now < missile.launch_time:
-                # --- 修改后的无效导弹“指纹” ---
-                # 如果导弹无效，提供一个标准的“无威胁”观测值
-                o_dis_norm = 1.0  # 距离
+                # 无效导弹提供标准“无威胁”观测值
+                o_dis_norm = 1.0
                 o_beta_sin, o_beta_cos = 0.0, 1.0  # beta=0度 (正前方) -> sin(0)=0, cos(0)=1
                 o_theta_L_sin, o_theta_L_cos = 0.0, 1.0  # theta_L=0度 (水平) -> sin(0)=0, cos(0)=1
                 obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_sin, o_theta_L_cos])
-                continue  # 处理下一个导弹
+                continue
 
             # --- 以下代码只对有效导弹执行 ---
             R_vec = self.aircraft.pos - missile.pos
@@ -440,35 +439,26 @@ class AirCombatEnv(gym.Env):
             Ry_rel = missile.pos[1] - self.aircraft.pos[1]
             o_theta_L_rel_rad = np.arcsin(np.clip(Ry_rel / (R_rel + 1e-6), -1.0, 1.0))
 
-            # --- 核心逻辑修改：从线性归一化到 sin/cos 编码 ---
-            # 您当前的代码 (Before)
+            # --- 更改前 (Before) ---
             o_dis_norm = np.clip(int(R_rel / 1000.0), 0, 10) / 10
             # o_beta_norm = o_beta_rad / (2 * np.pi)
             # o_theta_L_rel_norm = (o_theta_L_rel_rad + np.pi / 2) / np.pi
             # obs_parts.extend([o_dis_norm, o_beta_norm, o_theta_L_rel_norm])
 
-            # 修改后的代码 (After)
-            # o_dis_norm = np.clip(R_rel / 30000.0, 0, 1)  # 距离使用更平滑的归一化
+            # --- 更改后 (After) ---
+            # o_dis_norm = np.clip(R_rel / 30000.0, 0, 1)  # 距离用更平滑的归一化
             o_beta_sin = np.sin(o_beta_rad)
             o_beta_cos = np.cos(o_beta_rad)
+            # o_theta_L_rel_rad 的范围是 [-pi/2, pi/2]，sin/cos 转换依然有效且有益
             o_theta_L_sin = np.sin(o_theta_L_rel_rad)
             o_theta_L_cos = np.cos(o_theta_L_rel_rad)
             obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_sin, o_theta_L_cos])
 
-        # --- 2. 获取飞机自身状态 (也需要修改) ---
+        # --- 2. 获取飞机自身状态 ---
         aircraft_pitch_rad = self.aircraft.state_vector[4]  # 俯仰角 theta
         aircraft_bank_rad = self.aircraft.state_vector[6]  # 滚转角 phi
 
-        # 您当前的代码 (Before)
-        # o_av_norm = (self.aircraft.velocity - 100) / 300
-        # o_h_norm = (self.aircraft.pos[1] - 1000) / 14000
-        # o_ae_norm = (self.aircraft.state_vector[4] + np.pi / 2) / np.pi
-        # o_am_norm = (self.aircraft.state_vector[6] + np.pi) / (2 * np.pi)
-        # o_q_norm = (self.aircraft.roll_rate_rad_s + 4.0 * np.pi / 3.0) / (8.0 * np.pi / 3.0)
-        # o_ir_norm = self.o_ir / self.N_infrared
-        # aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_norm, o_ir_norm, o_q_norm]
-
-        # 修改后的代码 (After)
+        # --- 更改后 (After) ---
         o_av_norm = (self.aircraft.velocity - 100) / 300
         o_h_norm = (self.aircraft.pos[1] - 1000) / 14000
         o_ae_sin = np.sin(aircraft_pitch_rad)  # 俯仰角
@@ -476,7 +466,7 @@ class AirCombatEnv(gym.Env):
         o_am_sin = np.sin(aircraft_bank_rad)  # 滚转角
         o_am_cos = np.cos(aircraft_bank_rad)
         o_ir_norm = self.o_ir / self.N_infrared
-        # 滚转速率 o_q 不是角度，是角速度，保持线性归一化
+        # 滚转速率 o_q 不是角度，是角速度，不需要也不能用sin/cos，保持线性归一化
         o_q_norm = (self.aircraft.roll_rate_rad_s + 4.0 * np.pi / 3.0) / (8.0 * np.pi / 3.0)
 
         aircraft_obs = [o_av_norm, o_h_norm, o_ae_sin, o_ae_cos, o_am_sin, o_am_cos, o_ir_norm, o_q_norm]
@@ -723,8 +713,8 @@ class AirCombatEnv(gym.Env):
 
             # --- d) 检查该导弹是否被成功规避 ---
             # 定义持续时间要求 (可以从 __init__ 中作为参数传入)
-            ESCAPE_DURATION_REQ = 2.0
-            LOST_DURATION_REQ = 2.0
+            ESCAPE_DURATION_REQ = 1.0#2.0
+            LOST_DURATION_REQ = 1.0#2.0
 
             if missile.escape_timer >= ESCAPE_DURATION_REQ:
                 # print(f">>> 导弹 {i + 1} 被成功规避 (物理逃逸)! (持续 {missile.escape_timer:.1f}s)")

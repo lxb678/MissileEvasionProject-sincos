@@ -82,15 +82,24 @@ class TacviewInterface:
         alt = y_nue
         return lon, lat, alt
 
-    def stream_frame(self, t_now: float, aircraft: Aircraft, missiles: List[Missile], flares: List[Flare]):
+    def stream_frame(self, t_global: float, t_episode: float, aircraft: Aircraft, missiles: List[Missile],
+                     flares: List[Flare]):
         """
-        <<< 多导弹更改 >>>
-        发送一个常规的遥测帧，包含飞机和所有活动导弹的状态。
-        参数 `missile` 已更改为 `missiles: List[Missile]`。
+        <<< 多导弹更改 (V4 - 时间域修正版) >>>
+        发送遥测帧。使用全局时间作为时间戳，使用回合内时间来判断逻辑。
+
+        Args:
+            t_global (float): 全局的、连续的Tacview时间，用于ACMI文件的时间戳。
+            t_episode (float): 当前回合内的相对时间 (从0开始)，用于逻辑判断。
+            aircraft (Aircraft): 飞机对象。
+            missiles (List[Missile]): 包含所有导弹的列表 (不过滤)。
+            flares (List[Flare]): 诱饵弹列表。
         """
         if self.tacview_final_frame_sent:
             return
-        data_str = f"#{t_now:.2f}\n"
+
+        # 使用全局时间作为ACMI文件的时间戳
+        data_str = f"#{t_global:.2f}\n"
 
         # 1. 飞机数据 (逻辑不变)
         lon_t, lat_t, alt_t = self._pos_to_lon_lat_alt(aircraft.pos)
@@ -101,10 +110,10 @@ class TacviewInterface:
             f"Name=F-16,Color=Red,Type=Aircraft\n"
         )
 
-        # 2. <<< 核心修改 >>> 导弹数据 - 循环处理，并增加发射时间判断
+        # 2. <<< 核心修改 >>> 导弹数据 - 使用 t_episode 进行逻辑判断
         for i, missile in enumerate(missiles):
-            # 只有当导弹已经发射时，才在 Tacview 中显示它
-            if t_now >= missile.launch_time:
+            # 使用回合内的相对时间来判断导弹是否应该显示
+            if t_episode >= missile.launch_time:
                 missile_id = f"{self.missile_base_id + i + 1}"
 
                 lon_m, lat_m, alt_m = self._pos_to_lon_lat_alt(missile.pos)

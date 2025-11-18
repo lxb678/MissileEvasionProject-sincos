@@ -61,7 +61,7 @@ ACTION_RANGES = {
 
 # <<< GRU/RNN/Attention 修改 >>>: 新增 RNN 和 Attention 配置
 RNN_HIDDEN_SIZE = 128 #64  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH = 5 #5  # 训练时从经验池中采样的连续轨迹片段的长度
+SEQUENCE_LENGTH = 10 #5  # 训练时从经验池中采样的连续轨迹片段的长度
 # ATTN_NUM_HEADS = 8     # 注意力机制的头数 (必须能被 MLP 输出维度整除)
 ATTN_NUM_HEADS = 1  # 2 #3 #4 #8 #4 #1 #2       # <<< 这是您的关键修改：设置注意力机制的头数
 
@@ -249,148 +249,564 @@ def init_weights(m, gain=1.0):
                 param.data.fill_(0)
 
 
+# # ==============================================================================
+# #           最终版本：特征级注意力 + GRU时序建模 (修改版，无池化瓶颈)
+# # ==============================================================================
+#
+# class Actor_GRU(Module):
+#     """
+#     Actor 网络 (策略网络) - [修改版 V3: 有嵌入层, 无池化瓶颈]
+#     架构流程: [特征嵌入 -> 原始特征级 Attention -> GRU -> MLP -> 动作头]
+#
+#     架构特点：
+#     - 特征嵌入：将每个状态特征（标量）映射到一个高维向量空间，使自注意力能够在此空间中捕捉更丰富的关系。
+#     - 无池化瓶颈：注意力模块的输出（每个特征的上下文感知嵌入）被完全保留。它们被展平(flatten)成一个长向量，
+#                   然后送入GRU。这避免了池化操作可能导致的信息损失。
+#     - 多头注意力：由于特征被嵌入到高维空间，现在可以使用多头注意力机制来并行地关注来自不同表示子空间的信息。
+#     """
+#     """
+#         Actor 网络 - [最终架构: Attention -> GRU -> Hybrid MLP -> Heads]
+#         """
+#
+#     def __init__(self, dropout_rate=0.05, weight_decay=1e-4):
+#         """初始化网络的各个模块、权重和优化器。"""
+#         super(Actor_GRU, self).__init__()
+#         # --- 基础参数定义 ---
+#         self.input_dim = ACTOR_PARA.input_dim  # D, 状态特征的数量
+#         self.log_std_min = -20.0
+#         self.log_std_max = 2.0
+#         self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE
+#         self.weight_decay = weight_decay
+#         # <<< MODIFIED 1/6 >>>: 定义一个新的嵌入维度
+#         self.embedding_dim = 1 #8 #16 #1 #32  # 每个特征将被映射到这个维度
+#
+#         # <<< MODIFIED 2/6 >>>: 检查多头注意力的约束
+#         # 多头注意力的一个要求是：嵌入维度必须能被头的数量整除
+#         assert self.embedding_dim % ATTN_NUM_HEADS == 0, \
+#             f"embedding_dim ({self.embedding_dim}) must be divisible by ATTN_NUM_HEADS ({ATTN_NUM_HEADS})"
+#
+#         # --- 模块定义 ---
+#         # <<< ADDED BACK 3/6 >>>: 重新引入特征嵌入层
+#         # 将每个1维特征映射到 embedding_dim 维
+#         # self.feature_embed = Linear(1, self.embedding_dim)
+#
+#         # 1. 特征级自注意力层
+#         # 在 D 个特征的嵌入向量之间计算注意力，以捕捉特征间的相互关系
+#         self.attention = MultiheadAttention(embed_dim=self.embedding_dim,
+#                                             num_heads=ATTN_NUM_HEADS,
+#                                             dropout=0.0,  # 在策略网络中通常不使用 dropout
+#                                             batch_first=True)  # 输入输出格式为 (Batch, Seq, Feature)
+#         # self.attention_layernorm = LayerNorm(self.embedding_dim, elementwise_affine=False) # 可选的层归一化
+#
+#
+#         # 2. GRU 时序建模层
+#         # <<< MODIFIED 5/6 >>>: GRU的输入维度现在是 D * embedding_dim
+#         # 因为所有特征的上下文感知嵌入被展平后送入GRU
+#         gru_input_dim = self.input_dim * self.embedding_dim
+#         # self.rnn_hidden_size = gru_input_dim
+#         self.gru = GRU(gru_input_dim, self.rnn_hidden_size, batch_first=True)
+#
+#         # --- 3. 混合 MLP 架构 (处理 GRU 的输出) ---
+#         #    在这里应用你的混合架构设计
+#         split_point = 2  # 假设 ACTOR_PARA.model_layer_dim 有3层或更多
+#         base_dims = ACTOR_PARA.model_layer_dim[:split_point]
+#         continuous_tower_dims = ACTOR_PARA.model_layer_dim[split_point:]
+#         discrete_tower_dims = continuous_tower_dims
+#         # discrete_tower_dims = [dim // 2 for dim in continuous_tower_dims]
+#
+#         # 4a. 构建共享MLP基座 (Shared Base MLP)
+#         self.shared_base_mlp = Sequential()
+#         base_input_dim = self.rnn_hidden_size  # MLP的输入是 GRU 的输出
+#         for i, dim in enumerate(base_dims):
+#             self.shared_base_mlp.add_module(f'base_fc_{i}', Linear(base_input_dim, dim))
+#             self.shared_base_mlp.add_module(f'base_leakyrelu_{i}', LeakyReLU())
+#             base_input_dim = dim
+#         base_output_dim = base_dims[-1] if base_dims else self.rnn_hidden_size
+#
+#         # 4b. 构建连续动作塔楼 (Continuous Tower)
+#         self.continuous_tower = Sequential()
+#         tower_input_dim = base_output_dim
+#         for i, dim in enumerate(continuous_tower_dims):
+#             self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(tower_input_dim, dim))
+#             self.continuous_tower.add_module(f'cont_tower_leakyrelu_{i}', LeakyReLU())
+#             tower_input_dim = dim
+#         continuous_tower_output_dim = continuous_tower_dims[-1] if continuous_tower_dims else base_output_dim
+#
+#         # 4c. 构建离散动作塔楼 (Discrete Tower)
+#         self.discrete_tower = Sequential()
+#         tower_input_dim = base_output_dim
+#         for i, dim in enumerate(discrete_tower_dims):
+#             self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(tower_input_dim, dim))
+#             self.discrete_tower.add_module(f'disc_tower_leakyrelu_{i}', LeakyReLU())
+#             tower_input_dim = dim
+#         discrete_tower_output_dim = discrete_tower_dims[-1] if discrete_tower_dims else base_output_dim
+#
+#         # 5. 定义最终的输出头 (Heads)
+#         self.mu_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
+#         self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
+#         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
+#
+#         # --- <<< MODIFICATION START: 精细化优化器设置 >>> ---
+#         # 1. 初始化空的参数列表
+#         gru_params = []
+#         attention_params = []
+#         other_params = []
+#
+#         # 2. 遍历所有命名参数，并将它们分配到对应的组中
+#         for name, param in self.named_parameters():
+#             if not param.requires_grad:
+#                 continue
+#
+#             # 根据参数名称中的关键词进行分组
+#             if 'gru' in name.lower():
+#                 gru_params.append(param)
+#             elif any(key in name.lower() for key in ['attention', 'attn', 'layernorm']):
+#                 # 注意：你之前的代码把 layernorm 也归入了 attention 组，这里保持一致
+#                 attention_params.append(param)
+#             else:
+#                 other_params.append(param)
+#
+#         # 3. 创建参数组 (parameter groups) 列表
+#         param_groups = [
+#             {
+#                 'params': gru_params,
+#                 'lr': ACTOR_PARA.gru_lr  # 使用为 GRU 定义的专属学习率
+#             },
+#             {
+#                 'params': attention_params,
+#                 'lr': ACTOR_PARA.attention_lr  # 使用为 Attention 定义的专属学习率
+#             },
+#             {
+#                 'params': other_params  # 其他所有参数
+#                 # 这里不指定 'lr'，它们将使用优化器构造函数中的默认 lr
+#             }
+#         ]
+#
+#         # 4. 使用参数组初始化优化器
+#         # 传入的 lr=ACTOR_PARA.lr 将作为 "other_params" 组的默认学习率
+#         self.optim = torch.optim.Adam(param_groups, lr=ACTOR_PARA.lr, weight_decay=self.weight_decay)
+#
+#         print("--- Actor Optimizer Initialized with Parameter Groups ---")
+#         print(f"  - GRU Params LR: {ACTOR_PARA.gru_lr}")
+#         print(f"  - Attention Params LR: {ACTOR_PARA.attention_lr}")
+#         print(f"  - Other Params LR: {ACTOR_PARA.lr}")
+#
+#         self.actor_scheduler = lr_scheduler.LinearLR(
+#             self.optim,
+#             start_factor=1.0,
+#             end_factor=AGENTPARA.mini_lr / ACTOR_PARA.lr,
+#             total_iters=AGENTPARA.MAX_EXE_NUM
+#         )
+#         self.to(ACTOR_PARA.device)
+#         # print(f"--- [DEBUG] Actor_GRU Initialized (No Pooling Bottleneck) ---")
+#
+#     def forward(self, obs, hidden_state):
+#         """
+#         前向传播方法。
+#         :param obs: 状态观测值，形状为 (B, D) 或 (B, S, D)
+#         :param hidden_state: GRU 的隐藏状态
+#         :return: 包含动作分布的字典和新的 GRU 隐藏状态
+#         """
+#         obs_tensor = check(obs).to(**ACTOR_PARA.tpdv)
+#         # 检查输入是否为序列。如果不是（例如，单步推理），则增加一个长度为1的序列维度。
+#         is_sequence = obs_tensor.dim() == 3
+#         if not is_sequence:
+#             obs_tensor = obs_tensor.unsqueeze(1)  # (B, D) -> (B, 1, D)
+#         B, S, D = obs_tensor.shape  # B:批大小, S:序列长度, D:特征维度
+#
+#         # --- 阶段一：特征交互 ---
+#         # 1. 准备特征 token: (B, S, D) -> (B*S, D, 1)
+#         feat_tokens = obs_tensor.contiguous().view(B * S, D, 1)
+#
+#         # <<< ADDED BACK 6/6, part 1 >>>: 应用嵌入层
+#         # 2. 特征嵌入: (B*S, D, 1) -> (B*S, D, embedding_dim)
+#         # token_embeds = self.feature_embed(feat_tokens)
+#         token_embeds = feat_tokens
+#         #层归一化
+#         # token_embeds = self.attention_layernorm(token_embeds)
+#
+#
+#         # 3. 自注意力计算
+#         # query, key, value 都是 token_embeds，进行自注意力计算
+#         attn_out, _ = self.attention(token_embeds, token_embeds, token_embeds)
+#
+#         # 4. 残差连接：将注意力输出与原始嵌入相加，有助于梯度传播
+#         token_context = token_embeds + attn_out  # 形状: (B*S, D, embedding_dim)
+#
+#         # 层归一化
+#         # token_context = self.attention_layernorm(token_context)
+#
+#         # <<< MODIFIED 6/6, part 2 >>>: 重塑以保留所有信息
+#         # 5. 展平上下文向量: (B*S, D, embedding_dim) -> (B*S, D * embedding_dim)
+#         flattened_context = token_context.contiguous().view(B * S, -1)
+#
+#         # 6. 恢复序列结构: (B*S, D * embedding_dim) -> (B, S, D * embedding_dim)
+#         contextualized_sequence = flattened_context.view(B, S, -1)
+#
+#         # --- 阶段二：时序建模 ---
+#         # 7. GRU处理，现在输入的是经过特征交互和展平后的完整序列
+#         gru_out, new_hidden = self.gru(contextualized_sequence, hidden_state)
+#
+#         # --- 阶段三：决策 (Hybrid MLP) ---
+#         # 1. GRU 的输出流经共享 MLP 基座
+#         base_features = self.shared_base_mlp(gru_out)
+#
+#         # 2. 共享特征被分别送入两个专用塔楼
+#         continuous_features = self.continuous_tower(base_features)
+#         discrete_features = self.discrete_tower(base_features)
+#
+#         # 3. 如果是单步输入，压缩特征维度以匹配头部
+#         if not is_sequence:
+#             continuous_features = continuous_features.squeeze(1)
+#             discrete_features = discrete_features.squeeze(1)
+#
+#         # 4. 每个头部接收来自其专属塔楼的特征
+#         mu = self.mu_head(continuous_features)
+#         all_disc_logits = self.discrete_head(discrete_features)
+#
+#         # (后续创建分布的逻辑与 MLP 版本完全相同)
+#         split_sizes = list(DISCRETE_DIMS.values())
+#         logits_parts = torch.split(all_disc_logits, split_sizes, dim=-1)
+#         # trigger_logits, salvo_size_logits, intra_interval_logits, num_groups_logits, inter_interval_logits = logits_parts
+#         trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
+#
+#         has_flares_info = obs_tensor[..., 7]
+#         mask = (has_flares_info == 0)
+#         trigger_logits_masked = trigger_logits.clone()
+#         if torch.any(mask):
+#             if mask.dim() < trigger_logits_masked.dim():
+#                 mask = mask.unsqueeze(-1)
+#             trigger_logits_masked[mask] = torch.finfo(torch.float32).min
+#
+#         # ===============================================================
+#         # 5️⃣ 触发器层次控制：当“不投放”时，屏蔽其他离散动作 logits
+#         # ===============================================================
+#         # 先得到触发器分布
+#         trigger_probs = torch.sigmoid(trigger_logits_masked)  # shape: [B,1]
+#
+#         # 如果 trigger_probs < 0.5，说明模型倾向于“不投放”
+#         # 我们用这个条件生成一个 mask（True=不投放）
+#         no_trigger_mask = (trigger_probs < 0.5).squeeze(-1)  # shape: [B]
+#
+#         # 创建 logits 的副本，避免原地操作污染梯度
+#         salvo_size_logits_masked = salvo_size_logits.clone()
+#         # intra_interval_logits_masked = intra_interval_logits.clone()
+#         num_groups_logits_masked = num_groups_logits.clone()
+#         inter_interval_logits_masked = inter_interval_logits.clone()
+#         # ===============================================================
+#         # 当 trigger 不投放时，将其他离散动作 logits 强制为 index=0 (one-hot 形式)
+#         # ===============================================================
+#         if torch.any(no_trigger_mask):
+#             INF = 1e6
+#             NEG_INF = -1e6
+#             for logits_tensor in [
+#                 salvo_size_logits_masked,
+#                 # intra_interval_logits_masked,
+#                 num_groups_logits_masked,
+#                 inter_interval_logits_masked,
+#             ]:
+#                 logits_sub = logits_tensor[no_trigger_mask]
+#                 if logits_sub.numel() > 0:
+#                     logits_sub[:] = NEG_INF  # 全部置为极小值
+#                     logits_sub[:, 0] = INF  # 仅 index=0 置为极大值
+#                     logits_tensor[no_trigger_mask] = logits_sub
+#
+#         log_std = torch.clamp(self.log_std_param, self.log_std_min, self.log_std_max)
+#         std = torch.exp(log_std).expand_as(mu)
+#         continuous_base_dist = Normal(mu, std)
+#
+#         trigger_dist = Bernoulli(logits=trigger_logits_masked.squeeze(-1))
+#         salvo_size_dist = Categorical(logits=salvo_size_logits_masked)
+#         # intra_interval_dist = Categorical(logits=intra_interval_logits_masked)
+#         num_groups_dist = Categorical(logits=num_groups_logits_masked)
+#         inter_interval_dist = Categorical(logits=inter_interval_logits_masked)
+#
+#         distributions = {
+#             'continuous': continuous_base_dist,
+#             'trigger': trigger_dist,
+#             'salvo_size': salvo_size_dist,
+#             # 'intra_interval': intra_interval_dist,
+#             'num_groups': num_groups_dist,
+#             'inter_interval': inter_interval_dist
+#         }
+#         return distributions, new_hidden
+#
+#
+# class Critic_GRU(Module):
+#     """
+#     Critic 网络 (价值网络) - 采用与 Actor 相似的 GRU 结构，但为了简化，这里没有使用 Attention。
+#     这是一个 GRU -> MLP -> Value Head 的结构。
+#     """
+#
+#     def __init__(self, dropout_rate=0.05, weight_decay=1e-4):
+#         """初始化 Critic 网络的模块、权重和优化器。"""
+#         super(Critic_GRU, self).__init__()
+#         # --- 基础参数定义 ---
+#         self.input_dim = CRITIC_PARA.input_dim  # D
+#         self.output_dim = CRITIC_PARA.output_dim
+#         self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE
+#         self.weight_decay = weight_decay
+#
+#         # <<< MODIFIED 1/6 >>>: 定义一个新的嵌入维度
+#         self.embedding_dim = 1  # 8 #16 #1 #32  # 每个特征将被映射到这个维度
+#
+#         # <<< MODIFIED 2/6 >>>: 检查多头注意力的约束
+#         # 多头注意力的一个要求是：嵌入维度必须能被头的数量整除
+#         assert self.embedding_dim % ATTN_NUM_HEADS == 0, \
+#             f"embedding_dim ({self.embedding_dim}) must be divisible by ATTN_NUM_HEADS ({ATTN_NUM_HEADS})"
+#
+#         # --- 模块定义 ---
+#         # <<< ADDED BACK 3/6 >>>: 重新引入特征嵌入层
+#         # 将每个1维特征映射到 embedding_dim 维
+#         # self.feature_embed = Linear(1, self.embedding_dim)
+#
+#         # 1. 特征级自注意力层
+#         # 在 D 个特征的嵌入向量之间计算注意力，以捕捉特征间的相互关系
+#         self.attention = MultiheadAttention(embed_dim=self.embedding_dim,
+#                                             num_heads=ATTN_NUM_HEADS,
+#                                             dropout=0.0,  # 在策略网络中通常不使用 dropout
+#                                             batch_first=True)  # 输入输出格式为 (Batch, Seq, Feature)
+#
+#         # 2. GRU 时序建模层
+#         # <<< MODIFIED 5/6 >>>: GRU的输入维度现在是 D * embedding_dim
+#         # 因为所有特征的上下文感知嵌入被展平后送入GRU
+#         gru_input_dim = self.input_dim * self.embedding_dim
+#
+#         # --- 模块定义 ---
+#         # 1. GRU 时序建模层
+#         # 输入维度是原始状态维度 D (self.input_dim)
+#         self.gru = GRU(gru_input_dim, self.rnn_hidden_size, batch_first=True)
+#
+#         # 2. MLP骨干网络 (不变)
+#         layers_dims = [self.rnn_hidden_size] + CRITIC_PARA.model_layer_dim
+#         self.network_base = Sequential()
+#         for i in range(len(layers_dims) - 1):
+#             self.network_base.add_module(f'fc_{i}', Linear(layers_dims[i], layers_dims[i + 1]))
+#             # self.network_base.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
+#             self.network_base.add_module(f'LeakyReLU_{i}', LeakyReLU())
+#
+#         # 3. 输出头 (Value Head) (不变)
+#         base_output_dim = CRITIC_PARA.model_layer_dim[-1]
+#         self.fc_out = Linear(base_output_dim, self.output_dim)
+#
+#         # # --- [新增] 应用初始化 ---
+#         # self.apply(init_weights)  # 对所有子模块应用通用初始化
+#
+#         # # --- [新增] 对输出层进行特殊初始化 ---
+#         # # 这样做是为了在训练开始时有更稳定的价值估计
+#         # init_range = 3e-3
+#         # self.fc_out.weight.data.uniform_(-init_range, init_range)
+#         # self.fc_out.bias.data.fill_(0)
+#         # # --- 初始化结束 ---
+#
+#         # --- <<< MODIFICATION START: 精细化优化器设置 >>> ---
+#         # 1. 初始化空的参数列表
+#         gru_params = []
+#         attention_params = []
+#         other_params = []
+#
+#         # 2. 遍历所有命名参数，并将它们分配到对应的组中
+#         for name, param in self.named_parameters():
+#             if not param.requires_grad:
+#                 continue
+#
+#             # 根据参数名称中的关键词进行分组
+#             if 'gru' in name.lower():
+#                 gru_params.append(param)
+#             elif any(key in name.lower() for key in ['attention', 'attn', 'layernorm']):
+#                 # 注意：你之前的代码把 layernorm 也归入了 attention 组，这里保持一致
+#                 attention_params.append(param)
+#             else:
+#                 other_params.append(param)
+#
+#         # 3. 创建参数组 (parameter groups) 列表
+#         param_groups = [
+#             {
+#                 'params': gru_params,
+#                 'lr': CRITIC_PARA.gru_lr  # 使用为 GRU 定义的专属学习率
+#             },
+#             {
+#                 'params': attention_params,
+#                 'lr': CRITIC_PARA.attention_lr  # 使用为 Attention 定义的专属学习率
+#             },
+#             {
+#                 'params': other_params  # 其他所有参数
+#                 # 这里不指定 'lr'，它们将使用优化器构造函数中的默认 lr
+#             }
+#         ]
+#
+#         # 4. 使用参数组初始化优化器
+#         # 传入的 lr=CRITIC_PARA.lr 将作为 "other_params" 组的默认学习率
+#         self.optim = torch.optim.Adam(param_groups, lr=CRITIC_PARA.lr, weight_decay=self.weight_decay)
+#
+#         print("--- Actor Optimizer Initialized with Parameter Groups ---")
+#         print(f"  - GRU Params LR: {CRITIC_PARA.gru_lr}")
+#         print(f"  - Attention Params LR: {CRITIC_PARA.attention_lr}")
+#         print(f"  - Other Params LR: {CRITIC_PARA.lr}")
+#
+#         self.critic_scheduler = lr_scheduler.LinearLR(
+#             self.optim,
+#             start_factor=1.0,
+#             end_factor=AGENTPARA.mini_lr / CRITIC_PARA.lr,
+#             total_iters=AGENTPARA.MAX_EXE_NUM
+#         )
+#         self.to(CRITIC_PARA.device)
+#         # print(f"--- [DEBUG] Critic_GRU Initialized (No Pooling Bottleneck) ---")
+#
+#     def forward(self, obs, hidden_state):
+#         """
+#         前向传播方法。
+#         :param obs: 状态观测值，形状为 (B, D) 或 (B, S, D)
+#         :param hidden_state: GRU 的隐藏状态
+#         :return: 状态价值和新的 GRU 隐藏状态
+#         """
+#         obs_tensor = check(obs).to(**CRITIC_PARA.tpdv)
+#         # 检查输入是否为序列。如果不是（例如，单步推理），则增加一个长度为1的序列维度。
+#         is_sequence = obs_tensor.dim() == 3
+#         if not is_sequence:
+#             obs_tensor = obs_tensor.unsqueeze(1) # (B, D) -> (B, 1, D)
+#         B, S, D = obs_tensor.shape  # B:批大小, S:序列长度, D:特征维度
+#         # --- 阶段一：特征交互 ---
+#         # 1. 准备特征 token: (B, S, D) -> (B*S, D, 1)
+#         feat_tokens = obs_tensor.contiguous().view(B * S, D, 1)
+#
+#         # <<< ADDED BACK 6/6, part 1 >>>: 应用嵌入层
+#         # 2. 特征嵌入: (B*S, D, 1) -> (B*S, D, embedding_dim)
+#         # token_embeds = self.feature_embed(feat_tokens)
+#         token_embeds = feat_tokens
+#         # 层归一化
+#         # token_embeds = self.attention_layernorm(token_embeds)
+#
+#         # 3. 自注意力计算
+#         # query, key, value 都是 token_embeds，进行自注意力计算
+#         attn_out, _ = self.attention(token_embeds, token_embeds, token_embeds)
+#
+#         # 4. 残差连接：将注意力输出与原始嵌入相加，有助于梯度传播
+#         token_context = token_embeds + attn_out  # 形状: (B*S, D, embedding_dim)
+#
+#         # 层归一化
+#         # token_context = self.attention_layernorm(token_context)
+#
+#         # <<< MODIFIED 6/6, part 2 >>>: 重塑以保留所有信息
+#         # 5. 展平上下文向量: (B*S, D, embedding_dim) -> (B*S, D * embedding_dim)
+#         flattened_context = token_context.contiguous().view(B * S, -1)
+#
+#         # 6. 恢复序列结构: (B*S, D * embedding_dim) -> (B, S, D * embedding_dim)
+#         contextualized_sequence = flattened_context.view(B, S, -1)
+#
+#         # --- 阶段二：时序建模 ---
+#         # 7. GRU处理，现在输入的是经过特征交互和展平后的完整序列
+#         gru_out, new_hidden = self.gru(contextualized_sequence, hidden_state)
+#
+#         # # --- 阶段一：时序建模 ---
+#         # # 直接将原始状态序列送入GRU
+#         # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+#
+#         # --- 阶段二：价值评估 (不变) ---
+#         # MLP加工
+#         base_features_sequence = self.network_base(gru_out)
+#         # 输出价值
+#         value = self.fc_out(base_features_sequence)
+#
+#         # 如果是单步推理，移除序列维度
+#         if not is_sequence:
+#             value = value.squeeze(1)
+#
+#         return value, new_hidden
+
 # ==============================================================================
-#           最终版本：特征级注意力 + GRU时序建模 (修改版，无池化瓶颈)
+#           完整新架构: Attention -> MLP -> GRU -> MLP_Towers -> Heads
 # ==============================================================================
 
 class Actor_GRU(Module):
     """
-    Actor 网络 (策略网络) - [修改版 V3: 有嵌入层, 无池化瓶颈]
-    架构流程: [特征嵌入 -> 原始特征级 Attention -> GRU -> MLP -> 动作头]
-
-    架构特点：
-    - 特征嵌入：将每个状态特征（标量）映射到一个高维向量空间，使自注意力能够在此空间中捕捉更丰富的关系。
-    - 无池化瓶颈：注意力模块的输出（每个特征的上下文感知嵌入）被完全保留。它们被展平(flatten)成一个长向量，
-                  然后送入GRU。这避免了池化操作可能导致的信息损失。
-    - 多头注意力：由于特征被嵌入到高维空间，现在可以使用多头注意力机制来并行地关注来自不同表示子空间的信息。
+    Actor 网络 - [完整版 V2: Attention -> MLP -> GRU -> Hybrid MLP]
+    结构为: 跨特征注意力 -> 共享MLP特征提取 -> GRU 序列处理 -> 专用MLP塔楼 -> 独立动作头。
     """
-    """
-        Actor 网络 - [最终架构: Attention -> GRU -> Hybrid MLP -> Heads]
-        """
 
     def __init__(self, dropout_rate=0.05, weight_decay=1e-4):
         """初始化网络的各个模块、权重和优化器。"""
         super(Actor_GRU, self).__init__()
         # --- 基础参数定义 ---
-        self.input_dim = ACTOR_PARA.input_dim  # D, 状态特征的数量
+        self.input_dim = ACTOR_PARA.input_dim
         self.log_std_min = -20.0
         self.log_std_max = 2.0
-        self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = RNN_HIDDEN_SIZE
         self.weight_decay = weight_decay
-        # <<< MODIFIED 1/6 >>>: 定义一个新的嵌入维度
-        self.embedding_dim = 1 #8 #16 #1 #32  # 每个特征将被映射到这个维度
+        self.embedding_dim = 1  # 每个原始特征的嵌入维度
 
-        # <<< MODIFIED 2/6 >>>: 检查多头注意力的约束
-        # 多头注意力的一个要求是：嵌入维度必须能被头的数量整除
         assert self.embedding_dim % ATTN_NUM_HEADS == 0, \
             f"embedding_dim ({self.embedding_dim}) must be divisible by ATTN_NUM_HEADS ({ATTN_NUM_HEADS})"
 
-        # --- 模块定义 ---
-        # <<< ADDED BACK 3/6 >>>: 重新引入特征嵌入层
-        # 将每个1维特征映射到 embedding_dim 维
-        # self.feature_embed = Linear(1, self.embedding_dim)
-
-        # 1. 特征级自注意力层
-        # 在 D 个特征的嵌入向量之间计算注意力，以捕捉特征间的相互关系
+        # --- 1. 特征级自注意力层 (处理原始输入) ---
         self.attention = MultiheadAttention(embed_dim=self.embedding_dim,
                                             num_heads=ATTN_NUM_HEADS,
-                                            dropout=0.0,  # 在策略网络中通常不使用 dropout
-                                            batch_first=True)  # 输入输出格式为 (Batch, Seq, Feature)
-        # self.attention_layernorm = LayerNorm(self.embedding_dim, elementwise_affine=False) # 可选的层归一化
+                                            dropout=0.0,
+                                            batch_first=True)
 
+        # --- 2. 定义 GRU 之前的共享 MLP (Pre-GRU MLP) ---
+        # 这个MLP的输入维度是Attention模块的输出维度
+        pre_gru_mlp_input_dim = self.input_dim * self.embedding_dim
+        pre_gru_mlp_layers = 2
+        pre_gru_dims = ACTOR_PARA.model_layer_dim[:pre_gru_mlp_layers]
 
-        # 2. GRU 时序建模层
-        # <<< MODIFIED 5/6 >>>: GRU的输入维度现在是 D * embedding_dim
-        # 因为所有特征的上下文感知嵌入被展平后送入GRU
-        gru_input_dim = self.input_dim * self.embedding_dim
-        # self.rnn_hidden_size = gru_input_dim
-        self.gru = GRU(gru_input_dim, self.rnn_hidden_size, batch_first=True)
+        self.pre_gru_mlp = Sequential()
+        mlp_input_dim = pre_gru_mlp_input_dim
+        for i, dim in enumerate(pre_gru_dims):
+            self.pre_gru_mlp.add_module(f'pre_gru_fc_{i}', Linear(mlp_input_dim, dim))
+            self.pre_gru_mlp.add_module(f'pre_gru_leakyrelu_{i}', LeakyReLU())
+            mlp_input_dim = dim
 
-        # --- 3. 混合 MLP 架构 (处理 GRU 的输出) ---
-        #    在这里应用你的混合架构设计
-        split_point = 2  # 假设 ACTOR_PARA.model_layer_dim 有3层或更多
-        base_dims = ACTOR_PARA.model_layer_dim[:split_point]
-        continuous_tower_dims = ACTOR_PARA.model_layer_dim[split_point:]
-        discrete_tower_dims = continuous_tower_dims
-        # discrete_tower_dims = [dim // 2 for dim in continuous_tower_dims]
+        # Pre-GRU MLP 的输出维度，将作为 GRU 的输入维度
+        pre_gru_output_dim = pre_gru_dims[-1] if pre_gru_dims else pre_gru_mlp_input_dim
 
-        # 4a. 构建共享MLP基座 (Shared Base MLP)
-        self.shared_base_mlp = Sequential()
-        base_input_dim = self.rnn_hidden_size  # MLP的输入是 GRU 的输出
-        for i, dim in enumerate(base_dims):
-            self.shared_base_mlp.add_module(f'base_fc_{i}', Linear(base_input_dim, dim))
-            self.shared_base_mlp.add_module(f'base_leakyrelu_{i}', LeakyReLU())
-            base_input_dim = dim
-        base_output_dim = base_dims[-1] if base_dims else self.rnn_hidden_size
+        # --- 3. GRU 时序建模层 ---
+        self.gru = GRU(pre_gru_output_dim, self.rnn_hidden_size, batch_first=True)
 
-        # 4b. 构建连续动作塔楼 (Continuous Tower)
+        # --- 4. 定义 GRU 之后的 MLP 塔楼 (Post-GRU Towers) ---
+        post_gru_dims = ACTOR_PARA.model_layer_dim[pre_gru_mlp_layers:]
+
+        # 4a. 构建连续动作塔楼
         self.continuous_tower = Sequential()
-        tower_input_dim = base_output_dim
-        for i, dim in enumerate(continuous_tower_dims):
+        tower_input_dim = self.rnn_hidden_size
+        for i, dim in enumerate(post_gru_dims):
             self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(tower_input_dim, dim))
             self.continuous_tower.add_module(f'cont_tower_leakyrelu_{i}', LeakyReLU())
             tower_input_dim = dim
-        continuous_tower_output_dim = continuous_tower_dims[-1] if continuous_tower_dims else base_output_dim
+        continuous_tower_output_dim = post_gru_dims[-1] if post_gru_dims else self.rnn_hidden_size
 
-        # 4c. 构建离散动作塔楼 (Discrete Tower)
+        # 4b. 构建离散动作塔楼
         self.discrete_tower = Sequential()
-        tower_input_dim = base_output_dim
-        for i, dim in enumerate(discrete_tower_dims):
+        tower_input_dim = self.rnn_hidden_size
+        for i, dim in enumerate(post_gru_dims):
             self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(tower_input_dim, dim))
             self.discrete_tower.add_module(f'disc_tower_leakyrelu_{i}', LeakyReLU())
             tower_input_dim = dim
-        discrete_tower_output_dim = discrete_tower_dims[-1] if discrete_tower_dims else base_output_dim
+        discrete_tower_output_dim = post_gru_dims[-1] if post_gru_dims else self.rnn_hidden_size
 
-        # 5. 定义最终的输出头 (Heads)
+        # --- 5. 定义最终的输出头 (Heads) ---
         self.mu_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
         self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
 
-        # --- <<< MODIFICATION START: 精细化优化器设置 >>> ---
-        # 1. 初始化空的参数列表
-        gru_params = []
-        attention_params = []
-        other_params = []
-
-        # 2. 遍历所有命名参数，并将它们分配到对应的组中
+        # --- 6. 优化器设置 ---
+        gru_params, attention_params, other_params = [], [], []
         for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-
-            # 根据参数名称中的关键词进行分组
+            if not param.requires_grad: continue
             if 'gru' in name.lower():
                 gru_params.append(param)
-            elif any(key in name.lower() for key in ['attention', 'attn', 'layernorm']):
-                # 注意：你之前的代码把 layernorm 也归入了 attention 组，这里保持一致
+            elif any(key in name.lower() for key in ['attention', 'attn']):
                 attention_params.append(param)
             else:
                 other_params.append(param)
 
-        # 3. 创建参数组 (parameter groups) 列表
         param_groups = [
-            {
-                'params': gru_params,
-                'lr': ACTOR_PARA.gru_lr  # 使用为 GRU 定义的专属学习率
-            },
-            {
-                'params': attention_params,
-                'lr': ACTOR_PARA.attention_lr  # 使用为 Attention 定义的专属学习率
-            },
-            {
-                'params': other_params  # 其他所有参数
-                # 这里不指定 'lr'，它们将使用优化器构造函数中的默认 lr
-            }
+            {'params': gru_params, 'lr': ACTOR_PARA.gru_lr},
+            {'params': attention_params, 'lr': ACTOR_PARA.attention_lr},
+            {'params': other_params, 'lr': ACTOR_PARA.lr}
         ]
 
-        # 4. 使用参数组初始化优化器
-        # 传入的 lr=ACTOR_PARA.lr 将作为 "other_params" 组的默认学习率
-        self.optim = torch.optim.Adam(param_groups, lr=ACTOR_PARA.lr, weight_decay=self.weight_decay)
-
-        print("--- Actor Optimizer Initialized with Parameter Groups ---")
-        print(f"  - GRU Params LR: {ACTOR_PARA.gru_lr}")
-        print(f"  - Attention Params LR: {ACTOR_PARA.attention_lr}")
-        print(f"  - Other Params LR: {ACTOR_PARA.lr}")
-
+        self.optim = torch.optim.Adam(param_groups, weight_decay=self.weight_decay)
         self.actor_scheduler = lr_scheduler.LinearLR(
             self.optim,
             start_factor=1.0,
@@ -398,79 +814,52 @@ class Actor_GRU(Module):
             total_iters=AGENTPARA.MAX_EXE_NUM
         )
         self.to(ACTOR_PARA.device)
-        # print(f"--- [DEBUG] Actor_GRU Initialized (No Pooling Bottleneck) ---")
 
     def forward(self, obs, hidden_state):
-        """
-        前向传播方法。
-        :param obs: 状态观测值，形状为 (B, D) 或 (B, S, D)
-        :param hidden_state: GRU 的隐藏状态
-        :return: 包含动作分布的字典和新的 GRU 隐藏状态
-        """
         obs_tensor = check(obs).to(**ACTOR_PARA.tpdv)
-        # 检查输入是否为序列。如果不是（例如，单步推理），则增加一个长度为1的序列维度。
         is_sequence = obs_tensor.dim() == 3
         if not is_sequence:
-            obs_tensor = obs_tensor.unsqueeze(1)  # (B, D) -> (B, 1, D)
-        B, S, D = obs_tensor.shape  # B:批大小, S:序列长度, D:特征维度
+            obs_tensor = obs_tensor.unsqueeze(1)
+        B, S, D = obs_tensor.shape
 
-        # --- 阶段一：特征交互 ---
-        # 1. 准备特征 token: (B, S, D) -> (B*S, D, 1)
+        # --- 阶段一: 特征交互 (Attention) ---
+        # 1. 准备特征 token 并应用 Attention
         feat_tokens = obs_tensor.contiguous().view(B * S, D, 1)
-
-        # <<< ADDED BACK 6/6, part 1 >>>: 应用嵌入层
-        # 2. 特征嵌入: (B*S, D, 1) -> (B*S, D, embedding_dim)
-        # token_embeds = self.feature_embed(feat_tokens)
         token_embeds = feat_tokens
-        #层归一化
-        # token_embeds = self.attention_layernorm(token_embeds)
-
-
-        # 3. 自注意力计算
-        # query, key, value 都是 token_embeds，进行自注意力计算
         attn_out, _ = self.attention(token_embeds, token_embeds, token_embeds)
+        token_context = token_embeds + attn_out
 
-        # 4. 残差连接：将注意力输出与原始嵌入相加，有助于梯度传播
-        token_context = token_embeds + attn_out  # 形状: (B*S, D, embedding_dim)
-
-        # 层归一化
-        # token_context = self.attention_layernorm(token_context)
-
-        # <<< MODIFIED 6/6, part 2 >>>: 重塑以保留所有信息
-        # 5. 展平上下文向量: (B*S, D, embedding_dim) -> (B*S, D * embedding_dim)
+        # 2. 展平并恢复序列结构
         flattened_context = token_context.contiguous().view(B * S, -1)
-
-        # 6. 恢复序列结构: (B*S, D * embedding_dim) -> (B, S, D * embedding_dim)
         contextualized_sequence = flattened_context.view(B, S, -1)
 
-        # --- 阶段二：时序建模 ---
-        # 7. GRU处理，现在输入的是经过特征交互和展平后的完整序列
-        gru_out, new_hidden = self.gru(contextualized_sequence, hidden_state)
+        # --- 阶段二: 特征提取 (Pre-GRU MLP) ---
+        # 3. 将经过 Attention 的序列送入 MLP
+        mlp_sequence = self.pre_gru_mlp(contextualized_sequence)
 
-        # --- 阶段三：决策 (Hybrid MLP) ---
-        # 1. GRU 的输出流经共享 MLP 基座
-        base_features = self.shared_base_mlp(gru_out)
+        # --- 阶段三: 时序建模 (GRU) ---
+        # 4. 将 MLP 处理后的序列送入 GRU
+        gru_out, new_hidden = self.gru(mlp_sequence, hidden_state)
 
-        # 2. 共享特征被分别送入两个专用塔楼
+        # --- 阶段四: 决策 (Post-GRU MLP Towers) ---
+        # 5. GRU 的输出送入后续的塔楼和头部
+        base_features = gru_out
         continuous_features = self.continuous_tower(base_features)
         discrete_features = self.discrete_tower(base_features)
 
-        # 3. 如果是单步输入，压缩特征维度以匹配头部
         if not is_sequence:
             continuous_features = continuous_features.squeeze(1)
             discrete_features = discrete_features.squeeze(1)
 
-        # 4. 每个头部接收来自其专属塔楼的特征
         mu = self.mu_head(continuous_features)
         all_disc_logits = self.discrete_head(discrete_features)
 
-        # (后续创建分布的逻辑与 MLP 版本完全相同)
+        # --- 阶段五: 创建概率分布 (完整代码) ---
         split_sizes = list(DISCRETE_DIMS.values())
         logits_parts = torch.split(all_disc_logits, split_sizes, dim=-1)
-        # trigger_logits, salvo_size_logits, intra_interval_logits, num_groups_logits, inter_interval_logits = logits_parts
         trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
 
-        has_flares_info = obs_tensor[..., 7]
+        has_flares_info = obs_tensor[..., 10]
         mask = (has_flares_info == 0)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
@@ -478,172 +867,126 @@ class Actor_GRU(Module):
                 mask = mask.unsqueeze(-1)
             trigger_logits_masked[mask] = torch.finfo(torch.float32).min
 
-        # ===============================================================
-        # 5️⃣ 触发器层次控制：当“不投放”时，屏蔽其他离散动作 logits
-        # ===============================================================
-        # 先得到触发器分布
-        trigger_probs = torch.sigmoid(trigger_logits_masked)  # shape: [B,1]
+        # 触发器层次控制
+        trigger_probs = torch.sigmoid(trigger_logits_masked)
+        no_trigger_mask = (trigger_probs < 0.5).squeeze(-1)
 
-        # 如果 trigger_probs < 0.5，说明模型倾向于“不投放”
-        # 我们用这个条件生成一个 mask（True=不投放）
-        no_trigger_mask = (trigger_probs < 0.5).squeeze(-1)  # shape: [B]
-
-        # 创建 logits 的副本，避免原地操作污染梯度
         salvo_size_logits_masked = salvo_size_logits.clone()
-        # intra_interval_logits_masked = intra_interval_logits.clone()
         num_groups_logits_masked = num_groups_logits.clone()
         inter_interval_logits_masked = inter_interval_logits.clone()
-        # ===============================================================
-        # 当 trigger 不投放时，将其他离散动作 logits 强制为 index=0 (one-hot 形式)
-        # ===============================================================
+
         if torch.any(no_trigger_mask):
             INF = 1e6
             NEG_INF = -1e6
-            for logits_tensor in [
-                salvo_size_logits_masked,
-                # intra_interval_logits_masked,
-                num_groups_logits_masked,
-                inter_interval_logits_masked,
-            ]:
+            for logits_tensor in [salvo_size_logits_masked, num_groups_logits_masked, inter_interval_logits_masked]:
+                # 仅对需要屏蔽的样本进行操作
                 logits_sub = logits_tensor[no_trigger_mask]
                 if logits_sub.numel() > 0:
                     logits_sub[:] = NEG_INF  # 全部置为极小值
                     logits_sub[:, 0] = INF  # 仅 index=0 置为极大值
                     logits_tensor[no_trigger_mask] = logits_sub
 
+        # 创建连续动作分布
         log_std = torch.clamp(self.log_std_param, self.log_std_min, self.log_std_max)
         std = torch.exp(log_std).expand_as(mu)
         continuous_base_dist = Normal(mu, std)
 
+        # 创建离散动作分布
         trigger_dist = Bernoulli(logits=trigger_logits_masked.squeeze(-1))
         salvo_size_dist = Categorical(logits=salvo_size_logits_masked)
-        # intra_interval_dist = Categorical(logits=intra_interval_logits_masked)
         num_groups_dist = Categorical(logits=num_groups_logits_masked)
         inter_interval_dist = Categorical(logits=inter_interval_logits_masked)
 
+        # 打包所有分布
         distributions = {
             'continuous': continuous_base_dist,
             'trigger': trigger_dist,
             'salvo_size': salvo_size_dist,
-            # 'intra_interval': intra_interval_dist,
             'num_groups': num_groups_dist,
             'inter_interval': inter_interval_dist
         }
+
         return distributions, new_hidden
 
 
+# ==============================================================================
+#           完整新架构: Attention -> MLP -> GRU -> MLP -> Head
+# ==============================================================================
+
 class Critic_GRU(Module):
     """
-    Critic 网络 (价值网络) - 采用与 Actor 相似的 GRU 结构，但为了简化，这里没有使用 Attention。
-    这是一个 GRU -> MLP -> Value Head 的结构。
+    Critic 网络 - [完整版 V2: Attention -> MLP -> GRU -> MLP]
+    结构为: 跨特征注意力 -> 共享MLP特征提取 -> GRU 序列处理 -> MLP -> 输出头。
     """
 
     def __init__(self, dropout_rate=0.05, weight_decay=1e-4):
         """初始化 Critic 网络的模块、权重和优化器。"""
         super(Critic_GRU, self).__init__()
         # --- 基础参数定义 ---
-        self.input_dim = CRITIC_PARA.input_dim  # D
+        self.input_dim = CRITIC_PARA.input_dim
         self.output_dim = CRITIC_PARA.output_dim
-        self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = RNN_HIDDEN_SIZE
         self.weight_decay = weight_decay
+        self.embedding_dim = 1
 
-        # <<< MODIFIED 1/6 >>>: 定义一个新的嵌入维度
-        self.embedding_dim = 1  # 8 #16 #1 #32  # 每个特征将被映射到这个维度
-
-        # <<< MODIFIED 2/6 >>>: 检查多头注意力的约束
-        # 多头注意力的一个要求是：嵌入维度必须能被头的数量整除
         assert self.embedding_dim % ATTN_NUM_HEADS == 0, \
             f"embedding_dim ({self.embedding_dim}) must be divisible by ATTN_NUM_HEADS ({ATTN_NUM_HEADS})"
 
-        # --- 模块定义 ---
-        # <<< ADDED BACK 3/6 >>>: 重新引入特征嵌入层
-        # 将每个1维特征映射到 embedding_dim 维
-        # self.feature_embed = Linear(1, self.embedding_dim)
-
-        # 1. 特征级自注意力层
-        # 在 D 个特征的嵌入向量之间计算注意力，以捕捉特征间的相互关系
+        # --- 1. 特征级自注意力层 ---
         self.attention = MultiheadAttention(embed_dim=self.embedding_dim,
                                             num_heads=ATTN_NUM_HEADS,
-                                            dropout=0.0,  # 在策略网络中通常不使用 dropout
-                                            batch_first=True)  # 输入输出格式为 (Batch, Seq, Feature)
+                                            dropout=0.0,
+                                            batch_first=True)
 
-        # 2. GRU 时序建模层
-        # <<< MODIFIED 5/6 >>>: GRU的输入维度现在是 D * embedding_dim
-        # 因为所有特征的上下文感知嵌入被展平后送入GRU
-        gru_input_dim = self.input_dim * self.embedding_dim
+        # --- 2. 定义 GRU 之前的共享 MLP (Pre-GRU MLP) ---
+        pre_gru_mlp_input_dim = self.input_dim * self.embedding_dim
+        pre_gru_mlp_layers = 2
+        pre_gru_dims = CRITIC_PARA.model_layer_dim[:pre_gru_mlp_layers]
 
-        # --- 模块定义 ---
-        # 1. GRU 时序建模层
-        # 输入维度是原始状态维度 D (self.input_dim)
-        self.gru = GRU(gru_input_dim, self.rnn_hidden_size, batch_first=True)
+        self.pre_gru_mlp = Sequential()
+        mlp_input_dim = pre_gru_mlp_input_dim
+        for i, dim in enumerate(pre_gru_dims):
+            self.pre_gru_mlp.add_module(f'pre_gru_fc_{i}', Linear(mlp_input_dim, dim))
+            self.pre_gru_mlp.add_module(f'pre_gru_leakyrelu_{i}', LeakyReLU())
+            mlp_input_dim = dim
 
-        # 2. MLP骨干网络 (不变)
-        layers_dims = [self.rnn_hidden_size] + CRITIC_PARA.model_layer_dim
-        self.network_base = Sequential()
-        for i in range(len(layers_dims) - 1):
-            self.network_base.add_module(f'fc_{i}', Linear(layers_dims[i], layers_dims[i + 1]))
-            # self.network_base.add_module(f'LayerNorm_{i}', LayerNorm(layers_dims[i + 1]))
-            self.network_base.add_module(f'LeakyReLU_{i}', LeakyReLU())
+        pre_gru_output_dim = pre_gru_dims[-1] if pre_gru_dims else pre_gru_mlp_input_dim
 
-        # 3. 输出头 (Value Head) (不变)
-        base_output_dim = CRITIC_PARA.model_layer_dim[-1]
-        self.fc_out = Linear(base_output_dim, self.output_dim)
+        # --- 3. GRU 时序建模层 ---
+        self.gru = GRU(pre_gru_output_dim, self.rnn_hidden_size, batch_first=True)
 
-        # # --- [新增] 应用初始化 ---
-        # self.apply(init_weights)  # 对所有子模块应用通用初始化
+        # --- 4. 定义 GRU 之后的 MLP (Post-GRU MLP) ---
+        post_gru_dims = CRITIC_PARA.model_layer_dim[pre_gru_mlp_layers:]
+        self.post_gru_mlp = Sequential()
+        mlp_input_dim = self.rnn_hidden_size
+        for i, dim in enumerate(post_gru_dims):
+            self.post_gru_mlp.add_module(f'post_gru_fc_{i}', Linear(mlp_input_dim, dim))
+            self.post_gru_mlp.add_module(f'post_gru_leakyrelu_{i}', LeakyReLU())
+            mlp_input_dim = dim
 
-        # # --- [新增] 对输出层进行特殊初始化 ---
-        # # 这样做是为了在训练开始时有更稳定的价值估计
-        # init_range = 3e-3
-        # self.fc_out.weight.data.uniform_(-init_range, init_range)
-        # self.fc_out.bias.data.fill_(0)
-        # # --- 初始化结束 ---
+        post_gru_output_dim = post_gru_dims[-1] if post_gru_dims else self.rnn_hidden_size
 
-        # --- <<< MODIFICATION START: 精细化优化器设置 >>> ---
-        # 1. 初始化空的参数列表
-        gru_params = []
-        attention_params = []
-        other_params = []
+        # --- 5. 最终的输出头 (Head) ---
+        self.fc_out = Linear(post_gru_output_dim, self.output_dim)
 
-        # 2. 遍历所有命名参数，并将它们分配到对应的组中
+        # --- 6. 优化器设置 ---
+        gru_params, attention_params, other_params = [], [], []
         for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-
-            # 根据参数名称中的关键词进行分组
+            if not param.requires_grad: continue
             if 'gru' in name.lower():
                 gru_params.append(param)
-            elif any(key in name.lower() for key in ['attention', 'attn', 'layernorm']):
-                # 注意：你之前的代码把 layernorm 也归入了 attention 组，这里保持一致
+            elif any(key in name.lower() for key in ['attention', 'attn']):
                 attention_params.append(param)
             else:
                 other_params.append(param)
 
-        # 3. 创建参数组 (parameter groups) 列表
         param_groups = [
-            {
-                'params': gru_params,
-                'lr': CRITIC_PARA.gru_lr  # 使用为 GRU 定义的专属学习率
-            },
-            {
-                'params': attention_params,
-                'lr': CRITIC_PARA.attention_lr  # 使用为 Attention 定义的专属学习率
-            },
-            {
-                'params': other_params  # 其他所有参数
-                # 这里不指定 'lr'，它们将使用优化器构造函数中的默认 lr
-            }
+            {'params': gru_params, 'lr': CRITIC_PARA.gru_lr},
+            {'params': attention_params, 'lr': CRITIC_PARA.attention_lr},
+            {'params': other_params, 'lr': CRITIC_PARA.lr}
         ]
 
-        # 4. 使用参数组初始化优化器
-        # 传入的 lr=CRITIC_PARA.lr 将作为 "other_params" 组的默认学习率
-        self.optim = torch.optim.Adam(param_groups, lr=CRITIC_PARA.lr, weight_decay=self.weight_decay)
-
-        print("--- Actor Optimizer Initialized with Parameter Groups ---")
-        print(f"  - GRU Params LR: {CRITIC_PARA.gru_lr}")
-        print(f"  - Attention Params LR: {CRITIC_PARA.attention_lr}")
-        print(f"  - Other Params LR: {CRITIC_PARA.lr}")
-
+        self.optim = torch.optim.Adam(param_groups, weight_decay=self.weight_decay)
         self.critic_scheduler = lr_scheduler.LinearLR(
             self.optim,
             start_factor=1.0,
@@ -651,64 +994,32 @@ class Critic_GRU(Module):
             total_iters=AGENTPARA.MAX_EXE_NUM
         )
         self.to(CRITIC_PARA.device)
-        # print(f"--- [DEBUG] Critic_GRU Initialized (No Pooling Bottleneck) ---")
 
     def forward(self, obs, hidden_state):
-        """
-        前向传播方法。
-        :param obs: 状态观测值，形状为 (B, D) 或 (B, S, D)
-        :param hidden_state: GRU 的隐藏状态
-        :return: 状态价值和新的 GRU 隐藏状态
-        """
         obs_tensor = check(obs).to(**CRITIC_PARA.tpdv)
-        # 检查输入是否为序列。如果不是（例如，单步推理），则增加一个长度为1的序列维度。
         is_sequence = obs_tensor.dim() == 3
         if not is_sequence:
-            obs_tensor = obs_tensor.unsqueeze(1) # (B, D) -> (B, 1, D)
-        B, S, D = obs_tensor.shape  # B:批大小, S:序列长度, D:特征维度
-        # --- 阶段一：特征交互 ---
-        # 1. 准备特征 token: (B, S, D) -> (B*S, D, 1)
+            obs_tensor = obs_tensor.unsqueeze(1)
+        B, S, D = obs_tensor.shape
+
+        # --- 阶段一: 特征交互 (Attention) ---
         feat_tokens = obs_tensor.contiguous().view(B * S, D, 1)
-
-        # <<< ADDED BACK 6/6, part 1 >>>: 应用嵌入层
-        # 2. 特征嵌入: (B*S, D, 1) -> (B*S, D, embedding_dim)
-        # token_embeds = self.feature_embed(feat_tokens)
         token_embeds = feat_tokens
-        # 层归一化
-        # token_embeds = self.attention_layernorm(token_embeds)
-
-        # 3. 自注意力计算
-        # query, key, value 都是 token_embeds，进行自注意力计算
         attn_out, _ = self.attention(token_embeds, token_embeds, token_embeds)
-
-        # 4. 残差连接：将注意力输出与原始嵌入相加，有助于梯度传播
-        token_context = token_embeds + attn_out  # 形状: (B*S, D, embedding_dim)
-
-        # 层归一化
-        # token_context = self.attention_layernorm(token_context)
-
-        # <<< MODIFIED 6/6, part 2 >>>: 重塑以保留所有信息
-        # 5. 展平上下文向量: (B*S, D, embedding_dim) -> (B*S, D * embedding_dim)
+        token_context = token_embeds + attn_out
         flattened_context = token_context.contiguous().view(B * S, -1)
-
-        # 6. 恢复序列结构: (B*S, D * embedding_dim) -> (B, S, D * embedding_dim)
         contextualized_sequence = flattened_context.view(B, S, -1)
 
-        # --- 阶段二：时序建模 ---
-        # 7. GRU处理，现在输入的是经过特征交互和展平后的完整序列
-        gru_out, new_hidden = self.gru(contextualized_sequence, hidden_state)
+        # --- 阶段二: 特征提取 (Pre-GRU MLP) ---
+        mlp_sequence = self.pre_gru_mlp(contextualized_sequence)
 
-        # # --- 阶段一：时序建模 ---
-        # # 直接将原始状态序列送入GRU
-        # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+        # --- 阶段三: 时序建模 (GRU) ---
+        gru_out, new_hidden = self.gru(mlp_sequence, hidden_state)
 
-        # --- 阶段二：价值评估 (不变) ---
-        # MLP加工
-        base_features_sequence = self.network_base(gru_out)
-        # 输出价值
-        value = self.fc_out(base_features_sequence)
+        # --- 阶段四: 价值评估 (Post-GRU MLP) ---
+        post_gru_features = self.post_gru_mlp(gru_out)
+        value = self.fc_out(post_gru_features)
 
-        # 如果是单步推理，移除序列维度
         if not is_sequence:
             value = value.squeeze(1)
 
@@ -753,7 +1064,7 @@ class PPO_continuous(object):
         self.total_steps = 0
         # 为本次训练创建一个带时间戳的存档文件夹名
         self.training_start_time = time.strftime("PPO_ATT_GRU_%Y-%m-%d_%H-%M-%S")  # <<< 修改 >>> 更新存档文件夹名称
-        self.base_save_dir = "../../../save/save_evade_fuza"
+        self.base_save_dir = "../../../../save/save_evade_fuza"
         win_rate_subdir = "胜率模型"
         # 拼接成完整的存档路径
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
@@ -766,7 +1077,7 @@ class PPO_continuous(object):
                 self.load_models_from_directory(model_dir_path)
             else:
                 print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
-                self.load_models_from_directory("../../../test/test_evade")
+                self.load_models_from_directory("../../../../test/test_evade")
 
     def load_models_from_directory(self, directory_path: str):
         """从指定目录加载 Actor 和 Critic 模型的权重。"""

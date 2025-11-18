@@ -31,7 +31,7 @@ class RewardCalculator:
         # [三九线奖励参数]
         self.ASPECT_REWARD_EFFECTIVE_RANGE = 10000.0 #5000.0
         self.ASPECT_REWARD_WIDTH_DEG = 45.0
-        self.ASPECT_PITCH_THRESHOLD_DEG = 70.0
+        self.ASPECT_PITCH_THRESHOLD_DEG = 75.0
 
         # [滚转惩罚参数] (无阈值版本)
         self.MAX_PHYSICAL_ROLL_RATE_RAD_S = np.deg2rad(240.0)
@@ -77,6 +77,9 @@ class RewardCalculator:
         self.HIGH_G_SENSITIVITY = 4.0  # 奖励函数的敏感度，值越大，低G奖励越少，高G奖励越多
         # <<< 新增结束 >>>
 
+        # <<< 新增：为分离加速度奖励创建历史状态变量 >>>
+        self.prev_separation_velocity = None
+
     def reset(self):
             """为新回合重置状态变量。"""
             self.prev_missile_v_mag = None
@@ -92,6 +95,9 @@ class RewardCalculator:
             self.prev_closing_velocity = None
             # 注意：持续滚转的计时器现在不在这个类里，因为它依赖于环境的dt，
             # 最好由主环境管理。或者在这里接收dt进行更新。为简化，我们先假设它在主环境中。
+
+            # <<< 新增：重置历史状态变量 >>>
+            self.prev_separation_velocity = None
 
     # --- (中文) 稀疏奖励接口 ---
     def get_sparse_reward(self, miss_distance: float, R_kill: float) -> float:
@@ -148,11 +154,11 @@ class RewardCalculator:
         # reward_taa_rate = w_taa_rate * self._reward_for_taa_rate(aircraft, missile, 0.2)
 
         # #接近速度奖励
-        reward_closing_velocity = 0.5 * self._reward_for_closing_velocity_change(aircraft, missile, dt = 0.2)
+        # reward_closing_velocity = 0.5 * self._reward_for_closing_velocity_change(aircraft, missile, dt = 0.2)
 
         # <<< 新增：调用干扰弹时机奖励函数 >>>
         # 将新奖励的权重也在这里设置，例如 1.0
-        reward_flare_timing = 0.5 * self._compute_flare_timing_reward(flare_trigger_action, aircraft, missile)
+        reward_flare_timing = 1.0 * self._compute_flare_timing_reward(flare_trigger_action, aircraft, missile)
 
         # <<< 新增：调用高G机动奖励函数 >>>
         # 在这里设置新奖励的权重，例如 0.5
@@ -163,6 +169,12 @@ class RewardCalculator:
         # reward_high_g_base = self._reward_for_high_g_maneuver(...) # 假设范围是 [0, 1]
         # 最终奖励 = 基础G力奖励 * 机动有效性
         final_high_g_reward = 0.5 * reward_high_g * reward_ata_rate
+
+        # # <<< 新增 >>> 调用新的分离速度奖励函数，权重可以设高一些，因为它代表了核心生存策略
+        # reward_separation = 1.0 * self._reward_for_separation_velocity(aircraft, missile)
+        # <<< 核心修改：只使用分离加速度奖励 >>>
+        # 这个奖励直接鼓励“加速”这个行为
+        reward_separation_accel = 0.5 * self._reward_for_separation_acceleration(aircraft, missile)
 
         # 2. 将所有组件按权重加权求和 (权重直接在此处定义，与您的代码一致)
         final_dense_reward = (
@@ -177,7 +189,9 @@ class RewardCalculator:
                 + reward_coordinated_turn
                 # + reward_increase_tau
                 # + reward_tau_accel
-                + reward_closing_velocity
+                # + reward_closing_velocity
+                #     + reward_separation
+            + reward_separation_accel   # <<< 已替换 >>>
                 # + reward_ata_rate
                 # + reward_taa_rate
                 + reward_flare_timing
@@ -196,15 +210,145 @@ class RewardCalculator:
         #         f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
         #       #   f"reward_increase_tau: {reward_increase_tau:.2f}",
         #       #   f"reward_tau_accel: {reward_tau_accel:.2f}",
-        #         f"reward_closing_velocity: {reward_closing_velocity:.2f}",
-        #         f"reward_ata_rate: {reward_ata_rate:.2f}",
+        #       #   f"reward_closing_velocity: {reward_closing_velocity:.2f}",
+        #     # f"reward_separation: {reward_separation:.2f}",
+        #     f"reward_separation_accel: {reward_separation_accel:.2f}",
+        #         # f"reward_ata_rate: {reward_ata_rate:.2f}",
         #         # f"reward_taa_rate: {reward_taa_rate:.2f}",
         #     f"reward_flare_timing: {reward_flare_timing:.2f}",
-        #     f"reward_high_g: {reward_high_g:.2f}",
+        #     # f"reward_high_g: {reward_high_g:.2f}",
         #     f"final_high_g_reward: {final_high_g_reward:.2f}",
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
+
+    # <<< 核心修改：具备战术情境感知的版本 >>>
+    def _reward_for_separation_acceleration(self, aircraft: Aircraft, missile: Missile) -> float:
+        """
+        (V2 - Context-Aware) 奖励“分离速度”的增加量，但仅在战术上合理时生效。
+
+        核心逻辑：
+        1.  [距离门控]: 仅在远距离 (>3km) 生效，权重随距离平滑增加，
+                        以避免与近距离的“三九线”战术发生冲突。
+        2.  [位置门控]: 仅在飞机处于导弹前半球 (ATA < 90度) 时生效，
+                        专注于奖励“逃离当前威胁”的行为。
+        3.  [行为奖励]: 在满足以上条件时，奖励分离速度的增加（加速），惩罚减小（减速）。
+        """
+        # --- 1. 计算基础几何关系 ---
+        aircraft_v_vec = aircraft.get_velocity_vector()
+        missile_v_vec = missile.get_velocity_vector()
+        los_vec_m_to_a = aircraft.pos - missile.pos
+        distance = np.linalg.norm(los_vec_m_to_a)
+
+        # --- 2. 距离门控：计算距离权重 ---
+        # 和姿态奖励函数保持一致的边界，以确保战术协同
+        INNER_BOUNDARY_M = 3000.0
+        OUTER_BOUNDARY_M = 4000.0
+
+        distance_weight = 0.0
+        if distance > OUTER_BOUNDARY_M:
+            distance_weight = 1.0
+        elif distance > INNER_BOUNDARY_M:
+            # 在 3-4 km 之间，权重从 0 线性增加到 1
+            distance_weight = (distance - INNER_BOUNDARY_M) / (OUTER_BOUNDARY_M - INNER_BOUNDARY_M)
+
+        # 如果权重为0 (距离太近)，则此奖励无效，提前返回
+        if distance_weight <= 0:
+            self.prev_separation_velocity = None  # 重置历史，因为情境已改变
+            return 0.0
+
+        # --- 3. 位置门控：检查是否在前半球 ---
+        if distance < 1e-6:
+            self.prev_separation_velocity = None
+            return 0.0
+
+        los_unit_vec = los_vec_m_to_a / distance
+        norm_missile_v = np.linalg.norm(missile_v_vec)
+        if norm_missile_v > 1e-6:
+            cos_ata = np.clip(np.dot(los_unit_vec, missile_v_vec) / norm_missile_v, -1.0, 1.0)
+            # 如果飞机在导弹后半球 (cos_ata < 0)，威胁解除，此奖励不适用
+            if cos_ata < 0:
+                self.prev_separation_velocity = None  # 重置历史
+                return 0.0
+
+        # --- 4. 核心逻辑：计算分离加速度奖励 ---
+        current_separation_velocity = np.dot(aircraft_v_vec, los_unit_vec)
+
+        reward = 0.0
+        if self.prev_separation_velocity is not None:
+            delta_v_sep = current_separation_velocity - self.prev_separation_velocity
+            reward_base = delta_v_sep
+
+            SENSITIVITY = 0.1
+            # 计算基础奖励，范围 [-1, 1]
+            reward_scaled = np.tanh(reward_base * SENSITIVITY)
+
+            # 将基础奖励与距离权重相乘
+            reward = reward_scaled * distance_weight
+
+        # --- 5. 更新历史状态 ---
+        self.prev_separation_velocity = current_separation_velocity
+
+        return reward
+    # <<< 新增：分离速度奖励函数 >>>
+    def _reward_for_separation_velocity(self, aircraft: Aircraft, missile: Missile) -> float:
+        """
+        (V1 - 独立版) 专门奖励飞机沿视线方向的分离速度。
+        这个奖励直接衡量飞机的逃逸努力，且不受导弹自身减速的影响。
+
+        核心逻辑：
+        - 只在远距离 (>3km) 生效，避免与近距离的三九线战术冲突。
+        - 在导弹后半球时，给予最大奖励，鼓励维持安全状态。
+        - 奖励大小与飞机沿视线远离导弹的速度分量成正比。
+        """
+        # --- 1. 计算基础几何关系 ---
+        aircraft_v_vec = aircraft.get_velocity_vector()
+        missile_v_vec = missile.get_velocity_vector()
+        los_vec_m_to_a = aircraft.pos - missile.pos
+        distance = np.linalg.norm(los_vec_m_to_a)
+
+        # --- 2. 距离门控：只在远距离激活此奖励 ---
+        # 定义奖励开始生效的内部边界和完全生效的外部边界
+        SEPARATION_REWARD_INNER_BOUNDARY_M = 3000.0
+        SEPARATION_REWARD_OUTER_BOUNDARY_M = 4000.0
+
+        if distance < SEPARATION_REWARD_INNER_BOUNDARY_M:
+            return 0.0  # 距离太近，不奖励分离速度，优先三九线机动
+
+        # 处理除零风险
+        if distance < 1e-6:
+            return 0.0
+
+        los_unit_vec = los_vec_m_to_a / distance
+
+        # --- 3. 安全门控：优先进行后半球检查 ---
+        norm_missile_v = np.linalg.norm(missile_v_vec)
+        if norm_missile_v > 1e-6:
+            cos_ata = np.clip(np.dot(los_unit_vec, missile_v_vec) / norm_missile_v, -1.0, 1.0)
+            if cos_ata < 0:
+                # 飞机在导弹后半球，威胁解除，给予最大奖励
+                return 1.0
+
+        # --- 4. 计算核心奖励：分离速度 ---
+        # 分离速度 = 飞机速度矢量在视线单位矢量上的投影
+        separation_velocity = np.dot(aircraft_v_vec, los_unit_vec)
+
+        # 归一化：用一个合理的飞机最大速度作为基准
+        MAX_AIRCRAFT_SPEED_MS = 400.0  # 约 1.2 马赫
+        # 我们只奖励正的分离速度（正在远离），如果是负的（正在靠近），奖励为0
+        reward_base = np.clip(separation_velocity / MAX_AIRCRAFT_SPEED_MS, 0.0, 1.0)
+
+        # --- 5. 应用平滑的距离权重 ---
+        if distance >= SEPARATION_REWARD_OUTER_BOUNDARY_M:
+            distance_weight = 1.0
+        else:
+            # 在 3-4 km 之间，权重从 0 线性增加到 1
+            distance_weight = (distance - SEPARATION_REWARD_INNER_BOUNDARY_M) / \
+                              (SEPARATION_REWARD_OUTER_BOUNDARY_M - SEPARATION_REWARD_INNER_BOUNDARY_M)
+
+        final_reward = reward_base * distance_weight
+
+        return final_reward
 
     def _compute_missile_posture_reward_blend(self, aircraft: Aircraft, missile: Missile):
         """
@@ -253,6 +397,16 @@ class RewardCalculator:
         angle_deg = np.rad2deg(angle_rad)  # 范围 [0, 180]
         angle_error_deg = abs(angle_deg - 90)  # 与90度的误差
         reward_three_nine = math.exp(-(angle_error_deg ** 2) / (2 * self.ASPECT_REWARD_WIDTH_DEG ** 2))
+
+        # <<< 核心修改：增加俯仰角限制 >>>
+        # 1. 获取飞机的俯仰角 (pitch)，并转换为度
+        # 通过 attitude_rad 元组的第一个元素获取俯仰角
+        aircraft_pitch_deg = np.rad2deg(aircraft.attitude_rad[0])
+
+        # 2. 如果俯仰角小于-70度（即机头朝下超过70度），则取消三九线奖励
+        if aircraft_pitch_deg < -self.ASPECT_PITCH_THRESHOLD_DEG:  # 使用超参数 -70.0
+            reward_three_nine = 0.0
+        # <<< 修改结束 >>>
 
         # --- 5. 根据距离进行平滑融合 ---
         #    (原有的安全检查逻辑已移到函数开头并被强化)

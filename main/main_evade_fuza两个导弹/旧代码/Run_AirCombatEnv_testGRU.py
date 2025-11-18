@@ -4,19 +4,13 @@
 # GRU隐藏状态（hidden states）的必要逻辑。
 # ==============================================================================
 
-import gym
-import torch
-import numpy as np
 import random
 # <<< GRU 修改 >>>: 导入包含GRU模型的PPO实现
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPOGRUMLP混合架构 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.旧代码.Hybrid_PPOGRUMLP混合架构 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigGRU import *
-from torch.utils.tensorboard import SummaryWriter
 # <<< 更改 >>>: 确保您正在使用的环境与训练时一致
-from Interference_code.env.missile_evasion_environment.missile_evasion_environment import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
 import time
-import matplotlib.pyplot as plt
 
 LOAD_ABLE = True  # 是否使用save文件夹中的模型
 # <<< GRU 修改 >>>: 添加开关以明确表示正在使用RNN模型

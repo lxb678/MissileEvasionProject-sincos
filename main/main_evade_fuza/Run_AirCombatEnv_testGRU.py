@@ -52,8 +52,8 @@ env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING)
 set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型
-# model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPOGRU_2025-11-10_11-44-27"  # 示例路径
+model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
+# model_path = r"D:\code\规避导弹项目\save\save_evade_fuza\PPOGRU_2025-11-14_22-51-00"  # 示例路径
 print(f"正在加载GRU模型: {model_path}")
 
 # <<< GRU 修改 >>>: 初始化Agent时，必须传入 use_rnn=True
@@ -88,7 +88,7 @@ for i_episode in range(episodes):
                 new_actor_hidden, new_critic_hidden = agent.choose_action(observation_eval,
                                                                           actor_hidden,
                                                                           critic_hidden,
-                                                                          deterministic=False)
+                                                                          deterministic=True)
 
             # 2. 将扁平数组打包成字典 (这部分不变)
             action_dict_eval = pack_action_into_dict(action_eval_flat)
@@ -142,4 +142,4 @@ print(f"最终成功率: {success_num / episodes * 100:.2f}%")
 print(f"所有回合平均耗时: {np.mean(episode_times):.2f}s")
 
 # 可以在所有回合结束后，选择一个典型的失败或成功案例进行渲染
-env.render()
+# env.render()
