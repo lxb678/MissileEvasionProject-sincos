@@ -13,8 +13,8 @@ class AGENTPARA:
     mini_lr=最小的学习率
     ppo_epoch =每次训练的代数
     '''
-    OBS_DIM= 13#9
-    ACTION_DIM=8#9
+    OBS_DIM= 11 #13 #9
+    ACTION_DIM= 8 #9
     MAX_EXE_NUM=5e5
     RANDOM_SEED=1
     epsilon=0.2
@@ -67,7 +67,7 @@ ACTOR_PARA.model_layer_dim = [128,128,128]#[512,256,128]  #[128,128,128]
 # ACTOR_PARA.model_layer_dim = [512,256,128,64]
 ACTOR_PARA.output_dim = AGENTPARA.ACTION_DIM   #多维的动作 每一维的动作输出0/1
 ACTOR_PARA.lr = 3e-4 #3e-4 #5e-4 #3e-4  #1e-5
-ACTOR_PARA.gru_lr = 3e-4 #3e-4 #1e-4 #3e-4#1e-5 #3e-4#1e-2 #5e-4 #1e-3  #5e-4      # GRU 层的专属学习率 (通常可以设得小一些)
+ACTOR_PARA.gru_lr = 3e-4 #1e-4 #3e-4       # GRU 层的专属学习率 (通常可以设得小一些)
 
 CRITIC_PARA = MODELPARA()
 CRITIC_PARA.input_dim = AGENTPARA.OBS_DIM
@@ -78,4 +78,4 @@ CRITIC_PARA.model_layer_dim = [128,128,128]#[512,256,128] #[128,128,128]
 # CRITIC_PARA.model_layer_dim = [512,256,128,64]
 CRITIC_PARA.output_dim = 1
 CRITIC_PARA.lr = 1e-3 #3e-4 #1e-3
-CRITIC_PARA.gru_lr = 1e-3 #1e-3 #1e-4 #ACTOR_PARA.gru_lr
+CRITIC_PARA.gru_lr = 1e-3 #3e-4 #1e-3 #1e-3 #1e-4 #ACTOR_PARA.gru_lr

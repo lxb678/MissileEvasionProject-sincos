@@ -63,13 +63,19 @@ class AirCombatEnv(gym.Env):
         # 每个导弹: o_dis(1) + o_beta(sin,cos)(2) + o_theta_L(sin,cos)(2) = 5
         # 飞机自身: o_av(1) + o_h(1) + o_ae(sin,cos)(2) + o_am(sin,cos)(2) + o_ir(1) + o_q(1) = 8
         # 总维度 = 5 * num_missiles + 8
-        observation_dim = 5 * self.num_missiles + 8
+        # observation_dim = 5 * self.num_missiles + 8
+
+        # <<< 俯仰角修改 >>> 定义观测空间 (Observation Space) - 【核心修改】
+        # 每个导弹: o_dis(1) + o_beta(sin,cos)(2) + o_theta_L_norm(1) = 4
+        # 飞机自身: o_av(1) + o_h(1) + o_ae_norm(1) + o_am(sin,cos)(2) + o_ir(1) + o_q(1) = 7
+        # 总维度 = 4 * num_missiles + 7
+        observation_dim = 4 * self.num_missiles + 7
 
         self.observation_space = spaces.Box(
             low=-np.inf, # sin/cos 的值域是[-1, 1]，但为保持一致性，可以仍用-inf, inf
             high=np.inf,
             shape=(observation_dim,),
-            dtype=np.float64
+            dtype=np.float32  #ai推荐使用32
         )
 
         # --- 仿真参数 ---
@@ -162,7 +168,7 @@ class AirCombatEnv(gym.Env):
         # (飞机初始状态)
         y_t = np.random.uniform(5000, 10000)
         aircraft_pitch = np.deg2rad(np.random.uniform(-30, 30))
-        aircraft_vel = np.random.uniform(200, 400)
+        aircraft_vel = np.random.uniform(300, 400)
         initial_aircraft_state = np.array([0, y_t, 0, aircraft_vel, aircraft_pitch, 0, 0, 0.0])
         self.aircraft.reset(initial_state=initial_aircraft_state)
 
@@ -193,7 +199,7 @@ class AirCombatEnv(gym.Env):
             x_m = R_dist * (-np.cos(theta1))
             z_m = R_dist * np.sin(theta1)
             y_m = y_t + np.random.uniform(-2000, 2000)
-            missile_vel = np.random.uniform(700, 900)
+            missile_vel = np.random.uniform(800, 900)
 
             # 计算初始视线角
             R_vec = self.aircraft.pos - np.array([x_m, y_m, z_m])
@@ -201,7 +207,22 @@ class AirCombatEnv(gym.Env):
             theta_L = np.arcsin(R_vec[1] / R_mag)
             phi_L = np.arctan2(R_vec[2], R_vec[0])
 
-            initial_missile_state = np.array([missile_vel, theta_L, phi_L, x_m, y_m, z_m])
+            # --- <<< 新增修改开始：添加初始指向误差 >>> ---
+            # 设定最大发射误差角度 (例如 20度)
+            # 这一步模拟了导弹发射时的不确定性，或者由于挂架/发射方式导致的初始离轴
+            initial_heading_error_deg = 60.0
+            error_rad = np.deg2rad(initial_heading_error_deg)
+
+            # 在俯仰 (theta) 和 偏航 (phi) 上分别增加随机扰动
+            # 导弹初始速度方向 = 理想视线方向 + 随机误差
+            delta_theta = np.random.uniform(-error_rad, error_rad)
+            delta_phi = np.random.uniform(-error_rad, error_rad)
+
+            missile_init_theta = theta_L + delta_theta
+            missile_init_phi = phi_L + delta_phi
+            # --- <<< 新增修改结束 >>> ---
+
+            initial_missile_state = np.array([missile_vel, missile_init_theta, missile_init_phi, x_m, y_m, z_m])
             missile = Missile(initial_missile_state)
 
             # <<< 多导弹更改 >>> 为导弹附加额外状态
@@ -417,63 +438,134 @@ class AirCombatEnv(gym.Env):
             )
 
     def _get_observation(self) -> np.ndarray:
-        """ <<< 多导弹更改 (V3 - sin/cos 角度表示法) >>> """
+        """ <<< 核心修改: 统一归一化至[-1, 1]，并使用与单导弹版相同的模糊距离和物理边界 >>>
+        组装观测向量。为每个导弹（无论是否激活）生成观测值。
+        - 激活导弹: 使用精确的相对几何关系并进行归一化。
+        - 非激活导弹: 提供一个标准的“无威胁”观测值，其归一化值也落在[-1, 1]区间。
+        """
         obs_parts = []
 
         # --- 1. 遍历每个导弹，计算其相对观测值 ---
         for missile in self.missiles:
             if missile.terminated or self.t_now < missile.launch_time:
-                # 无效导弹提供标准“无威胁”观测值
-                o_dis_norm = 1.0
-                o_beta_sin, o_beta_cos = 0.0, 1.0  # beta=0度 (正前方) -> sin(0)=0, cos(0)=1
-                o_theta_L_sin, o_theta_L_cos = 0.0, 1.0  # theta_L=0度 (水平) -> sin(0)=0, cos(0)=1
-                obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_sin, o_theta_L_cos])
+                # --- 非激活导弹的观测值 (统一到 [-1, 1] 区间) ---
+                o_dis_norm = 1.0  # 距离最远 -> 1.0
+                o_beta_sin, o_beta_cos = 0.0, 1.0  # beta=0度 (正前方)
+                o_theta_L_rel_norm = 0.0  # 相对俯仰角为0 (水平) -> 0.0
+
+                obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
                 continue
 
-            # --- 以下代码只对有效导弹执行 ---
+            # --- 以下代码只对激活导弹执行 ---
             R_vec = self.aircraft.pos - missile.pos
             R_rel = np.linalg.norm(R_vec)
 
-            # 计算原始弧度角
             o_beta_rad = self._compute_relative_beta2(self.aircraft.state_vector, missile.state_vector)
             Ry_rel = missile.pos[1] - self.aircraft.pos[1]
             o_theta_L_rel_rad = np.arcsin(np.clip(Ry_rel / (R_rel + 1e-6), -1.0, 1.0))
 
-            # --- 更改前 (Before) ---
-            o_dis_norm = np.clip(int(R_rel / 1000.0), 0, 10) / 10
-            # o_beta_norm = o_beta_rad / (2 * np.pi)
-            # o_theta_L_rel_norm = (o_theta_L_rel_rad + np.pi / 2) / np.pi
-            # obs_parts.extend([o_dis_norm, o_beta_norm, o_theta_L_rel_norm])
+            # --- 归一化 (与单导弹版逻辑完全一致) ---
+            # 1. 距离模糊化与归一化
+            quantized_distance_km = int(R_rel / 1000.0)
+            max_quantized_dist = 10.0
+            o_dis_norm = 2 * (quantized_distance_km / max_quantized_dist) - 1.0
 
-            # --- 更改后 (After) ---
-            # o_dis_norm = np.clip(R_rel / 30000.0, 0, 1)  # 距离用更平滑的归一化
+            # 2. 方位角 beta 使用 sin/cos
             o_beta_sin = np.sin(o_beta_rad)
             o_beta_cos = np.cos(o_beta_rad)
-            # o_theta_L_rel_rad 的范围是 [-pi/2, pi/2]，sin/cos 转换依然有效且有益
-            o_theta_L_sin = np.sin(o_theta_L_rel_rad)
-            o_theta_L_cos = np.cos(o_theta_L_rel_rad)
-            obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_sin, o_theta_L_cos])
 
-        # --- 2. 获取飞机自身状态 ---
+            # 3. 相对俯仰角 theta_L 使用线性归一化
+            o_theta_L_rel_norm = o_theta_L_rel_rad / (np.pi / 2)
+
+            obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
+
+        # --- 2. 获取飞机自身状态 (与单导弹版逻辑完全一致) ---
         aircraft_pitch_rad = self.aircraft.state_vector[4]  # 俯仰角 theta
         aircraft_bank_rad = self.aircraft.state_vector[6]  # 滚转角 phi
 
-        # --- 更改后 (After) ---
-        o_av_norm = (self.aircraft.velocity - 100) / 300
-        o_h_norm = (self.aircraft.pos[1] - 1000) / 14000
-        o_ae_sin = np.sin(aircraft_pitch_rad)  # 俯仰角
-        o_ae_cos = np.cos(aircraft_pitch_rad)
-        o_am_sin = np.sin(aircraft_bank_rad)  # 滚转角
-        o_am_cos = np.cos(aircraft_bank_rad)
-        o_ir_norm = self.o_ir / self.N_infrared
-        # 滚转速率 o_q 不是角度，是角速度，不需要也不能用sin/cos，保持线性归一化
-        o_q_norm = (self.aircraft.roll_rate_rad_s + 4.0 * np.pi / 3.0) / (8.0 * np.pi / 3.0)
+        # 1. 速度归一化 (使用物理边界)
+        o_av_norm = 2 * ((self.aircraft.velocity - 150) / 250) - 1
 
-        aircraft_obs = [o_av_norm, o_h_norm, o_ae_sin, o_ae_cos, o_am_sin, o_am_cos, o_ir_norm, o_q_norm]
+        # 2. 高度归一化 (使用物理边界)
+        o_h_norm = 2 * ((self.aircraft.pos[1] - 500) / 14500) - 1
+
+        # 3. 飞机俯仰角归一化
+        o_ae_norm = aircraft_pitch_rad / (np.pi / 2)
+
+        # 4. 滚转角使用 sin/cos 表示
+        o_am_sin = np.sin(aircraft_bank_rad)
+        o_am_cos = np.cos(aircraft_bank_rad)
+
+        # 5. 剩余诱饵弹数量归一化
+        o_ir_norm = 2 * (self.o_ir / self.N_infrared) - 1.0
+
+        # 6. 滚转速率归一化
+        o_q_norm = self.aircraft.roll_rate_rad_s / (4.0 * np.pi / 3.0)
+
+        aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm, o_q_norm]
 
         # --- 3. 拼接成最终的观测向量 ---
         observation = np.array(obs_parts + aircraft_obs)
         return observation.astype(np.float32)
+
+    # def _get_observation(self) -> np.ndarray:
+    #     """ <<< 多导弹更改 (V3 - sin/cos 角度表示法) >>> """
+    #     obs_parts = []
+    #
+    #     # --- 1. 遍历每个导弹，计算其相对观测值 ---
+    #     for missile in self.missiles:
+    #         if missile.terminated or self.t_now < missile.launch_time:
+    #             # 无效导弹提供标准“无威胁”观测值
+    #             o_dis_norm = 1.0
+    #             o_beta_sin, o_beta_cos = 0.0, 1.0  # beta=0度 (正前方) -> sin(0)=0, cos(0)=1
+    #             o_theta_L_sin, o_theta_L_cos = 0.0, 1.0  # theta_L=0度 (水平) -> sin(0)=0, cos(0)=1
+    #             obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_sin, o_theta_L_cos])
+    #             continue
+    #
+    #         # --- 以下代码只对有效导弹执行 ---
+    #         R_vec = self.aircraft.pos - missile.pos
+    #         R_rel = np.linalg.norm(R_vec)
+    #
+    #         # 计算原始弧度角
+    #         o_beta_rad = self._compute_relative_beta2(self.aircraft.state_vector, missile.state_vector)
+    #         Ry_rel = missile.pos[1] - self.aircraft.pos[1]
+    #         o_theta_L_rel_rad = np.arcsin(np.clip(Ry_rel / (R_rel + 1e-6), -1.0, 1.0))
+    #
+    #         # --- 更改前 (Before) ---
+    #         o_dis_norm = np.clip(int(R_rel / 1000.0), 0, 10) / 10
+    #         # o_beta_norm = o_beta_rad / (2 * np.pi)
+    #         # o_theta_L_rel_norm = (o_theta_L_rel_rad + np.pi / 2) / np.pi
+    #         # obs_parts.extend([o_dis_norm, o_beta_norm, o_theta_L_rel_norm])
+    #
+    #         # --- 更改后 (After) ---
+    #         # o_dis_norm = np.clip(R_rel / 30000.0, 0, 1)  # 距离用更平滑的归一化
+    #         o_beta_sin = np.sin(o_beta_rad)
+    #         o_beta_cos = np.cos(o_beta_rad)
+    #         # o_theta_L_rel_rad 的范围是 [-pi/2, pi/2]，sin/cos 转换依然有效且有益
+    #         o_theta_L_sin = np.sin(o_theta_L_rel_rad)
+    #         o_theta_L_cos = np.cos(o_theta_L_rel_rad)
+    #         obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_sin, o_theta_L_cos])
+    #
+    #     # --- 2. 获取飞机自身状态 ---
+    #     aircraft_pitch_rad = self.aircraft.state_vector[4]  # 俯仰角 theta
+    #     aircraft_bank_rad = self.aircraft.state_vector[6]  # 滚转角 phi
+    #
+    #     # --- 更改后 (After) ---
+    #     o_av_norm = (self.aircraft.velocity - 100) / 300
+    #     o_h_norm = (self.aircraft.pos[1] - 1000) / 14000
+    #     o_ae_sin = np.sin(aircraft_pitch_rad)  # 俯仰角
+    #     o_ae_cos = np.cos(aircraft_pitch_rad)
+    #     o_am_sin = np.sin(aircraft_bank_rad)  # 滚转角
+    #     o_am_cos = np.cos(aircraft_bank_rad)
+    #     o_ir_norm = self.o_ir / self.N_infrared
+    #     # 滚转速率 o_q 不是角度，是角速度，不需要也不能用sin/cos，保持线性归一化
+    #     o_q_norm = (self.aircraft.roll_rate_rad_s + 4.0 * np.pi / 3.0) / (8.0 * np.pi / 3.0)
+    #
+    #     aircraft_obs = [o_av_norm, o_h_norm, o_ae_sin, o_ae_cos, o_am_sin, o_am_cos, o_ir_norm, o_q_norm]
+    #
+    #     # --- 3. 拼接成最终的观测向量 ---
+    #     observation = np.array(obs_parts + aircraft_obs)
+    #     return observation.astype(np.float32)
 
     # def _get_observation(self) -> np.ndarray:
     #     """ <<< 多导弹更改 (V2 - 修正版) >>> 组装观测向量，为无效导弹设置无意义值。"""

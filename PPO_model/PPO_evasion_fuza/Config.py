@@ -13,8 +13,8 @@ class AGENTPARA:
     mini_lr=最小的学习率
     ppo_epoch =每次训练的代数
     '''
-    OBS_DIM= 13#9
-    ACTION_DIM=8#9
+    OBS_DIM= 11 #13#9
+    ACTION_DIM= 8 #9
     MAX_EXE_NUM=5e5
     RANDOM_SEED=1
     epsilon=0.2

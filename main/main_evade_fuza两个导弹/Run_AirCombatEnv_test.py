@@ -65,7 +65,7 @@ set_seed(env)
 # 假设您的模型保存在 "../../test/test_evade"
 # model_path = "../../test/test_evade" # 或者您训练模型时使用的其他路径
 # model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目\save\save_evade_fuza两个导弹\PPO_2025-11-10_18-42-26"
+model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza两个导弹\PPO_2025-11-20_18-26-31"
 agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_path)
 
 success_num = 0

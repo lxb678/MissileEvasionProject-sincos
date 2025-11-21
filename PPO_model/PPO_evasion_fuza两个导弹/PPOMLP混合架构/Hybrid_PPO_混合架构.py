@@ -199,13 +199,21 @@ class Actor(Module):
         # <<< 修改 >>> 变量解包，现在只有4个部分
         trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
 
-        # 4. 【动作掩码】逻辑 (只作用于触发器，如果没诱饵弹则不能投放)
+        # # 4. 【动作掩码】逻辑 (只作用于触发器，如果没诱饵弹则不能投放)
+        # # <<< 核心修改：更新诱饵弹信息的索引 >>>
+        # # 在新的18维观测空间中，o_ir_norm (诱饵弹剩余比例) 是第17个元素，索引为16。
+        # # 旧索引: 10
+        # # 新索引: 16
+        # has_flares_info = obs_tensor[:, 16]  # 原为 obs_tensor[:, 10]
+
+        # 4. 【动作掩码】逻辑
         # <<< 核心修改：更新诱饵弹信息的索引 >>>
-        # 在新的18维观测空间中，o_ir_norm (诱饵弹剩余比例) 是第17个元素，索引为16。
-        # 旧索引: 10
-        # 新索引: 16
-        has_flares_info = obs_tensor[:, 16]  # 原为 obs_tensor[:, 10]
+        # 在新的15维观测空间中, o_ir_norm 的绝对索引是 13。
+        # 旧索引: 16
+        # 新索引: 13
+        has_flares_info = obs_tensor[:, 13]  # 原为 obs_tensor[:, 16]
         # <<< 修改结束 >>>
+
         mask = (has_flares_info == 0)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):

@@ -1,4 +1,4 @@
-# 文件: Run_AirCombatEnv_testATTGRU.py (实体注意力适配版)
+# 文件: Run_AirCombatEnv_testATTGRU_1120.py (实体注意力适配版)
 
 import random
 # <<< 核心修改 >>>: 导入实体注意力版本的PPO模型

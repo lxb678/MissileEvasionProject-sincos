@@ -201,7 +201,7 @@ class Actor(Module):
 
         # 4. 【动作掩码】逻辑 (只作用于触发器，如果没诱饵弹则不能投放)
         # 假设 obs_tensor 的第 7 个特征 (索引为7) 代表红外诱饵弹数量
-        has_flares_info = obs_tensor[:, 11]
+        has_flares_info = obs_tensor[:, 9]  # 原为 obs_tensor[:, 11]
         mask = (has_flares_info == 0)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):

@@ -31,7 +31,7 @@ class RewardCalculator:
         # [三九线奖励参数]
         self.ASPECT_REWARD_EFFECTIVE_RANGE = 10000.0 #5000.0
         self.ASPECT_REWARD_WIDTH_DEG = 45.0
-        self.ASPECT_PITCH_THRESHOLD_DEG = 75.0
+        self.ASPECT_PITCH_THRESHOLD_DEG = 70.0
 
         # [滚转惩罚参数] (无阈值版本)
         self.MAX_PHYSICAL_ROLL_RATE_RAD_S = np.deg2rad(240.0)
@@ -174,7 +174,9 @@ class RewardCalculator:
         # reward_separation = 1.0 * self._reward_for_separation_velocity(aircraft, missile)
         # <<< 核心修改：只使用分离加速度奖励 >>>
         # 这个奖励直接鼓励“加速”这个行为
-        reward_separation_accel = 0.5 * self._reward_for_separation_acceleration(aircraft, missile)
+        # reward_separation_accel = 0.5 * self._reward_for_separation_acceleration(aircraft, missile)
+
+        reward_speed = 0.5 * self._reward_for_maintaining_speed(aircraft)
 
         # 2. 将所有组件按权重加权求和 (权重直接在此处定义，与您的代码一致)
         final_dense_reward = (
@@ -191,7 +193,8 @@ class RewardCalculator:
                 # + reward_tau_accel
                 # + reward_closing_velocity
                 #     + reward_separation
-            + reward_separation_accel   # <<< 已替换 >>>
+            # + reward_separation_accel   # <<< 已替换 >>>
+                + reward_speed
                 # + reward_ata_rate
                 # + reward_taa_rate
                 + reward_flare_timing
@@ -221,6 +224,45 @@ class RewardCalculator:
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
+
+    def _reward_for_maintaining_speed(self, aircraft: Aircraft) -> float:
+        """
+        如果飞机速度高于等于0.8马-赫，则给予固定的正奖励。
+        如果低于0.8马赫，则根据速度差施加惩罚。
+        """
+        # 1. 定义速度阈值 (单位: m/s)
+        SPEED_THRESHOLD_MS = 0.8 * 340.0
+
+        # 2. 定义固定的正奖励值
+        # 当速度达标时，给予这个奖励。
+        REWARD_FOR_SAFE_SPEED = 0.5  # 可以调整这个值的大小
+
+        # 3. 获取飞机当前速度
+        current_speed_ms = aircraft.velocity
+
+        # 4. 判断并计算奖励/惩罚
+        if current_speed_ms >= SPEED_THRESHOLD_MS:
+            # --- 情况 1: 速度达标 ---
+            # 直接返回固定的正奖励
+            return REWARD_FOR_SAFE_SPEED
+        else:
+            # --- 情况 2: 速度不达标 ---
+            # a. 计算速度差 (这将是一个负数)
+            speed_shortfall = current_speed_ms - SPEED_THRESHOLD_MS
+
+            # b. 将速度差转换为惩罚值
+            # 我们需要一个基准来归一化惩罚。
+            # 假设当速度比阈值低150 m/s时，我们希望惩罚达到最大值-1.0。
+            # 这个 MAX_SHORTFALL_FOR_PENALTY 可以根据战术需求调整。
+            MAX_SHORTFALL_FOR_PENALTY = 120.0
+
+            # c. 计算惩罚
+            # speed_shortfall / MAX_SHORTFALL_FOR_PENALTY 会得到一个 (-1, 0) 范围的值
+            # 例如, 如果欠速 75m/s, 惩罚就是 -75 / 150 = -0.5
+            # 使用 np.clip 确保惩罚不会超过-1.0
+            penalty = np.clip(speed_shortfall / MAX_SHORTFALL_FOR_PENALTY, -1.0, 0)
+
+            return penalty
 
     # <<< 核心修改：具备战术情境感知的版本 >>>
     def _reward_for_separation_acceleration(self, aircraft: Aircraft, missile: Missile) -> float:

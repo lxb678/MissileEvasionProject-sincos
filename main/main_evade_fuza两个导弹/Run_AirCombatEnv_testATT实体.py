@@ -4,7 +4,7 @@ import random
 from typing import Optional
 
 # <<< 核心修改 >>>: 导入仅包含 Attention+MLP 的 PPO 模型
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP交叉注意力 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP交叉注意力2 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 # 导入环境 (保持不变)
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体 import *
@@ -78,7 +78,8 @@ set_seed(env)
 
 # <<< 核心修改 >>>: 确保此路径指向您训练好的【Attention+MLP】模型
 # model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza两个导弹"  # 请替换为您的实际模型路径
-model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_MLP_2025-11-18_11-06-36"  # 请替换为您的实际模型路径
+# model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_MLP_2025-11-21_16-13-43"  # 请替换为您的实际模型路径
+model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_MLP_2025-11-21_16-24-41"
 print(f"正在加载实体注意力MLP模型: {model_path}")
 
 # <<< 核心修改 >>>: 初始化Agent时，传入 use_rnn=False
@@ -113,6 +114,8 @@ for i_episode in range(episodes):
             # 1. 获取动作和注意力权重
             action_eval_flat, _, _, _, attn_weights = agent.choose_action(observation_eval,
                                                                           deterministic=True)
+
+            # print("action_eval_flat", action_eval_flat)
 
             # <<< 新增 >>> 存储当前步的注意力权重
             if attn_weights is not None:
