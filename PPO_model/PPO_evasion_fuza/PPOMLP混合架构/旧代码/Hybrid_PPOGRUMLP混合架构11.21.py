@@ -59,8 +59,8 @@ ACTION_RANGES = {
 
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
-RNN_HIDDEN_SIZE =  64 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH =  10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
+RNN_HIDDEN_SIZE =  64 #128 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
+SEQUENCE_LENGTH =  15 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
 
 
 # ==============================================================================
@@ -1465,7 +1465,7 @@ class PPO_continuous(object):
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
         self.training_start_time = time.strftime("PPOGRU_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../../save/save_evade_fuza"
+        self.base_save_dir = "../../../../save/save_evade_fuza"
         win_rate_subdir = "胜率模型"
         # 为本次运行创建一个唯一的存档文件夹
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
@@ -1478,7 +1478,7 @@ class PPO_continuous(object):
                 self.load_models_from_directory(model_dir_path)
             else:
                 print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
-                self.load_models_from_directory("../../../test/test_evade")
+                self.load_models_from_directory("../../../../test/test_evade")
 
     def load_models_from_directory(self, directory_path: str):
         # This function is correct, no changes needed.

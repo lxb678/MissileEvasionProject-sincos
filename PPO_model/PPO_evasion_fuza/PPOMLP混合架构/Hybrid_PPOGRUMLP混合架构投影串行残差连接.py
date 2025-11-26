@@ -59,7 +59,7 @@ ACTION_RANGES = {
 
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
-RNN_HIDDEN_SIZE =  64 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
+RNN_HIDDEN_SIZE =  32 #64 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
 SEQUENCE_LENGTH =  10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
 
 
@@ -81,27 +81,23 @@ class Actor_GRU(Module):
         self.log_std_max = 2.0
         self.rnn_hidden_size = RNN_HIDDEN_SIZE
 
-        # # --- 1. [新增] 编码层 (Encoder) ---
-        # # 将原始输入映射到 RNN 的隐藏层维度
-        # self.encoder = Sequential(
-        #     Linear(self.input_dim, self.rnn_hidden_size),
-        #     LeakyReLU()
-        # )
+        # 1. [新增] 前置编码器 (Encoder)
+        #    负责将原始物理量映射到特征空间，并进行归一化
+        self.encoder = Sequential(
+            Linear(self.input_dim, self.rnn_hidden_size),
+            # LeakyReLU(),
+            # LayerNorm(self.rnn_hidden_size)  # 归一化对 GRU 很重要
+        )
 
-        # # --- [修改后]：双层 + Tanh ---
-        # enc_mid_dim = RNN_HIDDEN_SIZE * 2  # 或者 self.input_dim * 2
-        # self.encoder = Sequential(
-        #     Linear(self.input_dim, enc_mid_dim),
-        #     LeakyReLU(),
-        #     Linear(enc_mid_dim, self.rnn_hidden_size),
-        #     # Tanh()  # <--- 关键保护
-        # )
+        # 2. GRU 层 (输入是特征，输出是时序特征)
+        self.gru = GRU(
+            input_size=self.rnn_hidden_size,
+            hidden_size=self.rnn_hidden_size,
+            batch_first=True
+        )
 
-        # # --- 2. GRU 层 ---
-        # # 输入和输出维度都保持为 rnn_hidden_size
-        # self.gru = GRU(self.rnn_hidden_size, self.rnn_hidden_size, batch_first=True)
-        # 2. GRU 输入维度直接设为 input_dim
-        self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
+        # 3. [新增] 融合后的归一化层 (Post-Add LayerNorm)
+        # self.fusion_norm = LayerNorm(self.rnn_hidden_size)
 
         # --- 3. [移动] 共享 MLP 基座 (Shared MLP) ---
         # GRU 的输出进入此共享层。我们使用配置文件中的前几层作为共享层。
@@ -153,6 +149,8 @@ class Actor_GRU(Module):
         # 收集所有非 GRU 参数
         other_params = (
                 # list(self.encoder.parameters()) +
+                list(self.encoder.parameters()) +  # <--- 加入 Encoder
+                # list(self.fusion_norm.parameters()) +  # <--- 加入 Norm
                 list(self.shared_mlp.parameters()) +
                 list(self.continuous_tower.parameters()) +
                 list(self.discrete_tower.parameters()) +
@@ -177,18 +175,21 @@ class Actor_GRU(Module):
         if not is_sequence:
             obs_tensor = obs_tensor.unsqueeze(1)
 
-        # # 1. [新] 通过编码层
-        # # 输入: (batch, seq_len, input_dim) -> 输出: (batch, seq_len, rnn_hidden_size)
-        # encoded_features = self.encoder(obs_tensor)
+        # --- 步骤 1: 串行编码 (Encoder) ---
+        # 原始数据 -> 高维特征
+        encoded_features = self.encoder(obs_tensor)
 
-        # 2. 通过 GRU
-        # 输入: (batch, seq_len, rnn_hidden_size) -> 输出: (batch, seq_len, rnn_hidden_size)
-        # gru_out, new_hidden = self.gru(encoded_features, hidden_state)
-        gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+        # --- 步骤 2: GRU 时序处理 ---
+        # GRU 基于特征进行记忆
+        gru_out, new_hidden = self.gru(encoded_features, hidden_state)
 
-        # 3. [新] 通过共享 MLP
-        # 输入: (batch, seq_len, rnn_hidden_size) -> 输出: (batch, seq_len, shared_output_dim)
-        shared_features = self.shared_mlp(gru_out)
+        # --- 步骤 3: 残差连接 (Add & Norm) ---
+        # GRU输出(历史) + Encoder输出(当前)
+        # combined_features = self.fusion_norm(gru_out + encoded_features)
+        combined_features = gru_out + encoded_features
+
+        # 4. 后续 MLP 处理融合后的特征
+        shared_features = self.shared_mlp(combined_features)  # 输入改为 combined_features
 
         # 4. 共享特征分别进入专用塔楼
         continuous_features = self.continuous_tower(shared_features)
@@ -268,26 +269,22 @@ class Critic_GRU(Module):
         self.output_dim = CRITIC_PARA.output_dim
         self.rnn_hidden_size = RNN_HIDDEN_SIZE
 
-        # # --- 1. [新增] 编码层 (Encoder) ---
-        # self.encoder = Sequential(
-        #     Linear(self.input_dim, self.rnn_hidden_size),
-        #     LeakyReLU()
-        # )
+        # 1. 前置编码器
+        self.encoder = Sequential(
+            Linear(self.input_dim, self.rnn_hidden_size),
+            # LeakyReLU(),
+            # LayerNorm(self.rnn_hidden_size)
+        )
 
-        # # --- [修改后]：双层 + Tanh ---
-        # enc_mid_dim = RNN_HIDDEN_SIZE * 2  # 或者 self.input_dim * 2
-        # self.encoder = Sequential(
-        #     Linear(self.input_dim, enc_mid_dim),
-        #     LeakyReLU(),
-        #     Linear(enc_mid_dim, self.rnn_hidden_size),
-        #     # Tanh()  # <--- 关键保护
-        # )
+        # 2. GRU 层
+        self.gru = GRU(
+            input_size=self.rnn_hidden_size,
+            hidden_size=self.rnn_hidden_size,
+            batch_first=True
+        )
 
-        # --- 2. GRU 层 ---
-        # self.gru = GRU(self.rnn_hidden_size, self.rnn_hidden_size, batch_first=True)
-
-        # 2. GRU 输入维度直接设为 input_dim
-        self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
+        # 3. 融合归一化
+        # self.fusion_norm = LayerNorm(self.rnn_hidden_size)
 
         # --- 3. [移动] 后置 MLP (Post-GRU MLP) ---
         # GRU 之后是完整的 MLP 网络进行价值评估
@@ -311,7 +308,8 @@ class Critic_GRU(Module):
         # --- 5. 优化器设置 ---
         gru_params = list(self.gru.parameters())
         other_params = (
-                # list(self.encoder.parameters()) +
+                list(self.encoder.parameters()) +  # <---
+                # list(self.fusion_norm.parameters()) +  # <---
                 list(self.mlp.parameters()) +
                 list(self.fc_out.parameters())
         )
@@ -332,21 +330,22 @@ class Critic_GRU(Module):
         if not is_sequence:
             obs_tensor = obs_tensor.unsqueeze(1)
 
-        # # 1. [新] 编码层
-        # encoded_features = self.encoder(obs_tensor)
+        # 1. 串行编码
+        encoded_features = self.encoder(obs_tensor)
 
         # 2. GRU
-        # gru_out, new_hidden = self.gru(encoded_features, hidden_state)
-        gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+        gru_out, new_hidden = self.gru(encoded_features, hidden_state)
 
-        # 3. [新] MLP
-        mlp_features = self.mlp(gru_out)
+        # 3. 残差融合
+        # combined_features = self.fusion_norm(gru_out + encoded_features)
+        combined_features = gru_out + encoded_features
 
-        # 处理单步输入的情况
+        # 4. MLP
+        mlp_features = self.mlp(combined_features)
+
         if not is_sequence:
             mlp_features = mlp_features.squeeze(1)
 
-        # 4. 输出头
         value = self.fc_out(mlp_features)
 
         return value, new_hidden

@@ -79,7 +79,7 @@ class Actor_GRU(Module):
         self.input_dim = ACTOR_PARA.input_dim
         self.log_std_min = -20.0
         self.log_std_max = 2.0
-        self.rnn_hidden_size = RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = self.input_dim#RNN_HIDDEN_SIZE
 
         # # --- 1. [新增] 编码层 (Encoder) ---
         # # 将原始输入映射到 RNN 的隐藏层维度
@@ -177,18 +177,31 @@ class Actor_GRU(Module):
         if not is_sequence:
             obs_tensor = obs_tensor.unsqueeze(1)
 
-        # # 1. [新] 通过编码层
-        # # 输入: (batch, seq_len, input_dim) -> 输出: (batch, seq_len, rnn_hidden_size)
-        # encoded_features = self.encoder(obs_tensor)
+        # # # 1. [新] 通过编码层
+        # # # 输入: (batch, seq_len, input_dim) -> 输出: (batch, seq_len, rnn_hidden_size)
+        # # encoded_features = self.encoder(obs_tensor)
+        #
+        # # 2. 通过 GRU
+        # # 输入: (batch, seq_len, rnn_hidden_size) -> 输出: (batch, seq_len, rnn_hidden_size)
+        # # gru_out, new_hidden = self.gru(encoded_features, hidden_state)
+        # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+        #
+        # # 3. [新] 通过共享 MLP
+        # # 输入: (batch, seq_len, rnn_hidden_size) -> 输出: (batch, seq_len, shared_output_dim)
+        # shared_features = self.shared_mlp(gru_out)
 
-        # 2. 通过 GRU
-        # 输入: (batch, seq_len, rnn_hidden_size) -> 输出: (batch, seq_len, rnn_hidden_size)
-        # gru_out, new_hidden = self.gru(encoded_features, hidden_state)
+        # 1. GRU 处理时序信息 ("慢车道")
         gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
 
-        # 3. [新] 通过共享 MLP
-        # 输入: (batch, seq_len, rnn_hidden_size) -> 输出: (batch, seq_len, shared_output_dim)
-        shared_features = self.shared_mlp(gru_out)
+        # --- START MODIFICATION ---
+        # 2. [新增] 残差连接
+        # 直接将 GRU 输出和原始输入相加，因为它们的维度相同
+        combined_features = gru_out + obs_tensor
+        # --- END MODIFICATION ---
+
+        # 3. 将融合后的特征送入共享 MLP
+        # shared_features = self.shared_mlp(gru_out) # (旧)
+        shared_features = self.shared_mlp(combined_features)  # (新)
 
         # 4. 共享特征分别进入专用塔楼
         continuous_features = self.continuous_tower(shared_features)
@@ -266,7 +279,7 @@ class Critic_GRU(Module):
         super(Critic_GRU, self).__init__()
         self.input_dim = CRITIC_PARA.input_dim
         self.output_dim = CRITIC_PARA.output_dim
-        self.rnn_hidden_size = RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE
 
         # # --- 1. [新增] 编码层 (Encoder) ---
         # self.encoder = Sequential(
@@ -335,12 +348,25 @@ class Critic_GRU(Module):
         # # 1. [新] 编码层
         # encoded_features = self.encoder(obs_tensor)
 
-        # 2. GRU
-        # gru_out, new_hidden = self.gru(encoded_features, hidden_state)
+        # # 2. GRU
+        # # gru_out, new_hidden = self.gru(encoded_features, hidden_state)
+        # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+        #
+        # # 3. [新] MLP
+        # mlp_features = self.mlp(gru_out)
+
+        # 1. GRU 处理时序信息 ("慢车道")
         gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
 
-        # 3. [新] MLP
-        mlp_features = self.mlp(gru_out)
+        # --- START MODIFICATION ---
+        # 2. [新增] 残差连接
+        # 直接将 GRU 输出和原始输入相加，因为它们的维度相同
+        combined_features = gru_out + obs_tensor
+        # --- END MODIFICATION ---
+
+        # 3. 将融合后的特征送入共享 MLP
+        # shared_features = self.shared_mlp(gru_out) # (旧)
+        mlp_features = self.mlp(combined_features)  # (新)
 
         # 处理单步输入的情况
         if not is_sequence:

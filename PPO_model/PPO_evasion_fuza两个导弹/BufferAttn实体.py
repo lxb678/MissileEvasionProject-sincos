@@ -49,6 +49,9 @@ class Buffer(object):
         为 MLP / Attention+MLP 模型生成随机批次（Batches）。
         """
         n_states = len(self.states)
+
+        # self.batch_size = n_states
+
         if n_states < self.batch_size:
             return
         indices = np.arange(n_states)

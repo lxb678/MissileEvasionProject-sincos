@@ -66,6 +66,7 @@ class Buffer(object):
             # 使用 yield 关键字返回一个批次的索引，这使得函数成为一个生成器，节省内存。
             yield indices[i:i + self.batch_size]
 
+
     def generate_sequence_batches(self, sequence_length, batch_size, advantages, returns):
         """
         为 GRU/RNN 模型生成连续的序列批次。

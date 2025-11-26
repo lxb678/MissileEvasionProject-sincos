@@ -17,12 +17,12 @@ class AGENTPARA:
     ACTION_DIM= 8 #9
     MAX_EXE_NUM=  5e3 #1e4 #5e5
     RANDOM_SEED= 1
-    epsilon=0.2
-    gamma=0.99
-    lamda=0.95
-    entropy= 0.01 #0.01
-    mini_lr=5e-6
-    ppo_epoch = 5 #10 #5
+    epsilon= 0.2
+    gamma= 0.99
+    lamda= 0.95
+    entropy= 0.001 #0.01 #0.01
+    mini_lr= 5e-6
+    ppo_epoch = 5 #10 #5 #10 #5
 
 class BUFFERPARA:
     '''
@@ -67,7 +67,7 @@ ACTOR_PARA.model_layer_dim =  [128,128,128] #[256,128,64]
 ACTOR_PARA.output_dim = AGENTPARA.ACTION_DIM   #多维的动作 每一维的动作输出0/1
 
 ACTOR_PARA.lr = 3e-4 #3e-4 #5e-4 #3e-4  #1e-5  # << 注意！修改了网络结构后，学习率通常需要重新调整，从一个小的值开始
-ACTOR_PARA.gru_lr = 1e-4      # GRU 层的专属学习率 (通常可以设得小一些)
+ACTOR_PARA.gru_lr = 3e-4      # GRU 层的专属学习率 (通常可以设得小一些)
 ACTOR_PARA.attention_lr = 3e-4 #1e-2 # Attention 层的专属学习率 (可以尝试设得大一些)
 
 CRITIC_PARA = MODELPARA()
@@ -79,5 +79,5 @@ CRITIC_PARA.model_layer_dim = [128,128,128]#[256,128,64]
 CRITIC_PARA.output_dim = 1
 
 CRITIC_PARA.lr = 1e-3
-CRITIC_PARA.gru_lr = 1e-4
-CRITIC_PARA.attention_lr = 1e-3#1e-3 #1e-2
+CRITIC_PARA.gru_lr = 1e-3
+CRITIC_PARA.attention_lr = 1e-3 #1e-3 #1e-2
