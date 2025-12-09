@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import *
+import torch.nn.functional as F
 # <<< 更改 >>> 导入 Categorical 分布用于多分类离散动作
 from torch.distributions import Bernoulli, Categorical
 from torch.distributions import Normal
@@ -101,9 +102,9 @@ class Actor(Module):
         # self.log_std_min = -20.0
         # self.log_std_max = 2.0
 
-        self.target_std_min = 0.05  # 保证底噪
-        self.target_std_max = 0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
-        self.target_init_std = 0.75  # 0.85 #0.65 #0.75  # 初始值设为中间态，不要设为 max
+        self.target_std_min = 0.10 #0.20 #0.10 #0.05  # 保证底噪
+        self.target_std_max = 0.60 #0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
+        self.target_init_std = 0.60 #0.50 #0.75  # 0.85 #0.65 #0.75  # 初始值设为中间态，不要设为 max
 
         # 转换为 Log 空间边界
         self.log_std_min = np.log(self.target_std_min)  # ln(0.05) ≈ -2.99
@@ -625,7 +626,21 @@ class PPO_continuous(object):
             u = continuous_base_dist.mean if deterministic else continuous_base_dist.rsample()
             # 计算 squashed 后的动作 a (post-tanh)
             action_cont_tanh = torch.tanh(u)
-            log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
+
+            # ================= [修改开始] =================
+            # 1. 计算原始高斯分布的 log_prob
+            log_prob_u = continuous_base_dist.log_prob(u).sum(dim=-1)
+
+            # 2. 计算雅可比修正项 (稳定公式)
+            # 公式: 2 * (log 2 - u - softplus(-2u))
+            # 注意: u 是 pre-tanh 的值
+            correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
+
+            # 3. 得到最终动作 a = tanh(u) 的 log_prob
+            log_prob_cont = log_prob_u - correction
+            # ================= [修改结束] =================
+
+            # log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
 
             # # --- 💥 新的、正确的 log_prob 计算 (带雅可比修正) ---
             # # 基础的高斯 log_prob: log p(u)
@@ -888,23 +903,62 @@ class PPO_continuous(object):
                 # 2. 使用当前策略重新评估旧动作的概率
                 new_dists = self.Actor(state)
 
-                # 3. 重新计算新策略下，旧动作的组合 log_prob
-                new_log_prob_cont = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+                # ================= [修改开始] =================
+                # --- 第一步: 计算 Log Prob (用于策略更新 Ratio) ---
+                # 必须使用 Replay Buffer 中的旧动作 (u_from_buffer)
+                # log(pi(a_old)) = log(pi(u_old)) - log_det_J(u_old)
 
-                # # --- 💥 重新计算新策略下，旧动作的组合 log_prob (带雅可比修正) ---
-                # # 连续部分
-                # new_log_prob_u = new_dists['continuous'].log_prob(u_from_buffer)
-                # new_log_prob_correction = 2 * (np.log(2.0) - u_from_buffer - torch.nn.functional.softplus(-2 * u_from_buffer))
-                # new_log_prob_cont = (new_log_prob_u - new_log_prob_correction).sum(dim=-1)
+                # 1.1 计算旧动作在新分布下的高斯 Log Prob
+                log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
 
+                # 1.2 计算旧动作的雅可比修正项
+                correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
+
+                # 1.3 得到最终用于 Ratio 计算的 Log Prob
+                new_log_prob_cont = log_prob_u_buffer - correction_buffer
+
+                # --- 第二步: 计算 Entropy (用于 Loss 惩罚) ---
+                # 必须基于当前策略的新分布进行采样 (rsample)，以保留梯度并消除偏差
+                # H(pi) = H(u) + E[log_det_J(u)]
+
+                # 2.1 高斯分布的基础熵 (解析解)
+                entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
+
+                # 2.2 重采样 (Reparameterization Trick)
+                # 这一步至关重要！它建立了 correction 与当前网络参数(mu, sigma)的梯度联系
+                u_curr_sample = new_dists['continuous'].rsample()
+
+                # 2.3 计算新采样动作的雅可比修正项期望
+                correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
+
+                # 2.4 得到最终的无偏熵
+                entropy_cont = entropy_base + correction_curr
+
+                # 3. 计算离散部分 Log Prob (保持不变)
                 new_log_prob_disc = sum(
                     new_dists[key].log_prob(discrete_actions_from_buffer[key])
                     for key in discrete_actions_from_buffer
                 )
                 new_prob = new_log_prob_cont + new_log_prob_disc
+                # ================= [修改结束] =================
 
-                # 4. 计算组合策略熵
-                entropy_cont = new_dists['continuous'].entropy().sum(dim=-1)
+                # # 3. 重新计算新策略下，旧动作的组合 log_prob
+                # new_log_prob_cont = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+                #
+                # # # --- 💥 重新计算新策略下，旧动作的组合 log_prob (带雅可比修正) ---
+                # # # 连续部分
+                # # new_log_prob_u = new_dists['continuous'].log_prob(u_from_buffer)
+                # # new_log_prob_correction = 2 * (np.log(2.0) - u_from_buffer - torch.nn.functional.softplus(-2 * u_from_buffer))
+                # # new_log_prob_cont = (new_log_prob_u - new_log_prob_correction).sum(dim=-1)
+                #
+                # new_log_prob_disc = sum(
+                #     new_dists[key].log_prob(discrete_actions_from_buffer[key])
+                #     for key in discrete_actions_from_buffer
+                # )
+                # new_prob = new_log_prob_cont + new_log_prob_disc
+                #
+                # # 4. 计算组合策略熵
+                # entropy_cont = new_dists['continuous'].entropy().sum(dim=-1)
                 entropy_disc = sum(
                     dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
                 )

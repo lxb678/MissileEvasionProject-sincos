@@ -3,7 +3,7 @@ from typing import Optional
 
 # ------------------- 导入部分 -------------------
 # <<< 核心修改 >>>: 导入 交叉注意力 + GRU 的模型定义
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.旧代码.Hybrid_PPO_ATTMLP交叉注意力GRU在前在编码器后 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 # 导入环境
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体 import *
@@ -83,7 +83,7 @@ set_seed(env)
 # 2. 指定模型路径
 # <<< 请修改这里的路径为你训练好的 GRU 模型文件夹路径 >>>
 # model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_GRU_2025-11-25_16-25-36"
-model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_GRU_2025-11-26_11-31-11"
+model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2025-12-08_17-09-57"
 print(f"--- 正在加载 交叉注意力+GRU 模型: {model_path} ---")
 
 # 3. 初始化 Agent
@@ -102,8 +102,8 @@ for i_episode in range(episodes):
     episode_start_time = time.time()
 
     with torch.no_grad():
-        observation_eval, info = env.reset(seed=AGENTPARA.RANDOM_SEED + i_episode)
-
+        # observation_eval, info = env.reset(seed=AGENTPARA.RANDOM_SEED + i_episode)
+        observation_eval, info = env.reset()
         # =================================================================
         # <<< 核心修改 >>>: GRU 模式下，每个回合开始必须重置内部隐状态
         # =================================================================

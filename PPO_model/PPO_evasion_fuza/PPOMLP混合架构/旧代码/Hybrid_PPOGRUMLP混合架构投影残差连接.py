@@ -79,7 +79,7 @@ class Actor_GRU(Module):
         self.input_dim = ACTOR_PARA.input_dim
         self.log_std_min = -20.0
         self.log_std_max = 2.0
-        self.rnn_hidden_size = self.input_dim#RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = RNN_HIDDEN_SIZE
 
         # # --- 1. [新增] 编码层 (Encoder) ---
         # # 将原始输入映射到 RNN 的隐藏层维度
@@ -102,6 +102,19 @@ class Actor_GRU(Module):
         # self.gru = GRU(self.rnn_hidden_size, self.rnn_hidden_size, batch_first=True)
         # 2. GRU 输入维度直接设为 input_dim
         self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
+
+        # ======================================================
+        # <<< 新增：残差连接组件 >>>
+        # ======================================================
+        # 1. 投影层：把原始输入维度 (input_dim) 映射到 GRU 隐藏层维度 (rnn_hidden_size)
+        self.residual_projection = Linear(self.input_dim, self.rnn_hidden_size)
+
+        # # 2. 归一化层：非常重要！防止原始输入的大数值淹没 GRU 的信号
+        # self.residual_norm = LayerNorm(self.rnn_hidden_size)
+        #
+        # # 3. 激活函数 (可选，增加残差路径的非线性能力)
+        # self.residual_act = LeakyReLU()
+        # ======================================================
 
         # --- 3. [移动] 共享 MLP 基座 (Shared MLP) ---
         # GRU 的输出进入此共享层。我们使用配置文件中的前几层作为共享层。
@@ -153,6 +166,8 @@ class Actor_GRU(Module):
         # 收集所有非 GRU 参数
         other_params = (
                 # list(self.encoder.parameters()) +
+                list(self.residual_projection.parameters()) +  # <--- 新增
+                # list(self.residual_norm.parameters()) +  # <--- 新增
                 list(self.shared_mlp.parameters()) +
                 list(self.continuous_tower.parameters()) +
                 list(self.discrete_tower.parameters()) +
@@ -177,31 +192,24 @@ class Actor_GRU(Module):
         if not is_sequence:
             obs_tensor = obs_tensor.unsqueeze(1)
 
-        # # # 1. [新] 通过编码层
-        # # # 输入: (batch, seq_len, input_dim) -> 输出: (batch, seq_len, rnn_hidden_size)
-        # # encoded_features = self.encoder(obs_tensor)
-        #
-        # # 2. 通过 GRU
-        # # 输入: (batch, seq_len, rnn_hidden_size) -> 输出: (batch, seq_len, rnn_hidden_size)
-        # # gru_out, new_hidden = self.gru(encoded_features, hidden_state)
-        # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
-        #
-        # # 3. [新] 通过共享 MLP
-        # # 输入: (batch, seq_len, rnn_hidden_size) -> 输出: (batch, seq_len, shared_output_dim)
-        # shared_features = self.shared_mlp(gru_out)
-
-        # 1. GRU 处理时序信息 ("慢车道")
+        # 1. 主路径：通过 GRU ("慢系统"，提取时序信息)
         gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
 
-        # --- START MODIFICATION ---
-        # 2. [新增] 残差连接
-        # 直接将 GRU 输出和原始输入相加，因为它们的维度相同
-        combined_features = gru_out + obs_tensor
-        # --- END MODIFICATION ---
+        # ======================================================
+        # <<< 修改：执行残差连接 >>>
+        # ======================================================
+        # 2. 残差路径：投影 -> 激活 -> 归一化 ("快系统"，保留当前观测)
+        # 线性层会自动处理 (Batch, Seq, Dim) 的形状
+        skip_connection = self.residual_projection(obs_tensor)
+        # skip_connection = self.residual_act(skip_connection)
+        # skip_connection = self.residual_norm(skip_connection)
 
-        # 3. 将融合后的特征送入共享 MLP
-        # shared_features = self.shared_mlp(gru_out) # (旧)
-        shared_features = self.shared_mlp(combined_features)  # (新)
+        # 3. 融合：Element-wise Addition (相加)
+        combined_features = gru_out + skip_connection
+        # ======================================================
+
+        # 4. 后续 MLP 处理融合后的特征
+        shared_features = self.shared_mlp(combined_features)  # 输入改为 combined_features
 
         # 4. 共享特征分别进入专用塔楼
         continuous_features = self.continuous_tower(shared_features)
@@ -279,7 +287,7 @@ class Critic_GRU(Module):
         super(Critic_GRU, self).__init__()
         self.input_dim = CRITIC_PARA.input_dim
         self.output_dim = CRITIC_PARA.output_dim
-        self.rnn_hidden_size = self.input_dim #RNN_HIDDEN_SIZE
+        self.rnn_hidden_size = RNN_HIDDEN_SIZE
 
         # # --- 1. [新增] 编码层 (Encoder) ---
         # self.encoder = Sequential(
@@ -301,6 +309,14 @@ class Critic_GRU(Module):
 
         # 2. GRU 输入维度直接设为 input_dim
         self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
+
+        # ======================================================
+        # <<< 新增：残差连接组件 >>>
+        # ======================================================
+        self.residual_projection = Linear(self.input_dim, self.rnn_hidden_size)
+        # self.residual_norm = LayerNorm(self.rnn_hidden_size)
+        # self.residual_act = LeakyReLU()
+        # ======================================================
 
         # --- 3. [移动] 后置 MLP (Post-GRU MLP) ---
         # GRU 之后是完整的 MLP 网络进行价值评估
@@ -325,6 +341,8 @@ class Critic_GRU(Module):
         gru_params = list(self.gru.parameters())
         other_params = (
                 # list(self.encoder.parameters()) +
+                list(self.residual_projection.parameters()) +  # <--- 新增
+                # list(self.residual_norm.parameters()) +  # <--- 新增
                 list(self.mlp.parameters()) +
                 list(self.fc_out.parameters())
         )
@@ -345,29 +363,23 @@ class Critic_GRU(Module):
         if not is_sequence:
             obs_tensor = obs_tensor.unsqueeze(1)
 
-        # # 1. [新] 编码层
-        # encoded_features = self.encoder(obs_tensor)
-
-        # # 2. GRU
-        # # gru_out, new_hidden = self.gru(encoded_features, hidden_state)
-        # gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
-        #
-        # # 3. [新] MLP
-        # mlp_features = self.mlp(gru_out)
-
-        # 1. GRU 处理时序信息 ("慢车道")
+        # 1. GRU
         gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
 
-        # --- START MODIFICATION ---
-        # 2. [新增] 残差连接
-        # 直接将 GRU 输出和原始输入相加，因为它们的维度相同
-        combined_features = gru_out + obs_tensor
-        # --- END MODIFICATION ---
+        # ======================================================
+        # <<< 修改：残差连接 >>>
+        # ======================================================
+        # 投影原始输入
+        skip_connection = self.residual_projection(obs_tensor)
+        # skip_connection = self.residual_act(skip_connection)
+        # skip_connection = self.residual_norm(skip_connection)
 
-        # 3. 将融合后的特征送入共享 MLP
-        # shared_features = self.shared_mlp(gru_out) # (旧)
-        mlp_features = self.mlp(combined_features)  # (新)
+        # 相加
+        combined_features = gru_out + skip_connection
+        # ======================================================
 
+        # 3. MLP
+        mlp_features = self.mlp(combined_features)
         # 处理单步输入的情况
         if not is_sequence:
             mlp_features = mlp_features.squeeze(1)
@@ -1491,7 +1503,7 @@ class PPO_continuous(object):
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.total_steps = 0
         self.training_start_time = time.strftime("PPOGRU_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../../save/save_evade_fuza"
+        self.base_save_dir = "../../../../save/save_evade_fuza"
         win_rate_subdir = "胜率模型"
         # 为本次运行创建一个唯一的存档文件夹
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
@@ -1504,7 +1516,7 @@ class PPO_continuous(object):
                 self.load_models_from_directory(model_dir_path)
             else:
                 print("--- 未指定模型文件夹，尝试从默认文件夹 'test' 加载 ---")
-                self.load_models_from_directory("../../../test/test_evade")
+                self.load_models_from_directory("../../../../test/test_evade")
 
     def load_models_from_directory(self, directory_path: str):
         # This function is correct, no changes needed.

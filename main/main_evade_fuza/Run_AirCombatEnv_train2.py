@@ -1,6 +1,6 @@
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构雅可比修正 import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构雅可比修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
 from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *

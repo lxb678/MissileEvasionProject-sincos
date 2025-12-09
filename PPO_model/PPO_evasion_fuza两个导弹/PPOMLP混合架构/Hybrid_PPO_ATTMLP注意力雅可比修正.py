@@ -50,9 +50,14 @@ NUM_MISSILES = 2
 # <<< 核心修改 1: 更新特征维度 >>>
 MISSILE_FEAT_DIM = 4 #5  # 原为 3. (1 for dist + 2 for beta_sincos + 2 for theta_sincos)
 AIRCRAFT_FEAT_DIM = 7 #8 # 原为 6. (1 av + 1 h + 2 ae_sincos + 2 am_sincos + 1 ir + 1 q)
+
+# <<< 核心修改 1: 计算全观测维度 >>>
+# 全局信息 = (导弹数量 * 导弹特征) + 飞机特征
+FULL_OBS_DIM = (NUM_MISSILES * MISSILE_FEAT_DIM) + AIRCRAFT_FEAT_DIM
+
 # <<< 修改结束 >>>
-ENTITY_EMBED_DIM = 64 #64 #32 #64 #64 #128
-ATTN_NUM_HEADS = 4 #2 #4 #4
+ENTITY_EMBED_DIM = 32 #64 #64
+ATTN_NUM_HEADS = 2 #4 #4 #2 #4 #2 #4 #4
 
 assert ENTITY_EMBED_DIM % ATTN_NUM_HEADS == 0, "ENTITY_EMBED_DIM must be divisible by ATTN_NUM_HEADS"
 
@@ -71,42 +76,46 @@ class Actor_CrossAttentionMLP(Module):
         super(Actor_CrossAttentionMLP, self).__init__()
         # --- MLP 和 Head 部分的定义与之前完全相同，无需修改 ---
         self.input_dim = ACTOR_PARA.input_dim
-        self.log_std_min = -20.0
-        self.log_std_max = 2.0
+        # self.log_std_min = -20.0
+        # self.log_std_max = 2.0
+
+        # # ======================================================================
+        # # 1. 动作标准差 (Std) 设置 - 核心优化部分
+        # # ======================================================================
+        # # 下限 0.05: 保持 5% 的底噪，防止策略过早塌缩为确定性，维持鲁棒性
+        # self.target_std_min = 0.05
+        # # 上限 1.0: 允许少量双峰分布（大机动探索），但避免 1.5 带来的过度 Bang-Bang 控制
+        # self.target_std_max = 1.0
+        # # 初始 0.6: 位于 0.7 临界点之下，保证初期为单峰分布，飞机飞行平稳
+        # self.target_init_std = 0.95 #0.6
+
+        self.target_std_min = 0.10 #0.20 #0.10 #0.20 #0.05  # 保证底噪
+        self.target_std_max = 0.60 #0.80 #0.80  # 降低上限，避免完全随机
+        self.target_init_std = 0.60 #0.75 #0.75  # 初始值设为中间态，不要设为 max
+
+        # 转换为 Log 空间边界
+        self.log_std_min = np.log(self.target_std_min)  # ln(0.05) ≈ -2.99
+        self.log_std_max = np.log(self.target_std_max)  # ln(1.0) = 0.0
+
         self.weight_decay = weight_decay
 
-        # self.missile_encoder = Sequential(
-        #     Linear(MISSILE_FEAT_DIM, ENTITY_EMBED_DIM),
-        #     # GELU()
-        #     # Tanh()
-        #     LeakyReLU()  # <-- 添加非线性激活
-        # )
-        # self.aircraft_encoder = Sequential(
-        #     Linear(AIRCRAFT_FEAT_DIM, ENTITY_EMBED_DIM),
-        #     # GELU()
-        #     # Tanh()
-        #     LeakyReLU()  # <-- 添加非线性激活
-        # )
 
-        encoder_hidden_dim = ENTITY_EMBED_DIM #// 2  # 例如 128
+        encoder_hidden_dim = ENTITY_EMBED_DIM #// 2
 
         self.missile_encoder = Sequential(
             Linear(MISSILE_FEAT_DIM, encoder_hidden_dim),
-            LeakyReLU(),
-            Linear(encoder_hidden_dim, ENTITY_EMBED_DIM),
-            # LeakyReLU()
-            # Tanh()
-        )
-        self.aircraft_encoder = Sequential(
-            Linear(AIRCRAFT_FEAT_DIM, encoder_hidden_dim),
-            LeakyReLU(),
-            Linear(encoder_hidden_dim, ENTITY_EMBED_DIM),
-            # LeakyReLU()
-            # Tanh()
         )
 
-        self.ln_missile = LayerNorm(ENTITY_EMBED_DIM)
-        self.ln_aircraft = LayerNorm(ENTITY_EMBED_DIM)
+        # self.aircraft_encoder = Sequential(
+        #     Linear(FULL_OBS_DIM, encoder_hidden_dim),
+        # )
+        # 修改后
+        self.aircraft_encoder = Sequential(
+            Linear(AIRCRAFT_FEAT_DIM, encoder_hidden_dim),
+        )
+
+        # self.ln_missile = LayerNorm(ENTITY_EMBED_DIM)
+        # self.ln_aircraft = LayerNorm(ENTITY_EMBED_DIM)
 
         self.attention = MultiheadAttention(embed_dim=ENTITY_EMBED_DIM,
                                             num_heads=ATTN_NUM_HEADS,
@@ -151,7 +160,10 @@ class Actor_CrossAttentionMLP(Module):
 
         self.mu_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
         self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
-        self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
+        # self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
+        # 初始化为 -0.5 左右 (std ≈ 0.6)，比 1.0 稳健，又比 0.1 有探索性
+        init_log_std = np.log(self.target_init_std)
+        self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), init_log_std))
 
         # --- 优化器设置部分也保持不变 ---
         attention_params, other_params = [], []
@@ -173,27 +185,59 @@ class Actor_CrossAttentionMLP(Module):
             total_iters=AGENTPARA.MAX_EXE_NUM
         )
         self.to(ACTOR_PARA.device)
-        # self._init_weights()  # <--- 添加这行
+        self._init_weights()  # <--- 添加这行
 
     def _init_weights(self):
-        # 遍历所有模块进行初始化
         for m in self.modules():
-            if isinstance(m, Linear):
-                # 正交初始化，增益为 sqrt(2) 适合 LeakyReLU/Tanh
+            # 1. 线性层通用初始化
+            if isinstance(m, nn.Linear):
                 nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, LayerNorm):
-                nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+            # 2. GRU 特殊初始化 (关键！不要漏掉)
+            elif isinstance(m, nn.GRU):
+                for name, param in m.named_parameters():
+                    if 'weight_ih' in name:
+                        nn.init.orthogonal_(param.data)
+                    elif 'weight_hh' in name:
+                        nn.init.orthogonal_(param.data)
+                    elif 'bias' in name:
+                        param.data.fill_(0)
+
+            # 3. LayerNorm 初始化
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1.0)
                 nn.init.constant_(m.bias, 0)
 
-        # --- 特殊处理：策略输出头 ---
-        # 让策略输出层初始权重非常小（几乎为0），
-        # 这样初始动作概率分布会接近均匀分布（高熵），鼓励初期探索。
+        # --- 特殊处理：策略输出头 (最后覆盖前面的通用初始化) ---
+
+        # 连续动作头：确保均值接近 0，避免 Tanh 饱和
         nn.init.orthogonal_(self.mu_head.weight, gain=0.01)
         nn.init.constant_(self.mu_head.bias, 0)
 
+        # 离散动作头：确保初始概率均匀 (Max Entropy)
         nn.init.orthogonal_(self.discrete_head.weight, gain=0.01)
         nn.init.constant_(self.discrete_head.bias, 0)
+    # def _init_weights(self):
+    #     # 遍历所有模块进行初始化
+    #     for m in self.modules():
+    #         if isinstance(m, Linear):
+    #             # 正交初始化，增益为 sqrt(2) 适合 LeakyReLU/Tanh
+    #             nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+    #             nn.init.constant_(m.bias, 0)
+    #         elif isinstance(m, LayerNorm):
+    #             nn.init.constant_(m.weight, 1)
+    #             nn.init.constant_(m.bias, 0)
+    #
+    #     # --- 特殊处理：策略输出头 ---
+    #     # 让策略输出层初始权重非常小（几乎为0），
+    #     # 这样初始动作概率分布会接近均匀分布（高熵），鼓励初期探索。
+    #     nn.init.orthogonal_(self.mu_head.weight, gain=0.01)
+    #     nn.init.constant_(self.mu_head.bias, 0)
+    #
+    #     nn.init.orthogonal_(self.discrete_head.weight, gain=0.01)
+    #     nn.init.constant_(self.discrete_head.bias, 0)
 
     def forward(self, obs):
         obs_tensor = check(obs).to(**ACTOR_PARA.tpdv)
@@ -230,15 +274,17 @@ class Actor_CrossAttentionMLP(Module):
         # PyTorch的key_padding_mask要求：True代表“需要被掩盖/忽略”
         attention_mask = torch.stack([is_m1_inactive, is_m2_inactive], dim=1)
 
-        m1_embed_raw = self.missile_encoder(missile1_obs)
-        m2_embed_raw = self.missile_encoder(missile2_obs)
-        ac_embed_raw = self.aircraft_encoder(aircraft_obs)
+        m1_embed = self.missile_encoder(missile1_obs)
+        m2_embed = self.missile_encoder(missile2_obs)
+        # ac_embed = self.aircraft_encoder(obs_tensor)
+        # 修改后
+        ac_embed = self.aircraft_encoder(aircraft_obs)
 
-        # 2. <<< 核心修改: 添加 Pre-LayerNorm >>>
-        # 在进入注意力计算前，先进行归一化。这能防止 Q*K 点积过大导致梯度消失。
-        m1_embed = self.ln_missile(m1_embed_raw)
-        m2_embed = self.ln_missile(m2_embed_raw)
-        ac_embed = self.ln_aircraft(ac_embed_raw)
+        # # 2. <<< 核心修改: 添加 Pre-LayerNorm >>>
+        # # 在进入注意力计算前，先进行归一化。这能防止 Q*K 点积过大导致梯度消失。
+        # m1_embed = self.ln_missile(m1_embed_raw)
+        # m2_embed = self.ln_missile(m2_embed_raw)
+        # ac_embed = self.ln_aircraft(ac_embed_raw)
 
         # # 3. ✅ Pre-Norm: 先归一化飞机表示
         # normalized_aircraft = self.attn_pre_norm(ac_embed)
@@ -255,7 +301,7 @@ class Actor_CrossAttentionMLP(Module):
 
         # Value 使用 Raw (关键修改！！！)
         # 这样注意力输出的特征就保留了原始的物理强度信息
-        missile_values_raw = torch.stack([m1_embed_raw, m2_embed_raw], dim=1)
+        missile_values_raw = torch.stack([m1_embed, m2_embed], dim=1)
 
         # 3. 执行交叉注意力计算
         # 飞机(Q) 关注 导弹(K,V)，得到融合了导弹信息的飞机上下文
@@ -301,14 +347,43 @@ class Actor_CrossAttentionMLP(Module):
         attn_output_squeezed = attn_output.squeeze(1)  # 这是"威胁总览"
         # attn_output_squeezed = self.attn_layer_norm(attn_output_squeezed)
 
+        # 步骤 A: 残差连接 (Residual Connection) -> 先相加
+        # 将 "注意力提取的威胁信息" 加回到 "飞机原始信息" 上
+        # residual_result = ac_embed + attn_output_squeezed
+
+        # 步骤 B: 层归一化 (Normalization) -> 后归一化
+        # 这一步把相加后的结果拉回标准正态分布
+        # aircraft_context_normed = self.attn_layer_norm(residual_result)
+        # aircraft_context_normed = residual_result
+        # 5. 特征拼接 (准备进入 MLP)
+        # 此时 aircraft_context_normed 已经是融合了威胁信息且归一化好的飞机状态
+
+        # 方案 A (推荐): 依然保留原始信息拼接，增强鲁棒性
+        # 输入维度: ENTITY_EMBED_DIM * 2
+        # combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+
+        # 6. <<< 关键优化: 门控残差连接 (Gated Residual Connection) >>>
+        # 相比简单的拼接，残差连接允许梯度直接流过飞机状态。
+        # 相比简单的相加，门控机制让模型可以决定“这一刻是否需要关注导弹”。
+        # gate_input = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+        # alpha = self.gate(gate_input) # alpha 接近 0 表示忽略导弹，接近 1 表示重视
+        # combined_features = ac_embed + alpha * attn_output_squeezed
+
+        # 如果追求极致速度，简单的残差相加也是极好的
+        # combined_features = ac_embed + attn_output_squeezed
+
+        # 方案 B (纯粹的 Transformer 风格): 只使用处理后的上下文
+        # 输入维度: ENTITY_EMBED_DIM
+        # combined_features = aircraft_context_normed
+
         # # 拼接：[原本的飞机状态, 注意力提取的威胁状态]
         # # 这样 MLP 既知道自己怎么飞(ac_embed)，也知道威胁多严重(attn_output_squeezed)
-        # combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+        combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
 
         # 5. 特征拼接
         # 推荐策略：拼接 [原始未归一化的飞机特征, 归一化且经过注意力的威胁特征]
         # 这样 MLP 既保留了原始幅值信息（可能包含距离绝对值等重要信息），又利用了稳定的注意力特征。
-        combined_features = torch.cat([ac_embed_raw, attn_output_squeezed], dim=-1)
+        # combined_features = torch.cat([ac_embed_raw, attn_output_squeezed], dim=-1)
 
         # 注意：需要调整 shared_base_mlp 的输入维度
         # mlp_input_dim = ENTITY_EMBED_DIM * 2
@@ -319,6 +394,11 @@ class Actor_CrossAttentionMLP(Module):
         continuous_features = self.continuous_tower(base_features)
         discrete_features = self.discrete_tower(base_features)
         mu = self.mu_head(continuous_features)
+
+        # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
+        # 只要不让它跑到 10 这种离谱的值就行
+        mu = torch.clamp(mu, -3.0, 3.0)
+
         all_disc_logits = self.discrete_head(discrete_features)
 
         # --- 动作分布和掩码逻辑与之前完全相同，无需修改 ---
@@ -347,11 +427,20 @@ class Actor_CrossAttentionMLP(Module):
         # 因此，掩码逻辑 `mask = (has_flares_info == 0)` 依然是正确的。
         mask = (has_flares_info == 0)
 
+        # trigger_logits_masked = trigger_logits.clone()
+        # if torch.any(mask):
+        #     if mask.dim() < trigger_logits_masked.dim():
+        #         mask = mask.unsqueeze(-1)
+        #     trigger_logits_masked[mask] = torch.finfo(torch.float32).min
+
+        NEG_INF = -1e8  # 已经定义了,复用它
+
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
-            if mask.dim() < trigger_logits_masked.dim():
-                mask = mask.unsqueeze(-1)
-            trigger_logits_masked[mask] = torch.finfo(torch.float32).min
+            mask_expanded = mask.unsqueeze(-1) if mask.dim() < trigger_logits_masked.dim() else mask
+            trigger_logits_masked = torch.where(mask_expanded,
+                                                torch.full_like(trigger_logits, NEG_INF),
+                                                trigger_logits)
 
         trigger_probs = torch.sigmoid(trigger_logits_masked)
         no_trigger_mask = (trigger_probs < 0.5)
@@ -417,34 +506,33 @@ class Critic_CrossAttentionMLP(Module):
 
         # self.missile_encoder = Sequential(
         #     Linear(MISSILE_FEAT_DIM, ENTITY_EMBED_DIM),
-        #     # GELU()
+        #     GELU()
         #     # Tanh()
-        #    LeakyReLU()  # <-- 添加非线性激活
+        #    # LeakyReLU()  # <-- 添加非线性激活
         # )
         # self.aircraft_encoder = Sequential(
-        #     Linear(AIRCRAFT_FEAT_DIM, ENTITY_EMBED_DIM),
-        #     # GELU()
+        #     Linear(FULL_OBS_DIM, ENTITY_EMBED_DIM),
+        #     GELU()
         #     # Tanh()
-        #    LeakyReLU()  # <-- 添加非线性激活
+        #    # LeakyReLU()  # <-- 添加非线性激活
         # )
 
-        encoder_hidden_dim = ENTITY_EMBED_DIM #// 2 #* 2  # 例如 32
+        encoder_hidden_dim = ENTITY_EMBED_DIM #// 2
 
         self.missile_encoder = Sequential(
             Linear(MISSILE_FEAT_DIM, encoder_hidden_dim),
-            LeakyReLU(),
-            Linear(encoder_hidden_dim, ENTITY_EMBED_DIM),
-            # Tanh()
-        )
-        self.aircraft_encoder = Sequential(
-            Linear(AIRCRAFT_FEAT_DIM, encoder_hidden_dim),
-            LeakyReLU(),
-            Linear(encoder_hidden_dim, ENTITY_EMBED_DIM),
-            # Tanh()
         )
 
-        self.ln_missile = LayerNorm(ENTITY_EMBED_DIM)
-        self.ln_aircraft = LayerNorm(ENTITY_EMBED_DIM)
+        # self.aircraft_encoder = Sequential(
+        #     Linear(FULL_OBS_DIM, encoder_hidden_dim),
+        # )
+        # 修改后
+        self.aircraft_encoder = Sequential(
+            Linear(AIRCRAFT_FEAT_DIM, encoder_hidden_dim),
+        )
+
+        # self.ln_missile = LayerNorm(ENTITY_EMBED_DIM)
+        # self.ln_aircraft = LayerNorm(ENTITY_EMBED_DIM)
 
         self.attention = MultiheadAttention(embed_dim=ENTITY_EMBED_DIM,
                                             num_heads=ATTN_NUM_HEADS,
@@ -455,7 +543,7 @@ class Critic_CrossAttentionMLP(Module):
         # self.attn_pre_norm = LayerNorm(ENTITY_EMBED_DIM)
 
         # <<< 核心修改 1: 更新MLP的输入维度 >>>
-        mlp_input_dim = ENTITY_EMBED_DIM * 2   #* (1 + NUM_MISSILES)  # 192
+        mlp_input_dim = ENTITY_EMBED_DIM * 2  #* (1 + NUM_MISSILES)  # 192
 
         # mlp_input_dim = ENTITY_EMBED_DIM
         mlp_dims = CRITIC_PARA.model_layer_dim
@@ -491,24 +579,54 @@ class Critic_CrossAttentionMLP(Module):
             total_iters=AGENTPARA.MAX_EXE_NUM
         )
         self.to(CRITIC_PARA.device)
-        # self._init_weights()  # <--- 添加这行
+        self._init_weights()  # <--- 添加这行
 
     def _init_weights(self):
-        # 遍历所有模块进行初始化
+        # 1. 遍历所有模块进行通用初始化
         for m in self.modules():
-            if isinstance(m, Linear):
-                # 正交初始化，增益为 sqrt(2) 适合 LeakyReLU/Tanh
+            # 线性层 (Hidden Layers)：配合 LeakyReLU/ReLU
+            if isinstance(m, nn.Linear):
                 nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, LayerNorm):
-                nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+            # GRU 层：防止梯度消失/爆炸
+            elif isinstance(m, nn.GRU):
+                for name, param in m.named_parameters():
+                    if 'weight_ih' in name:
+                        nn.init.orthogonal_(param.data)
+                    elif 'weight_hh' in name:
+                        nn.init.orthogonal_(param.data)
+                    elif 'bias' in name:
+                        param.data.fill_(0)
+
+            # LayerNorm 层 (如果你加了的话)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1.0)
                 nn.init.constant_(m.bias, 0)
 
-        # --- Critic 特有：价值头初始化 ---
-        # Critic 输出的是价值，不需要像 Actor 那样缩小权重
-        # 这里的层名是 self.fc_out
-        torch.nn.init.orthogonal_(self.fc_out.weight, gain=1.0)
-        torch.nn.init.constant_(self.fc_out.bias, 0)
+        # 2. --- 特殊处理：Critic 输出头 ---
+        # 覆盖掉上面的通用初始化
+        # 因为 fc_out 后面没有激活函数，所以 gain 使用 1.0 (线性层的标准值)
+        # 这样初始的价值估计 V(s) 会在 0 附近波动
+        nn.init.orthogonal_(self.fc_out.weight, gain=1.0)
+        nn.init.constant_(self.fc_out.bias, 0)
+    # def _init_weights(self):
+    #     # 遍历所有模块进行初始化
+    #     for m in self.modules():
+    #         if isinstance(m, Linear):
+    #             # 正交初始化，增益为 sqrt(2) 适合 LeakyReLU/Tanh
+    #             nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+    #             nn.init.constant_(m.bias, 0)
+    #         elif isinstance(m, LayerNorm):
+    #             nn.init.constant_(m.weight, 1)
+    #             nn.init.constant_(m.bias, 0)
+    #
+    #     # --- Critic 特有：价值头初始化 ---
+    #     # Critic 输出的是价值，不需要像 Actor 那样缩小权重
+    #     # 这里的层名是 self.fc_out
+    #     torch.nn.init.orthogonal_(self.fc_out.weight, gain=1.0)
+    #     torch.nn.init.constant_(self.fc_out.bias, 0)
 
     def forward(self, obs):
         obs_tensor = check(obs).to(**CRITIC_PARA.tpdv)
@@ -541,15 +659,17 @@ class Critic_CrossAttentionMLP(Module):
         # 构建注意力掩码
         attention_mask = torch.stack([is_m1_inactive, is_m2_inactive], dim=1)
 
-        m1_embed_raw = self.missile_encoder(missile1_obs)
-        m2_embed_raw = self.missile_encoder(missile2_obs)
-        ac_embed_raw = self.aircraft_encoder(aircraft_obs)
+        m1_embed = self.missile_encoder(missile1_obs)
+        m2_embed = self.missile_encoder(missile2_obs)
+        # ac_embed = self.aircraft_encoder(obs_tensor)
+        # 修改后
+        ac_embed = self.aircraft_encoder(aircraft_obs)
 
-        # 2. <<< 核心修改: 添加 Pre-LayerNorm >>>
-        # 在进入注意力计算前，先进行归一化。这能防止 Q*K 点积过大导致梯度消失。
-        m1_embed = self.ln_missile(m1_embed_raw)
-        m2_embed = self.ln_missile(m2_embed_raw)
-        ac_embed = self.ln_aircraft(ac_embed_raw)
+        # # 2. <<< 核心修改: 添加 Pre-LayerNorm >>>
+        # # 在进入注意力计算前，先进行归一化。这能防止 Q*K 点积过大导致梯度消失。
+        # m1_embed = self.ln_missile(m1_embed_raw)
+        # m2_embed = self.ln_missile(m2_embed_raw)
+        # ac_embed = self.ln_aircraft(ac_embed_raw)
 
         # # 3. ✅ Pre-Norm: 先归一化飞机表示
         # normalized_aircraft = self.attn_pre_norm(ac_embed)
@@ -563,7 +683,7 @@ class Critic_CrossAttentionMLP(Module):
 
         # Value 使用 Raw (关键修改！！！)
         # 这样注意力输出的特征就保留了原始的物理强度信息
-        missile_values_raw = torch.stack([m1_embed_raw, m2_embed_raw], dim=1)
+        missile_values_raw = torch.stack([m1_embed, m2_embed], dim=1)
 
         # attn_output, _ = self.attention(query=aircraft_query,
         #                                 key=missile_entities,
@@ -602,9 +722,38 @@ class Critic_CrossAttentionMLP(Module):
         attn_output_squeezed = attn_output.squeeze(1)  # 这是"威胁总览"
         # attn_output_squeezed = self.attn_layer_norm(attn_output_squeezed)
 
+        # 步骤 A: 残差连接 (Residual Connection) -> 先相加
+        # 将 "注意力提取的威胁信息" 加回到 "飞机原始信息" 上
+        # residual_result = ac_embed + attn_output_squeezed
+
+        # 步骤 B: 层归一化 (Normalization) -> 后归一化
+        # 这一步把相加后的结果拉回标准正态分布
+        # aircraft_context_normed = self.attn_layer_norm(residual_result)
+        # aircraft_context_normed = residual_result
+        # 5. 特征拼接 (准备进入 MLP)
+        # 此时 aircraft_context_normed 已经是融合了威胁信息且归一化好的飞机状态
+
+        # 方案 A (推荐): 依然保留原始信息拼接，增强鲁棒性
+        # 输入维度: ENTITY_EMBED_DIM * 2
+        # combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+
+        # 6. <<< 关键优化: 门控残差连接 (Gated Residual Connection) >>>
+        # 相比简单的拼接，残差连接允许梯度直接流过飞机状态。
+        # 相比简单的相加，门控机制让模型可以决定“这一刻是否需要关注导弹”。
+        # gate_input = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+        # alpha = self.gate(gate_input) # alpha 接近 0 表示忽略导弹，接近 1 表示重视
+        # combined_features = ac_embed + alpha * attn_output_squeezed
+
+        # 如果追求极致速度，简单的残差相加也是极好的：
+        # combined_features = ac_embed + attn_output_squeezed
+
+        # 方案 B (纯粹的 Transformer 风格): 只使用处理后的上下文
+        # 输入维度: ENTITY_EMBED_DIM
+        # combined_features = aircraft_context_normed
+
         # 拼接：[原本的飞机状态, 注意力提取的威胁状态]
         # 这样 MLP 既知道自己怎么飞(ac_embed)，也知道威胁多严重(attn_output_squeezed)
-        combined_features = torch.cat([ac_embed_raw, attn_output_squeezed], dim=-1)
+        combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
 
         # 注意：需要调整 shared_base_mlp 的输入维度
         # mlp_input_dim = ENTITY_EMBED_DIM * 2
@@ -636,7 +785,7 @@ class PPO_continuous(object):
         self.gae_lambda = AGENTPARA.lamda
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.training_start_time = time.strftime("PPO_EntityCrossATT_MLP_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../../save/save_evade_fuza两个导弹"
+        self.base_save_dir = "../../../../save/save_evade_fuza两个导弹"
         win_rate_subdir = "胜率模型"
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
         self.win_rate_dir = os.path.join(self.run_save_dir, win_rate_subdir)
@@ -716,7 +865,21 @@ class PPO_continuous(object):
             continuous_base_dist = dists['continuous']
             u = continuous_base_dist.mean if deterministic else continuous_base_dist.rsample()
             action_cont_tanh = torch.tanh(u)
-            log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
+
+            # ================= [修改开始] =================
+            # 1. 计算原始高斯分布的 log_prob
+            log_prob_u = continuous_base_dist.log_prob(u).sum(dim=-1)
+
+            # 2. 计算雅可比修正项 (稳定公式)
+            # 公式: 2 * (log 2 - u - softplus(-2u))
+            # 注意: u 是 pre-tanh 的值
+            correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
+
+            # 3. 得到最终动作 a = tanh(u) 的 log_prob
+            log_prob_cont = log_prob_u - correction
+            # ================= [修改结束] =================
+
+            # log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
 
             sampled_actions_dict = {}
             for key, dist in dists.items():
@@ -757,24 +920,47 @@ class PPO_continuous(object):
         return final_env_action_np, action_to_store_np, log_prob_to_store_np, value_np, attention_weights_np
 
     # --- GAE计算和学习过程的核心逻辑保持不变 ---
-    def cal_gae(self, states, values, actions, probs, rewards, dones):
+    # def cal_gae(self, states, values, actions, probs, rewards, dones):
+    #     advantage = np.zeros(len(rewards), dtype=np.float32)
+    #     gae = 0
+    #     for t in reversed(range(len(rewards))):
+    #         next_value = values[t + 1] if t < len(rewards) - 1 else 0.0
+    #         done_mask = 1.0 - int(dones[t])
+    #         delta = rewards[t] + self.gamma * next_value * done_mask - values[t]
+    #         gae = delta + self.gamma * self.gae_lambda * done_mask * gae
+    #         advantage[t] = gae
+    #     return advantage
+
+    # 修改后：增加 next_value 参数，默认为 0.0
+    def cal_gae(self, states, values, actions, probs, rewards, dones, next_value=0.0):
         advantage = np.zeros(len(rewards), dtype=np.float32)
         gae = 0
         for t in reversed(range(len(rewards))):
-            next_value = values[t + 1] if t < len(rewards) - 1 else 0.0
+            # <<< 核心修改 >>>
+            # 如果不是最后一步，取 values[t+1]
+            # 如果是最后一步 (t == len - 1)，使用传入的 next_value (Bootstrapping)
+            if t == len(rewards) - 1:
+                value_next_step = next_value
+            else:
+                value_next_step = values[t + 1]
+
             done_mask = 1.0 - int(dones[t])
-            delta = rewards[t] + self.gamma * next_value * done_mask - values[t]
+
+            # 使用 value_next_step 计算 delta
+            delta = rewards[t] + self.gamma * value_next_step * done_mask - values[t]
             gae = delta + self.gamma * self.gae_lambda * done_mask * gae
             advantage[t] = gae
         return advantage
 
-    def learn(self):
+    def learn(self, next_visual_value=0.0):
         if self.buffer.get_buffer_size() < BUFFERPARA.BATCH_SIZE:
             return None
 
         states, values, actions, old_probs, rewards, dones, _, _, attn_weights = self.buffer.get_all_data()
 
-        advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones)
+        # advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones)
+        # <<< 核心修改 >>>: 将 next_visual_value 传递给 cal_gae
+        advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones, next_value=next_visual_value)
         values = np.squeeze(values)
         returns = advantages + values
         train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'entropy_cont': [], 'adv_targ': [],
@@ -790,6 +976,11 @@ class PPO_continuous(object):
                 advantage = check(advantages[batch_indices]).to(**ACTOR_PARA.tpdv)
                 return_ = check(returns[batch_indices]).to(**CRITIC_PARA.tpdv)
 
+                # ================= [新增 1] 获取旧的 Value =================
+                # 从 Buffer 中提取对应的旧价值，并调整维度为 (Batch, 1)
+                old_value = check(values[batch_indices]).to(**CRITIC_PARA.tpdv).view(-1, 1)
+                # ==========================================================
+
                 u_from_buffer = action_batch[..., :CONTINUOUS_DIM]
                 discrete_actions_from_buffer = {
                     'trigger': action_batch[..., CONTINUOUS_DIM],
@@ -801,14 +992,53 @@ class PPO_continuous(object):
                 # 注意：_ (下划线) 接收了注意力权重，但在训练循环中我们不直接使用它。
                 new_dists, _ = self.Actor(state)
 
-                new_log_prob_cont = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+                # ================= [修改开始] =================
+                # --- 第一步: 计算 Log Prob (用于策略更新 Ratio) ---
+                # 必须使用 Replay Buffer 中的旧动作 (u_from_buffer)
+                # log(pi(a_old)) = log(pi(u_old)) - log_det_J(u_old)
+
+                # 1.1 计算旧动作在新分布下的高斯 Log Prob
+                log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+
+                # 1.2 计算旧动作的雅可比修正项
+                correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
+
+                # 1.3 得到最终用于 Ratio 计算的 Log Prob
+                new_log_prob_cont = log_prob_u_buffer - correction_buffer
+
+                # --- 第二步: 计算 Entropy (用于 Loss 惩罚) ---
+                # 必须基于当前策略的新分布进行采样 (rsample)，以保留梯度并消除偏差
+                # H(pi) = H(u) + E[log_det_J(u)]
+
+                # 2.1 高斯分布的基础熵 (解析解)
+                entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
+
+                # 2.2 重采样 (Reparameterization Trick)
+                # 这一步至关重要！它建立了 correction 与当前网络参数(mu, sigma)的梯度联系
+                u_curr_sample = new_dists['continuous'].rsample()
+
+                # 2.3 计算新采样动作的雅可比修正项期望
+                correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
+
+                # 2.4 得到最终的无偏熵
+                entropy_cont = entropy_base + correction_curr
+
+                # 3. 计算离散部分 Log Prob (保持不变)
                 new_log_prob_disc = sum(
                     new_dists[key].log_prob(discrete_actions_from_buffer[key])
                     for key in discrete_actions_from_buffer
                 )
                 new_prob = new_log_prob_cont + new_log_prob_disc
+                # ================= [修改结束] =================
 
-                entropy_cont = new_dists['continuous'].entropy().sum(dim=-1)
+                # new_log_prob_cont = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+                # new_log_prob_disc = sum(
+                #     new_dists[key].log_prob(discrete_actions_from_buffer[key])
+                #     for key in discrete_actions_from_buffer
+                # )
+                # new_prob = new_log_prob_cont + new_log_prob_disc
+                #
+                # entropy_cont = new_dists['continuous'].entropy().sum(dim=-1)
                 total_entropy = (entropy_cont + sum(
                     dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
                 )).mean()
@@ -825,15 +1055,44 @@ class PPO_continuous(object):
 
                 self.Actor.optim.zero_grad()
                 actor_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.Actor.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(self.Actor.parameters(), max_norm=1.0)
                 self.Actor.optim.step()
 
                 new_value = self.Critic(state)
                 critic_loss = torch.nn.functional.mse_loss(new_value, return_)
 
+                # # --- Critic 更新部分 (修改为 Value Clip) ---
+                # new_value = self.Critic(state)
+                # # 确保 new_value 维度匹配
+                # new_value = new_value.view(-1, 1)
+                #
+                # # ================= [修改] Critic Loss 计算 =================
+                # # 1. 计算未截断的 Loss (标准 MSE)
+                # critic_loss_unclipped = (new_value - return_) ** 2
+                #
+                # # 2. 计算截断后的 Value
+                # # 使用 AGENTPARA.epsilon 作为截断范围 (通常 Actor 和 Critic 共用，或者单独定义)
+                # # clip_param = AGENTPARA.epsilon
+                # # 2. 设定适配你奖励量级的 Clip 参数
+                # # 你的回报大概是 100，设为 10 到 20 都是安全的。
+                # # 设为 10 会比 20 稍微稳一点（保留一点点截断的约束力）。
+                # clip_param = 20.0  # 建议取个折中值，比如 15.0
+                #
+                # v_clipped = old_value + torch.clamp(new_value - old_value, -clip_param, clip_param)
+                #
+                # # 3. 计算截断后的 Loss
+                # critic_loss_clipped = (v_clipped - return_) ** 2
+                #
+                # # 4. 取两者的最大值 (因为是 Loss，我们在最小化，取 max 意味着更悲观/保守的更新)
+                # critic_loss_cost = torch.max(critic_loss_unclipped, critic_loss_clipped)
+                #
+                # # 5. 求平均作为最终 Loss (系数 0.5 是为了抵消求导产生的系数 2，PPO 标准实现通常包含这个)
+                # critic_loss = 0.5 * critic_loss_cost.mean()
+                # # ==========================================================
+
                 self.Critic.optim.zero_grad()
                 critic_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.Critic.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(self.Critic.parameters(), max_norm=1.0)
                 self.Critic.optim.step()
 
                 train_info['critic_loss'].append(critic_loss.item())

@@ -7,7 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # ------------------- 导入模型和配置 -------------------
 # 保持你原有的导入路径不变
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP交叉注意力GRU飞机导弹gru在编码层前 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体 import *
 

@@ -136,6 +136,15 @@ class AirCombatEnv(gym.Env):
         self._final_miss_dist_printed = False
 
     def reset(self, seed=None, options=None) -> tuple:
+        # ---------------------------------------------------------
+        # 必须要有这几行！否则 Run...py 里的 seed 传进来也控制不了 step 中的随机数
+        # ---------------------------------------------------------
+        # <<< 添加这两行 >>>
+        if seed is not None:
+            np.random.seed(seed)
+            # 如果你也用了 random 库，最好也加一行
+            import random
+            random.seed(seed)
         super().reset(seed=seed)
 
         # <<< 确保这行代码在这里，用于重置标志位 >>>
@@ -171,6 +180,8 @@ class AirCombatEnv(gym.Env):
         aircraft_vel = np.random.uniform(300, 400)
         initial_aircraft_state = np.array([0, y_t, 0, aircraft_vel, aircraft_pitch, 0, 0, 0.0])
         self.aircraft.reset(initial_state=initial_aircraft_state)
+
+        # print("initial_aircraft_state", initial_aircraft_state)
 
         # <<< 新增：清理上一回合可能留下的属性 >>>
         for m in self.missiles:

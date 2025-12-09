@@ -4,7 +4,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # ------------------- 导入模型和配置 -------------------
 # 保持你原有的导入路径不变
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.旧代码.Hybrid_PPO_ATTMLP交叉注意力GRU飞机导弹gru在编码层前 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体 import *
 
@@ -17,12 +17,37 @@ TACVIEW_ENABLED_DURING_TRAINING = False
 UPDATE_CYCLE = 10
 
 
+# def set_seed(env, seed=AGENTPARA.RANDOM_SEED):
+#     random.seed(seed)
+#     np.random.seed(seed)
+#     torch.manual_seed(seed)
+#     if hasattr(env, 'reset'):
+#         env.reset(seed=seed)
+
 def set_seed(env, seed=AGENTPARA.RANDOM_SEED):
+    ''' 设置全栈随机种子 '''
+    # 1. Python 原生 & Numpy (环境的核心)
     random.seed(seed)
     np.random.seed(seed)
+
+    # 2. PyTorch (智能体的核心)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # 如果有多张卡，全部设置
+
+        # (可选) 强制 CuDNN 使用确定性算法
+        # 这会让训练变慢一点点，但能保证完全复现
+        # torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.benchmark = False
+
+    # 3. Gym 环境 (初始化的核心)
+    if hasattr(env, 'action_space'):
+        env.action_space.seed(seed)
     if hasattr(env, 'reset'):
         env.reset(seed=seed)
+
+    print(f"[Info] Random seed set to {seed}")
 
 
 def pack_action_into_dict(flat_action_np: np.ndarray, attn_weights: Optional[np.ndarray] = None) -> dict:
@@ -57,8 +82,11 @@ agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_load_path, use_
 # ------------------- 训练主循环 -------------------
 global_step = 0
 success_num = 0
-MAX_EXE_NUM = 100000
+MAX_EXE_NUM = 15000 #20000
 MAX_STEP = 10000
+
+eval_reward_buffer = []
+eval_counter = 0  # 计数器，专门用来控制测试的种子
 
 for i_episode in range(MAX_EXE_NUM):
     # --- 1. 重置环境 ---
@@ -169,8 +197,29 @@ for i_episode in range(MAX_EXE_NUM):
         agent.prep_eval_rl()
 
         with torch.no_grad():
-            eval_obs, _ = env.reset(seed=AGENTPARA.RANDOM_SEED)  # 固定种子评估
+            # eval_obs, _ = env.reset(seed=AGENTPARA.RANDOM_SEED)  # 固定种子评估
 
+            # =========================================================
+            # <<< 核心修改开始 >>> 设置互不重复的测试种子
+            # =========================================================
+
+            # 定义一个巨大的偏移量，比如 100,000 (确保大于你的 MAX_EXE_NUM)
+            TEST_SEED_OFFSET = 100000 #MAX_EXE_NUM
+
+            # [测试种子] = 基础种子 + 偏移量 + 当前回合数
+            # 例如：1000 + 100000 + 10 = 101010
+            # 下一次测试是：1000 + 100000 + 20 = 101020
+            # 结果：永远不重复，且跟训练集完全隔离
+            current_test_seed = AGENTPARA.RANDOM_SEED + TEST_SEED_OFFSET + i_episode
+
+            # 显式传入计算好的种子
+            eval_obs, _ = env.reset(seed=current_test_seed)
+
+            print(f"    (使用测试种子: {current_test_seed})")  # 打印出来方便检查
+
+            # =========================================================
+            # <<< 核心修改结束 >>>
+            # =========================================================
             # [RNN关键点] 评估时必须重置 RNN
             if USE_RNN_MODEL:
                 agent.reset_rnn_state()
@@ -192,6 +241,20 @@ for i_episode in range(MAX_EXE_NUM):
 
             print(f">>> 评估结束 | Reward: {eval_reward_sum:.2f}")
             writer.add_scalar('Eval/Reward_Sum', eval_reward_sum, global_step)
+
+            eval_reward_buffer.append(eval_reward_sum)  # 存入列表
+            # --- 核心修改：判断是否攒够了 10 个 ---
+            if len(eval_reward_buffer) >= 10:
+                mean_reward = np.mean(eval_reward_buffer)
+                print(f"\n{'#' * 40}")
+                print(f"### 统计报告: 过去10次测试平均奖励: {mean_reward:.2f} ###")
+                print(f"{'#' * 40}\n")
+
+                # 记录到 Tensorboard，使用的是'Eval/Mean_10_Buffer'
+                writer.add_scalar('Eval/Mean_10_Buffer', mean_reward, global_step)
+
+                # 清空缓存，准备下一轮积累
+                eval_reward_buffer = []
 
         print("--- 准备开始下一轮采集 ---\n")
 

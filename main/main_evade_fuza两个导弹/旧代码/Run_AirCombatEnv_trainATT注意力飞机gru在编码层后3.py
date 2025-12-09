@@ -1,10 +1,13 @@
 import random
 from typing import Optional
+import numpy as np
+import torch
+import time
 from torch.utils.tensorboard import SummaryWriter
 
 # ------------------- 导入模型和配置 -------------------
 # 保持你原有的导入路径不变
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.旧代码.Hybrid_PPO_ATTMLP交叉注意力GRU飞机导弹gru在编码层前 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体 import *
 
@@ -59,6 +62,8 @@ global_step = 0
 success_num = 0
 MAX_EXE_NUM = 100000
 MAX_STEP = 10000
+eval_reward_buffer = []
+eval_counter = 0  # 计数器，专门用来控制测试的种子
 
 for i_episode in range(MAX_EXE_NUM):
     # --- 1. 重置环境 ---
@@ -170,7 +175,17 @@ for i_episode in range(MAX_EXE_NUM):
 
         with torch.no_grad():
             eval_obs, _ = env.reset(seed=AGENTPARA.RANDOM_SEED)  # 固定种子评估
+            # [核心修改]：使用循环种子策略
+            # 假设基础种子是 RANDOM_SEED (比如 3407)
+            # 第一次测试用 3407+0，第二次用 3407+1 ... 第十次用 3407+9
+            # 第十一次又回到 3407+0，保证每一轮“大考”的题目是一样的
+            # current_eval_seed_offset = eval_counter % 10
+            # current_eval_seed = AGENTPARA.RANDOM_SEED + current_eval_seed_offset
 
+            # 打印一下当前用的种子，方便排查
+            # print(f"  Using Eval Seed: {current_eval_seed} (Offset {current_eval_seed_offset})")
+
+            # eval_obs, _ = env.reset(seed=current_eval_seed)
             # [RNN关键点] 评估时必须重置 RNN
             if USE_RNN_MODEL:
                 agent.reset_rnn_state()
@@ -192,6 +207,24 @@ for i_episode in range(MAX_EXE_NUM):
 
             print(f">>> 评估结束 | Reward: {eval_reward_sum:.2f}")
             writer.add_scalar('Eval/Reward_Sum', eval_reward_sum, global_step)
+
+            eval_reward_buffer.append(eval_reward_sum)  # 存入列表
+            # --- 核心修改：判断是否攒够了 10 个 ---
+            if len(eval_reward_buffer) >= 10:
+                mean_reward = np.mean(eval_reward_buffer)
+                print(f"\n{'#' * 40}")
+                print(f"### 统计报告: 过去10次测试平均奖励: {mean_reward:.2f} ###")
+                print(f"{'#' * 40}\n")
+
+                # 记录到 Tensorboard，使用的是'Eval/Mean_10_Buffer'
+                writer.add_scalar('Eval/Mean_10_Buffer', mean_reward, global_step)
+
+                # 清空缓存，准备下一轮积累
+                eval_reward_buffer = []
+            # else:
+            #     # 还没攒够，也可以记一下当前的单次奖励，稍微淡一点
+            #     writer.add_scalar('Eval/Single_Run_Reward', eval_reward_sum, global_step)
+            #     print(f"--- 当前已累计 {len(eval_reward_buffer)}/10 个测试数据 ---\n")
 
         print("--- 准备开始下一轮采集 ---\n")
 

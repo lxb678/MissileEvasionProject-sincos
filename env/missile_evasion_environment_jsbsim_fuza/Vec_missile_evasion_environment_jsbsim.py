@@ -147,6 +147,15 @@ class AirCombatEnv(gym.Env):
         重置环境到初始状态，为新的一回合做准备。
         (Gymnasium兼容版) 重置环境。
         """
+        # ---------------------------------------------------------
+        # 必须要有这几行！否则 Run...py 里的 seed 传进来也控制不了 step 中的随机数
+        # ---------------------------------------------------------
+        # <<< 添加这两行 >>>
+        if seed is not None:
+            np.random.seed(seed)
+            # 如果你也用了 random 库，最好也加一行
+            import random
+            random.seed(seed)
         # <<< GYMNASIUM CHANGE >>> 处理可选的 seed 参数
         # 如果需要基于seed的随机化，可以在这里使用
         super().reset(seed=seed)

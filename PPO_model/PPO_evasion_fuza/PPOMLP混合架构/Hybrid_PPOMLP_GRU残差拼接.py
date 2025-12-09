@@ -1,6 +1,7 @@
 # --- START OF FILE Hybrid_PPO_jsbsim_SeparateHeads.py ---
 
 import torch
+from torch import nn
 from torch.nn import *
 from torch.distributions import Bernoulli, Categorical
 from torch.distributions import Normal
@@ -59,122 +60,148 @@ ACTION_RANGES = {
 
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
-RNN_HIDDEN_SIZE =  64 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH =  10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
+RNN_HIDDEN_SIZE =  128 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
+SEQUENCE_LENGTH =   5 #10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
 
-
-# ==============================================================================
-# <<< 新架构 >>>: 定义基于 Encoder -> GRU -> Shared MLP 的 Actor
-#                       [💥 新结构: 编码层 -> GRU -> 共享MLP -> 塔楼MLP -> Heads]
-# ==============================================================================
 
 class Actor_GRU(Module):
     """
-    Actor 网络 (策略网络) - [混合架构: Encoder -> GRU -> Shared MLP]
-    结构为: 编码层 -> GRU 序列处理 -> 共享MLP基座 -> 专用MLP塔楼 -> 独立动作头。
+    Actor 网络 (策略网络) - [架构: 共享MLP -> GRU (+残差) -> 塔楼MLP]
+    严格保持原配置层数：
+    1. Pre-GRU: 使用 model_layer_dim 的前2层
+    2. GRU: 处理时序
+    3. Residual: LayerNorm(Pre-GRU输出 + GRU输出)
+    4. Post-GRU: 使用 model_layer_dim 的剩余层
     """
 
     def __init__(self):
         super(Actor_GRU, self).__init__()
         self.input_dim = ACTOR_PARA.input_dim
-        self.log_std_min = -20.0
-        self.log_std_max = 2.0
+        # self.log_std_min = -20.0
+        # self.log_std_max = 2.0
+
+        # # 1. 设定物理意义上的标准差范围
+        # # =====================================================
+        # # 下限 0.05: 保持 5% 的底噪，防止过拟合，增加策略鲁棒性
+        # self.target_std_min = 0.01 #0.05
+        # # 上限 1.5: 覆盖 Tanh 有效区，防止过多无效探索
+        # self.target_std_max = 1.5
+        #
+        # # 自动转换为 log 空间 (因为网络参数训练 log 值更稳定)
+        # # log(0.01) ≈ -4.605, log(0.6) ≈ -0.51
+        # self.log_std_min = np.log(self.target_std_min)
+        # self.log_std_max = np.log(self.target_std_max)
+
+        self.target_std_min = 0.05  # 保证底噪
+        self.target_std_max = 0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
+        self.target_init_std = 0.75  # 0.85 #0.65 #0.75  # 初始值设为中间态，不要设为 max
+
+        # 转换为 Log 空间边界
+        self.log_std_min = np.log(self.target_std_min)  # ln(0.05) ≈ -2.99
+        self.log_std_max = np.log(self.target_std_max)  # ln(1.0) = 0.0
+
         self.rnn_hidden_size = RNN_HIDDEN_SIZE
 
-        # # --- 1. [新增] 编码层 (Encoder) ---
-        # # 将原始输入映射到 RNN 的隐藏层维度
-        # self.encoder = Sequential(
-        #     Linear(self.input_dim, self.rnn_hidden_size),
-        #     LeakyReLU()
-        # )
+        # =====================================================================
+        # 1. 共享 MLP (Pre-GRU) - 严格使用配置的前2层
+        # =====================================================================
+        split_point = 2  # 在第2层切分
+        pre_gru_dims = ACTOR_PARA.model_layer_dim[:split_point]
 
-        # # --- [修改后]：双层 + Tanh ---
-        # enc_mid_dim = RNN_HIDDEN_SIZE * 2  # 或者 self.input_dim * 2
-        # self.encoder = Sequential(
-        #     Linear(self.input_dim, enc_mid_dim),
-        #     LeakyReLU(),
-        #     Linear(enc_mid_dim, self.rnn_hidden_size),
-        #     # Tanh()  # <--- 关键保护
-        # )
-
-        # # --- 2. GRU 层 ---
-        # # 输入和输出维度都保持为 rnn_hidden_size
-        # self.gru = GRU(self.rnn_hidden_size, self.rnn_hidden_size, batch_first=True)
-        # 2. GRU 输入维度直接设为 input_dim
-        self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
-
-        # ======================================================
-        # <<< 新增：残差连接组件 >>>
-        # ======================================================
-        # 1. 投影层：把原始输入维度 (input_dim) 映射到 GRU 隐藏层维度 (rnn_hidden_size)
-        self.residual_projection = Linear(self.input_dim, self.rnn_hidden_size)
-
-        # # 2. 归一化层：非常重要！防止原始输入的大数值淹没 GRU 的信号
-        # self.residual_norm = LayerNorm(self.rnn_hidden_size)
-        #
-        # # 3. 激活函数 (可选，增加残差路径的非线性能力)
-        # self.residual_act = LeakyReLU()
-        # ======================================================
-
-        # --- 3. [移动] 共享 MLP 基座 (Shared MLP) ---
-        # GRU 的输出进入此共享层。我们使用配置文件中的前几层作为共享层。
-        # 假设 model_layer_dim = [256, 256, 256]，我们用前2层做共享，最后1层做塔楼
-        shared_layer_count = 2
-        shared_dims = ACTOR_PARA.model_layer_dim[:shared_layer_count]
-
-        self.shared_mlp = Sequential()
-        input_dim = self.rnn_hidden_size
-        for i, dim in enumerate(shared_dims):
-            self.shared_mlp.add_module(f'shared_fc_{i}', Linear(input_dim, dim))
-            self.shared_mlp.add_module(f'shared_leakyrelu_{i}', LeakyReLU())
+        self.pre_gru_mlp = Sequential()
+        input_dim = self.input_dim
+        for i, dim in enumerate(pre_gru_dims):
+            self.pre_gru_mlp.add_module(f'pre_gru_fc_{i}', Linear(input_dim, dim))
+            self.pre_gru_mlp.add_module(f'pre_gru_leakyrelu_{i}', LeakyReLU())
             input_dim = dim
 
-        shared_output_dim = shared_dims[-1] if shared_dims else self.rnn_hidden_size
+        # 记录 Pre-GRU 的输出维度
+        self.pre_gru_output_dim = input_dim
 
-        # --- 4. 专用 MLP 塔楼 (Post-Shared Towers) ---
-        # 剩余的层作为独立塔楼
-        tower_dims = ACTOR_PARA.model_layer_dim[shared_layer_count:]
+        # =====================================================================
+        # 2. GRU 层
+        # =====================================================================
+        self.gru = GRU(self.pre_gru_output_dim, self.rnn_hidden_size, batch_first=True)
+
+        # # =====================================================================
+        # # 3. 残差连接适配器 & 归一化
+        # # =====================================================================
+        # # 如果 Pre-GRU 输出维度 != GRU 隐藏层维度，需要投影才能相加
+        # if self.pre_gru_output_dim != self.rnn_hidden_size:
+        #     self.residual_projection = Linear(self.pre_gru_output_dim, self.rnn_hidden_size)
+        # else:
+        #     self.residual_projection = nn.Identity()
+
+        # self.ln_residual = LayerNorm(self.rnn_hidden_size)
+
+        # =====================================================================
+        # 4. 专用 MLP 塔楼 (Post-GRU) - 使用配置的剩余层
+        # =====================================================================
+        post_gru_dims = ACTOR_PARA.model_layer_dim[split_point:]
+
+        # 🔥 [修改点 1]：塔楼的输入维度 = GRU输出维度 + GRU输入特征维度
+        # 这样实现了 Skip Connection 的拼接
+        tower_input_dim = self.rnn_hidden_size + self.pre_gru_output_dim
 
         # 连续动作塔楼
         self.continuous_tower = Sequential()
-        tower_input_dim = shared_output_dim
-        for i, dim in enumerate(tower_dims):
-            self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(tower_input_dim, dim))
+        # 注意：这里需要一个临时变量 current_dim 来构建塔楼，因为 tower_input_dim 在循环中会变
+        current_dim = tower_input_dim
+        for i, dim in enumerate(post_gru_dims):
+            self.continuous_tower.add_module(f'cont_tower_fc_{i}', Linear(current_dim, dim))
             self.continuous_tower.add_module(f'cont_tower_leakyrelu_{i}', LeakyReLU())
-            tower_input_dim = dim
-        continuous_tower_output_dim = tower_dims[-1] if tower_dims else shared_output_dim
+            current_dim = dim
+        continuous_tower_output_dim = post_gru_dims[-1] if post_gru_dims else tower_input_dim
 
         # 离散动作塔楼
         self.discrete_tower = Sequential()
-        tower_input_dim = shared_output_dim
-        for i, dim in enumerate(tower_dims):
-            self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(tower_input_dim, dim))
+        current_dim = tower_input_dim  # 重置维度
+        for i, dim in enumerate(post_gru_dims):
+            self.discrete_tower.add_module(f'disc_tower_fc_{i}', Linear(current_dim, dim))
             self.discrete_tower.add_module(f'disc_tower_leakyrelu_{i}', LeakyReLU())
-            tower_input_dim = dim
-        discrete_tower_output_dim = tower_dims[-1] if tower_dims else shared_output_dim
+            current_dim = dim
+        discrete_tower_output_dim = post_gru_dims[-1] if post_gru_dims else tower_input_dim
 
-        # --- 5. 定义最终的输出头 (Heads) ---
+        # =====================================================================
+        # 5. 输出头
+        # =====================================================================
         self.mu_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
         self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
-        self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
+        # self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
+        # =========== 修改: 初始化 Std 参数 ===========
+        # 初始化为 log_std_max (即 std=0.6)，让智能体刚开始时有最大的探索能力
+        # self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), self.log_std_max))
+        # =====================================================
+        # 2. 软限制参数初始化
+        # =====================================================
+        # 计算验证：
+        # Sigmoid(2.0) ≈ 0.88
+        # LogStd ≈ ln(0.05) + 0.88 * (ln(1.5) - ln(0.05)) ≈ 0.0
+        # Std ≈ 1.0 (完美初始值)
 
-        # --- 初始化权重 ---
-        self.apply(init_weights)
+        # init_value = 2.5 #2.0
+        # self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), init_value))
 
-        # --- 6. 优化器设置 ---
+        # 初始化为 -0.5 左右 (std ≈ 0.6)，比 1.0 稳健，又比 0.1 有探索性
+        init_log_std = np.log(self.target_init_std)
+        self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), init_log_std))
+
+        # 初始化
+        # self.apply(init_weights)
+        self._init_weights()  # 必须进行权重初始化
+        # 优化器设置
         gru_params = list(self.gru.parameters())
-        # 收集所有非 GRU 参数
         other_params = (
-                # list(self.encoder.parameters()) +
-                list(self.residual_projection.parameters()) +  # <--- 新增
-                # list(self.residual_norm.parameters()) +  # <--- 新增
-                list(self.shared_mlp.parameters()) +
+                list(self.pre_gru_mlp.parameters()) +
                 list(self.continuous_tower.parameters()) +
                 list(self.discrete_tower.parameters()) +
                 list(self.mu_head.parameters()) +
                 list(self.discrete_head.parameters()) +
                 [self.log_std_param]
         )
+        # if isinstance(self.residual_projection, Linear):
+        #     other_params.extend(list(self.residual_projection.parameters()))
+        # other_params.extend(list(self.ln_residual.parameters()))
 
         param_groups = [
             {'params': gru_params, 'lr': ACTOR_PARA.gru_lr},
@@ -186,42 +213,79 @@ class Actor_GRU(Module):
                                                      total_iters=AGENTPARA.MAX_EXE_NUM)
         self.to(ACTOR_PARA.device)
 
+    def _init_weights(self):
+        for m in self.modules():
+            # 1. 线性层通用初始化
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+            # 2. GRU 特殊初始化 (关键！不要漏掉)
+            elif isinstance(m, nn.GRU):
+                for name, param in m.named_parameters():
+                    if 'weight_ih' in name:
+                        nn.init.orthogonal_(param.data)
+                    elif 'weight_hh' in name:
+                        nn.init.orthogonal_(param.data)
+                    elif 'bias' in name:
+                        param.data.fill_(0)
+
+            # 3. LayerNorm 初始化
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1.0)
+                nn.init.constant_(m.bias, 0)
+
+        # --- 特殊处理：策略输出头 (最后覆盖前面的通用初始化) ---
+
+        # 连续动作头：确保均值接近 0，避免 Tanh 饱和
+        nn.init.orthogonal_(self.mu_head.weight, gain=0.01)
+        nn.init.constant_(self.mu_head.bias, 0)
+
+        # 离散动作头：确保初始概率均匀 (Max Entropy)
+        nn.init.orthogonal_(self.discrete_head.weight, gain=0.01)
+        nn.init.constant_(self.discrete_head.bias, 0)
+
     def forward(self, obs, hidden_state):
         obs_tensor = check(obs).to(**ACTOR_PARA.tpdv)
         is_sequence = obs_tensor.dim() == 3
         if not is_sequence:
             obs_tensor = obs_tensor.unsqueeze(1)
 
-        # 1. 主路径：通过 GRU ("慢系统"，提取时序信息)
-        gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+        # 1. 共享 MLP 特征提取
+        # Input: (B, S, Input_Dim) -> Output: (B, S, Pre_Dim)
+        features = self.pre_gru_mlp(obs_tensor)
 
-        # ======================================================
-        # <<< 修改：执行残差连接 >>>
-        # ======================================================
-        # 2. 残差路径：投影 -> 激活 -> 归一化 ("快系统"，保留当前观测)
-        # 线性层会自动处理 (Batch, Seq, Dim) 的形状
-        skip_connection = self.residual_projection(obs_tensor)
-        # skip_connection = self.residual_act(skip_connection)
-        # skip_connection = self.residual_norm(skip_connection)
+        # 2. GRU 时序记忆
+        # Input: (B, S, Pre_Dim) -> Output: (B, S, RNN_Hidden)
+        gru_out, new_hidden = self.gru(features, hidden_state)
 
-        # 3. 融合：Element-wise Addition (相加)
-        combined_features = gru_out + skip_connection
-        # ======================================================
+        # # 3. 🔥 残差连接 + LayerNorm 🔥
+        # combined_features = gru_out
 
-        # 4. 后续 MLP 处理融合后的特征
-        shared_features = self.shared_mlp(combined_features)  # 输入改为 combined_features
+        # 3. 🔥 [修改点 2] 拼接 (Concatenation) 🔥
+        # 将 "当前时刻特征(features)" 和 "历史记忆(gru_out)" 在最后一个维度拼接
+        # features shape: (B, S, pre_gru_dim)
+        # gru_out shape:  (B, S, rnn_hidden_size)
+        combined_features = torch.cat([features, gru_out], dim=-1)
+        # result shape:   (B, S, pre_gru_dim + rnn_hidden_size)
 
-        # 4. 共享特征分别进入专用塔楼
-        continuous_features = self.continuous_tower(shared_features)
-        discrete_features = self.discrete_tower(shared_features)
+        # 4. 塔楼处理
+        continuous_features = self.continuous_tower(combined_features)
+        discrete_features = self.discrete_tower(combined_features)
 
-        # 5. 如果是单步输入，压缩特征维度以匹配头部
+        # 5. 单步处理适配
         if not is_sequence:
             continuous_features = continuous_features.squeeze(1)
             discrete_features = discrete_features.squeeze(1)
 
         # 6. 输出头
         mu = self.mu_head(continuous_features)
+
+        # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
+        # 只要不让它跑到 10 这种离谱的值就行
+        mu = torch.clamp(mu, -3.0, 3.0)
+
         all_disc_logits = self.discrete_head(discrete_features)
 
         # --- 以下逻辑保持不变 ---
@@ -229,7 +293,7 @@ class Actor_GRU(Module):
         logits_parts = torch.split(all_disc_logits, split_sizes, dim=-1)
         trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
 
-        has_flares_info = obs_tensor[..., 9]
+        has_flares_info = obs_tensor[..., 9]  # 请确保索引对应正确
         mask = (has_flares_info == 0)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
@@ -252,7 +316,24 @@ class Actor_GRU(Module):
                     logits_sub[:, 0] = INF
                     logits_tensor[no_trigger_mask] = logits_sub
 
+        # log_std = torch.clamp(self.log_std_param, self.log_std_min, self.log_std_max)
+        # =====================================================
+        # 3. 计算动态标准差 (Soft Mapping)
+        # =====================================================
+        # output = min + (max - min) * sigmoid(param)
+
+        # # 1. 将无界参数压缩到 (0, 1)
+        # norm_val = torch.sigmoid(self.log_std_param)
+        #
+        # # 2. 映射到 log 范围 [log_min, log_max]
+        # log_std = self.log_std_min + norm_val *  (self.log_std_max - self.log_std_min)
+
+        # =========== 修改: 限制标准差应用 ===========
+        # 使用之前计算好的 log 界限进行截断
+        # log_std_min = ln(0.01), log_std_max = ln(0.6)
         log_std = torch.clamp(self.log_std_param, self.log_std_min, self.log_std_max)
+
+        # 3. 转回 std
         std = torch.exp(log_std).expand_as(mu)
         continuous_base_dist = Normal(mu, std)
 
@@ -272,15 +353,10 @@ class Actor_GRU(Module):
         return distributions, new_hidden
 
 
-# ==============================================================================
-# <<< 新架构 >>>: 定义基于 Encoder -> GRU -> Shared MLP 的 Critic
-#                       [💥 新结构: 编码层 -> GRU -> MLP -> Head]
-# ==============================================================================
-
 class Critic_GRU(Module):
     """
-    Critic 网络 (价值网络) - [混合架构: Encoder -> GRU -> MLP]
-    结构为: 编码层 -> GRU 序列处理 -> 共享MLP -> 输出头。
+    Critic 网络 (价值网络) - [架构: 共享MLP -> GRU (+残差) -> 后置MLP]
+    严格保持原配置层数。
     """
 
     def __init__(self):
@@ -289,63 +365,72 @@ class Critic_GRU(Module):
         self.output_dim = CRITIC_PARA.output_dim
         self.rnn_hidden_size = RNN_HIDDEN_SIZE
 
-        # # --- 1. [新增] 编码层 (Encoder) ---
-        # self.encoder = Sequential(
-        #     Linear(self.input_dim, self.rnn_hidden_size),
-        #     LeakyReLU()
-        # )
+        # =====================================================================
+        # 1. 共享 MLP (Pre-GRU)
+        # =====================================================================
+        split_point = 2
+        pre_gru_dims = CRITIC_PARA.model_layer_dim[:split_point]
 
-        # # --- [修改后]：双层 + Tanh ---
-        # enc_mid_dim = RNN_HIDDEN_SIZE * 2  # 或者 self.input_dim * 2
-        # self.encoder = Sequential(
-        #     Linear(self.input_dim, enc_mid_dim),
-        #     LeakyReLU(),
-        #     Linear(enc_mid_dim, self.rnn_hidden_size),
-        #     # Tanh()  # <--- 关键保护
-        # )
-
-        # --- 2. GRU 层 ---
-        # self.gru = GRU(self.rnn_hidden_size, self.rnn_hidden_size, batch_first=True)
-
-        # 2. GRU 输入维度直接设为 input_dim
-        self.gru = GRU(self.input_dim, self.rnn_hidden_size, batch_first=True)
-
-        # ======================================================
-        # <<< 新增：残差连接组件 >>>
-        # ======================================================
-        self.residual_projection = Linear(self.input_dim, self.rnn_hidden_size)
-        # self.residual_norm = LayerNorm(self.rnn_hidden_size)
-        # self.residual_act = LeakyReLU()
-        # ======================================================
-
-        # --- 3. [移动] 后置 MLP (Post-GRU MLP) ---
-        # GRU 之后是完整的 MLP 网络进行价值评估
-        mlp_dims = CRITIC_PARA.model_layer_dim
-
-        self.mlp = Sequential()
-        input_dim = self.rnn_hidden_size
-        for i, dim in enumerate(mlp_dims):
-            self.mlp.add_module(f'mlp_fc_{i}', Linear(input_dim, dim))
-            self.mlp.add_module(f'mlp_leakyrelu_{i}', LeakyReLU())
+        self.pre_gru_mlp = Sequential()
+        input_dim = self.input_dim
+        for i, dim in enumerate(pre_gru_dims):
+            self.pre_gru_mlp.add_module(f'pre_gru_fc_{i}', Linear(input_dim, dim))
+            self.pre_gru_mlp.add_module(f'pre_gru_leakyrelu_{i}', LeakyReLU())
             input_dim = dim
 
-        mlp_output_dim = mlp_dims[-1] if mlp_dims else self.rnn_hidden_size
+        self.pre_gru_output_dim = input_dim
 
-        # --- 4. 最终的输出头 (Head) ---
-        self.fc_out = Linear(mlp_output_dim, self.output_dim)
+        # =====================================================================
+        # 2. GRU 层
+        # =====================================================================
+        self.gru = GRU(self.pre_gru_output_dim, self.rnn_hidden_size, batch_first=True)
 
-        # --- 初始化权重 ---
-        self.apply(init_weights)
+        # # =====================================================================
+        # # 3. 残差连接适配器 & 归一化
+        # # =====================================================================
+        # if self.pre_gru_output_dim != self.rnn_hidden_size:
+        #     self.residual_projection = Linear(self.pre_gru_output_dim, self.rnn_hidden_size)
+        # else:
+        #     self.residual_projection = nn.Identity()
 
-        # --- 5. 优化器设置 ---
+        # self.ln_residual = LayerNorm(self.rnn_hidden_size)
+
+        # =====================================================================
+        # 4. 后置 MLP (Post-GRU)
+        # =====================================================================
+        post_gru_dims = CRITIC_PARA.model_layer_dim[split_point:]
+
+        # 🔥 [修改点 1]：输入维度变为拼接后的维度
+        tower_input_dim = self.rnn_hidden_size + self.pre_gru_output_dim
+
+        self.post_gru_mlp = Sequential()
+        current_dim = tower_input_dim
+        for i, dim in enumerate(post_gru_dims):
+            self.post_gru_mlp.add_module(f'post_gru_fc_{i}', Linear(current_dim, dim))
+            self.post_gru_mlp.add_module(f'post_gru_leakyrelu_{i}', LeakyReLU())
+            current_dim = dim
+
+        post_gru_output_dim = post_gru_dims[-1] if post_gru_dims else tower_input_dim
+
+        # =====================================================================
+        # 5. 输出头
+        # =====================================================================
+        self.fc_out = Linear(post_gru_output_dim, self.output_dim)
+
+        # 初始化
+        # self.apply(init_weights)
+        self._init_weights()
+
+        # 优化器
         gru_params = list(self.gru.parameters())
         other_params = (
-                # list(self.encoder.parameters()) +
-                list(self.residual_projection.parameters()) +  # <--- 新增
-                # list(self.residual_norm.parameters()) +  # <--- 新增
-                list(self.mlp.parameters()) +
+                list(self.pre_gru_mlp.parameters()) +
+                list(self.post_gru_mlp.parameters()) +
                 list(self.fc_out.parameters())
         )
+        # if isinstance(self.residual_projection, Linear):
+        #     other_params.extend(list(self.residual_projection.parameters()))
+        # other_params.extend(list(self.ln_residual.parameters()))
 
         param_groups = [
             {'params': gru_params, 'lr': CRITIC_PARA.gru_lr},
@@ -357,38 +442,64 @@ class Critic_GRU(Module):
                                                       total_iters=AGENTPARA.MAX_EXE_NUM)
         self.to(CRITIC_PARA.device)
 
+    def _init_weights(self):
+        # 1. 遍历所有模块进行通用初始化
+        for m in self.modules():
+            # 线性层 (Hidden Layers)：配合 LeakyReLU/ReLU
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+            # GRU 层：防止梯度消失/爆炸
+            elif isinstance(m, nn.GRU):
+                for name, param in m.named_parameters():
+                    if 'weight_ih' in name:
+                        nn.init.orthogonal_(param.data)
+                    elif 'weight_hh' in name:
+                        nn.init.orthogonal_(param.data)
+                    elif 'bias' in name:
+                        param.data.fill_(0)
+
+            # LayerNorm 层 (如果你加了的话)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1.0)
+                nn.init.constant_(m.bias, 0)
+
+        # 2. --- 特殊处理：Critic 输出头 ---
+        # 覆盖掉上面的通用初始化
+        # 因为 fc_out 后面没有激活函数，所以 gain 使用 1.0 (线性层的标准值)
+        # 这样初始的价值估计 V(s) 会在 0 附近波动
+        nn.init.orthogonal_(self.fc_out.weight, gain=1.0)
+        nn.init.constant_(self.fc_out.bias, 0)
+
     def forward(self, obs, hidden_state):
         obs_tensor = check(obs).to(**CRITIC_PARA.tpdv)
         is_sequence = obs_tensor.dim() == 3
         if not is_sequence:
             obs_tensor = obs_tensor.unsqueeze(1)
 
-        # 1. GRU
-        gru_out, new_hidden = self.gru(obs_tensor, hidden_state)
+        # 1. Pre-GRU
+        features = self.pre_gru_mlp(obs_tensor)
 
-        # ======================================================
-        # <<< 修改：残差连接 >>>
-        # ======================================================
-        # 投影原始输入
-        skip_connection = self.residual_projection(obs_tensor)
-        # skip_connection = self.residual_act(skip_connection)
-        # skip_connection = self.residual_norm(skip_connection)
+        # 2. GRU
+        gru_out, new_hidden = self.gru(features, hidden_state)
 
-        # 相加
-        combined_features = gru_out + skip_connection
-        # ======================================================
+        # 3. 🔥 Residual 🔥
+        # features_projected = self.residual_projection(features)
+        # combined_features = gru_out
+        # 3. 🔥 [修改点 2] 拼接 (Skip Connection) 🔥
+        combined_features = torch.cat([features, gru_out], dim=-1)
+        # 4. Post-GRU
+        post_features = self.post_gru_mlp(combined_features)
 
-        # 3. MLP
-        mlp_features = self.mlp(combined_features)
-        # 处理单步输入的情况
         if not is_sequence:
-            mlp_features = mlp_features.squeeze(1)
+            post_features = post_features.squeeze(1)
 
-        # 4. 输出头
-        value = self.fc_out(mlp_features)
+        # 5. Head
+        value = self.fc_out(post_features)
 
         return value, new_hidden
-
 
 # ==============================================================================
 # Original MLP-based Actor and Critic (保留原始版本以供选择)

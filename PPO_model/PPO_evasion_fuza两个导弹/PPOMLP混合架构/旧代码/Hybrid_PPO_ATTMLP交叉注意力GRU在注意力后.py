@@ -50,19 +50,19 @@ MISSILE_FEAT_DIM = 4
 AIRCRAFT_FEAT_DIM = 7
 FULL_OBS_DIM = (NUM_MISSILES * MISSILE_FEAT_DIM) + AIRCRAFT_FEAT_DIM
 
-ENTITY_EMBED_DIM = 64
-ATTN_NUM_HEADS = 2
+ENTITY_EMBED_DIM = 128
+ATTN_NUM_HEADS = 4
 
 assert ENTITY_EMBED_DIM % ATTN_NUM_HEADS == 0, "ENTITY_EMBED_DIM must be divisible by ATTN_NUM_HEADS"
 
 
 # ==============================================================================
-#           <<< 核心修改 >>>: 升级架构为交叉注意力 + GRU
+#           <<< 核心修改 >>>: Encoder -> CrossAttention -> GRU -> MLP
 # ==============================================================================
 
 class Actor_CrossAttentionMLP(Module):
     """
-    Actor 网络 - [架构: 并行Encoder -> 共享GRU -> Attention -> MLP]
+    Actor 网络 - [架构优化: Encoder -> Attention(空间融合) -> GRU(全局时序) -> MLP]
     """
 
     def __init__(self, weight_decay=1e-4, rnn_hidden_dim=ENTITY_EMBED_DIM):
@@ -71,57 +71,40 @@ class Actor_CrossAttentionMLP(Module):
         self.log_std_min = -20.0
         self.log_std_max = 2.0
         self.weight_decay = weight_decay
-        self.rnn_hidden_dim = rnn_hidden_dim
 
-        # ======================================================================
-        # 1. 组件定义
-        # ======================================================================
+        # 配置
+        self.rnn_hidden_dim = 128
+        self.entity_embed_dim = 128
+        self.encoder_hidden_dim = 128
 
-        # --- [新增] 导弹 GRU (共享权重) ---
-        # Input: 导弹特征 (MISSILE_FEAT_DIM)
-        # Output: 隐层特征 (rnn_hidden_dim)
-        self.missile_gru = nn.GRU(
-            input_size=MISSILE_FEAT_DIM,
-            hidden_size=self.rnn_hidden_dim,
-            batch_first=True
-        )
-
-        # [修改] 导弹编码器 (现在接在 GRU 后面)
+        # 1. 编码器 (Feature Extraction)
         self.missile_encoder = Sequential(
-            Linear(self.rnn_hidden_dim, ENTITY_EMBED_DIM),
-            LeakyReLU()
+            Linear(MISSILE_FEAT_DIM, self.encoder_hidden_dim),  # 4 -> 128
         )
 
-        # [修改 1] GRU 放在最前面
-        # Input: 原始观测 (FULL_OBS_DIM)
-        # Output: 隐层特征 (rnn_hidden_dim)
-        self.aircraft_gru = nn.GRU(
-            input_size=FULL_OBS_DIM,
-            hidden_size=self.rnn_hidden_dim,
-            batch_first=True
-        )
-
-        # [修改 2] 飞机编码器 (接在 GRU 后面)
-        # Input: GRU的输出 (rnn_hidden_dim)
-        # Output: Attention用的嵌入 (ENTITY_EMBED_DIM)
         self.aircraft_encoder = Sequential(
-            Linear(self.rnn_hidden_dim, ENTITY_EMBED_DIM),
-            LeakyReLU() # 可以选择开启激活函数增加非线性
+            Linear(FULL_OBS_DIM, self.encoder_hidden_dim),  # 15 -> 128
         )
 
-        # ======================================================================
-        # 3. 交叉注意力
-        # ======================================================================
+        # 2. 交叉注意力 (空间特征融合)
+        # Query: 飞机, Key/Value: 导弹
         self.attention = MultiheadAttention(
-            embed_dim=self.rnn_hidden_dim,
+            embed_dim=self.entity_embed_dim,
             num_heads=ATTN_NUM_HEADS,
             dropout=0.0,
             batch_first=True
         )
+        # self.attn_norm = LayerNorm(self.entity_embed_dim)  # Attention 后的归一化
 
-        # ======================================================================
-        # 4. MLP 决策层
-        # ======================================================================
+        # 3. 全局 GRU (处理融合后的特征)
+        # 输入: Attention 输出的融合向量
+        self.global_gru = nn.GRU(
+            input_size=self.entity_embed_dim,
+            hidden_size=self.rnn_hidden_dim,
+            batch_first=True
+        )
+
+        # 4. MLP 决策层 (基于 GRU 的输出)
         mlp_input_dim = self.rnn_hidden_dim
         split_point = 2
         mlp_dims = ACTOR_PARA.model_layer_dim
@@ -156,17 +139,18 @@ class Actor_CrossAttentionMLP(Module):
         self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), 0.0))
 
-        # --- 优化器设置 ---
+        # 优化器
         attention_params, gru_params, other_params = [], [], []
         for name, param in self.named_parameters():
             if not param.requires_grad: continue
             name_lower = name.lower()
-            if any(key in name_lower for key in ['attention', 'attn', 'layer_norm']):
+            if 'attention' in name_lower:
                 attention_params.append(param)
             elif 'gru' in name_lower:
                 gru_params.append(param)
             else:
                 other_params.append(param)
+
         param_groups = [
             {'params': attention_params, 'lr': ACTOR_PARA.attention_lr},
             {'params': gru_params, 'lr': ACTOR_PARA.gru_lr},
@@ -180,113 +164,72 @@ class Actor_CrossAttentionMLP(Module):
         self.to(ACTOR_PARA.device)
 
     def forward(self, obs, rnn_state=None):
+        """
+        obs: (Batch, Seq, Full_Dim)
+        rnn_state: (1, Batch, Hidden) -> 注意这里只剩一个 global hidden 了
+        """
         obs_tensor = check(obs).to(**ACTOR_PARA.tpdv)
         if obs_tensor.dim() == 2:
             obs_tensor = obs_tensor.unsqueeze(1)
         batch_size, seq_len, _ = obs_tensor.shape
 
-        # ======================================================================
-        # [修改点 1] 拆解 Hidden State
-        # rnn_state 形状是 (1, Batch, 3 * Hidden)，包含了 [飞机, 导弹1, 导弹2]
-        # ======================================================================
-        h_air = None
-        h_missiles = None  # 用于同时传给两个导弹
-
-        if rnn_state is not None:
-            rnn_state = rnn_state.contiguous()
-            # 按 hidden_dim 切分，得到 3 个部分
-            states = torch.split(rnn_state, self.rnn_hidden_dim, dim=-1)
-            if len(states) == 3:
-                h_air = states[0].contiguous()  # (1, B, H)
-                h_m1 = states[1]
-                h_m2 = states[2]
-                # 将两枚导弹的隐藏状态拼接，供并行计算: (1, B*2, H)
-                h_missiles = torch.cat([h_m1, h_m2], dim=1).contiguous()
-
-        # --- 准备数据 ---
+        # --- 1. 数据准备 & 编码 ---
+        # 展平以便通过 Linear 层 (Batch*Seq, Dim)
         obs_flat = obs_tensor.view(-1, FULL_OBS_DIM)
-        # 提取数据
-        missile1_obs = obs_tensor[..., 0:MISSILE_FEAT_DIM]
-        missile2_obs = obs_tensor[..., MISSILE_FEAT_DIM:2 * MISSILE_FEAT_DIM]
+        missile1_obs = obs_flat[..., 0:MISSILE_FEAT_DIM]
+        missile2_obs = obs_flat[..., MISSILE_FEAT_DIM:2 * MISSILE_FEAT_DIM]
 
-        # ======================================================================
-        # [核心修正] 导弹流处理：使用 cat(dim=0) 保持时间序列连续性
-        # ======================================================================
-        # 1. 在 Batch 维度拼接: (Batch*2, Seq, Dim)
-        # 结果顺序: [Batch个M1, Batch个M2]
-        missiles_gru_in = torch.cat([missile1_obs, missile2_obs], dim=0)
+        # 编码导弹
+        m1_embed = self.missile_encoder(missile1_obs)  # (B*S, 128)
+        m2_embed = self.missile_encoder(missile2_obs)  # (B*S, 128)
 
-        # 3. 导弹 GRU 前向传播
-        # out: (B*2, S, H), next_h: (1, B*2, H)
-        gru_out_missiles, next_h_missiles = self.missile_gru(missiles_gru_in, h_missiles)
+        # 编码飞机
+        air_embed = self.aircraft_encoder(obs_flat)  # (B*S, 128)
 
-        # 4. 导弹 MLP 编码 (Input: B*2*S, H)
-        gru_out_missiles_flat = gru_out_missiles.reshape(-1, self.rnn_hidden_dim)
-        missiles_embed_flat = self.missile_encoder(gru_out_missiles_flat)
+        # --- 2. 交叉注意力 (在每个时间步上独立计算) ---
+        # 构造 Attention 输入:
+        # Query: Aircraft -> (B*S, 1, 128)
+        # Key/Val: Missiles -> (B*S, 2, 128)
+        query = air_embed.unsqueeze(1)
+        keys = torch.stack([m1_embed, m2_embed], dim=1)
 
-        # [可选] 残差连接 (Embedding + GRU输出)
-        missiles_feat_flat = missiles_embed_flat + gru_out_missiles_flat
-
-        # 5. 还原 M1 和 M2 的特征
-        # 输入是 (Batch*2 * Seq, H)，先还原为 (Batch*2, Seq, H)
-        # 注意：这里不能变成 (Batch, 2, ...)，因为我们在 dim=0 拼接的
-        missiles_feat_seq = missiles_feat_flat.view(batch_size * 2, seq_len, self.rnn_hidden_dim)
-
-        # 在 dim=0 处切分：前半部分是 M1，后半部分是 M2
-        # m1_seq, m2_seq shape: (Batch, Seq, H)
-        m1_feat_seq, m2_feat_seq = torch.split(missiles_feat_seq, batch_size, dim=0)
-
-        # 展平供 Attention 使用 (Batch*Seq, H)
-        m1_feat_flat = m1_feat_seq.reshape(-1, self.rnn_hidden_dim)
-        m2_feat_flat = m2_feat_seq.reshape(-1, self.rnn_hidden_dim)
-
-
-        # ======================================================================
-        # [修改点 3] 飞机流：GRU -> MLP (保持你原有的逻辑)
-        # ======================================================================
-        # GRU 输入: (Batch, Seq, Raw_Dim)
-        gru_out_air, next_h_air = self.aircraft_gru(obs_tensor, h_air)
-
-        # 编码
-        gru_out_air_flat = gru_out_air.reshape(-1, self.rnn_hidden_dim)
-        air_embed_flat = self.aircraft_encoder(gru_out_air_flat)
-
-        # 残差连接
-        air_feat_flat = air_embed_flat + gru_out_air_flat
-
-        # ======================================================================
-        # [修改点 4] 打包所有实体的 Next Hidden State
-        # ======================================================================
-        # 拆分导弹的新状态 (1, B*2, H) -> (1, B, H), (1, B, H)
-        next_h_m1, next_h_m2 = torch.split(next_h_missiles, batch_size, dim=1)
-
-        # 重新拼接为 (1, B, 3*H)
-        next_rnn_state = torch.cat([next_h_air, next_h_m1, next_h_m2], dim=-1)
-
-        # --- 以下 Attention 和 Mask 代码保持不变，直接照抄即可 ---
-
-        # Mask (注意：需要用原始 obs 计算 mask)
-        obs_flat_raw = obs_tensor.view(-1, FULL_OBS_DIM)
-        m1_raw = obs_flat_raw[..., 0:MISSILE_FEAT_DIM]
-        m2_raw = obs_flat_raw[..., MISSILE_FEAT_DIM:2 * MISSILE_FEAT_DIM]
-
+        # 计算 Mask (基于原始观测值判断导弹是否存活)
+        # 这里的 Mask 也是针对每个样本的 (B*S, 2)
         inactive_fingerprint = torch.tensor([1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
-        is_m1_inactive = torch.all(torch.isclose(m1_raw, inactive_fingerprint), dim=-1)
-        is_m2_inactive = torch.all(torch.isclose(m2_raw, inactive_fingerprint), dim=-1)
-        attention_mask = torch.stack([is_m1_inactive, is_m2_inactive], dim=1)
+        is_m1_inactive = torch.all(torch.isclose(missile1_obs, inactive_fingerprint), dim=-1)
+        is_m2_inactive = torch.all(torch.isclose(missile2_obs, inactive_fingerprint), dim=-1)
+        attn_mask = torch.stack([is_m1_inactive, is_m2_inactive], dim=1)  # (B*S, 2)
 
-        query = air_feat_flat.unsqueeze(1)
-        keys = torch.stack([m1_feat_flat, m2_feat_flat], dim=1)
+        # Attention Forward
+        # 注意：这里把 (Batch * Seq) 当作 Attention 的 Batch 维度处理
+        attn_output, attn_weights = self.attention(query, keys, keys, key_padding_mask=attn_mask)
+        # attn_output: (B*S, 1, 128)
 
-        # Attention 融合
-        attn_output, attn_weights = self.attention(query, keys, keys, key_padding_mask=attention_mask)
         if torch.isnan(attn_output).any():
             attn_output = torch.nan_to_num(attn_output, nan=0.0)
 
-        combined_features = air_feat_flat + attn_output.squeeze(1)
+        # 残差连接 + 归一化 (融合特征)
+        # (B*S, 128) + (B*S, 128) -> (B*S, 128)
+        fused_features_flat = air_embed + attn_output.squeeze(1)
 
-        # MLP 决策
-        base_features = self.shared_base_mlp(combined_features)
+        # --- 3. GRU 时序处理 ---
+        # 恢复时间序列维度 (Batch, Seq, 128)
+        fused_features_seq = fused_features_flat.view(batch_size, seq_len, self.entity_embed_dim)
+
+        # GRU Forward
+        # rnn_state: (1, Batch, 128)
+        gru_out, next_rnn_state = self.global_gru(fused_features_seq, rnn_state)
+        # gru_out: (Batch, Seq, 128)
+
+        # <<< 修改: GRU 残差连接 + Norm >>>
+        # Output = Norm( GRU_Out + Input )
+        gru_out = gru_out + fused_features_seq
+
+        # --- 4. MLP 决策 ---
+        # 再次展平给 MLP
+        gru_out_flat = gru_out.contiguous().view(-1, self.rnn_hidden_dim)
+
+        base_features = self.shared_base_mlp(gru_out_flat)
         continuous_features = self.continuous_tower(base_features)
         discrete_features = self.discrete_tower(base_features)
 
@@ -302,11 +245,20 @@ class Actor_CrossAttentionMLP(Module):
         has_flares_info = obs_flat[..., flare_info_index]
         mask = (has_flares_info == 0).view(-1)
 
+        # trigger_logits_masked = trigger_logits.clone()
+        # if torch.any(mask):
+        #     if mask.dim() < trigger_logits_masked.dim():
+        #         mask = mask.unsqueeze(-1)
+        #     trigger_logits_masked[mask] = torch.finfo(torch.float32).min
+
+        NEG_INF = -1e8  # 已经定义了,复用它
+
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
-            if mask.dim() < trigger_logits_masked.dim():
-                mask = mask.unsqueeze(-1)
-            trigger_logits_masked[mask] = torch.finfo(torch.float32).min
+            mask_expanded = mask.unsqueeze(-1) if mask.dim() < trigger_logits_masked.dim() else mask
+            trigger_logits_masked = torch.where(mask_expanded,
+                                                torch.full_like(trigger_logits, NEG_INF),
+                                                trigger_logits)
 
         trigger_probs = torch.sigmoid(trigger_logits_masked)
         no_trigger_mask = (trigger_probs < 0.5)
@@ -353,7 +305,7 @@ class Actor_CrossAttentionMLP(Module):
 
 class Critic_CrossAttentionMLP(Module):
     """
-    Critic 网络 - [架构: 并行Encoder -> 共享GRU -> Attention -> MLP]
+    Critic 网络 - [架构优化: Encoder -> Attention -> GRU -> MLP]
     """
 
     def __init__(self, weight_decay=1e-4, rnn_hidden_dim=ENTITY_EMBED_DIM):
@@ -361,50 +313,23 @@ class Critic_CrossAttentionMLP(Module):
         self.input_dim = CRITIC_PARA.input_dim
         self.output_dim = CRITIC_PARA.output_dim
         self.weight_decay = weight_decay
-        self.rnn_hidden_dim = rnn_hidden_dim
 
-        # ======================================================================
-        # 1. 实体编码器
-        # ======================================================================
-        # ======================================================================
-        # [修改] 1. 增加导弹 GRU 定义
-        # ======================================================================
-        self.missile_gru = nn.GRU(
-            input_size=MISSILE_FEAT_DIM,
-            hidden_size=self.rnn_hidden_dim,
-            batch_first=True
-        )
-        # 导弹编码器接在 GRU 后，输入是 Hidden Dim
-        self.missile_encoder = Sequential(
-            Linear(self.rnn_hidden_dim, ENTITY_EMBED_DIM),
-            LeakyReLU()
-        )
+        self.rnn_hidden_dim = 128
+        self.entity_embed_dim = 128
+        self.encoder_hidden_dim = 128
 
-        # [修改 1] GRU 在前
-        self.aircraft_gru = nn.GRU(
-            input_size=FULL_OBS_DIM,  # 原始维度
-            hidden_size=self.rnn_hidden_dim,
-            batch_first=True
-        )
+        # 1. Encoders
+        self.missile_encoder = Sequential(Linear(MISSILE_FEAT_DIM, self.encoder_hidden_dim))
+        self.aircraft_encoder = Sequential(Linear(FULL_OBS_DIM, self.encoder_hidden_dim))
 
-        # [修改 2] Encoder 在后
-        self.aircraft_encoder = Sequential(
-            Linear(self.rnn_hidden_dim, ENTITY_EMBED_DIM),
-            LeakyReLU()
-        )
+        # 2. Attention
+        self.attention = MultiheadAttention(embed_dim=self.entity_embed_dim, num_heads=ATTN_NUM_HEADS, batch_first=True)
+        # self.attn_norm = LayerNorm(self.entity_embed_dim)
 
-        # ======================================================================
-        # 3. 交叉注意力
-        # ======================================================================
-        self.attention = MultiheadAttention(
-            embed_dim=self.rnn_hidden_dim,
-            num_heads=ATTN_NUM_HEADS,
-            batch_first=True
-        )
+        # 3. Global GRU
+        self.global_gru = nn.GRU(input_size=self.entity_embed_dim, hidden_size=self.rnn_hidden_dim, batch_first=True)
 
-        # ======================================================================
-        # 4. MLP 估值层
-        # ======================================================================
+        # 4. MLP
         mlp_dims = CRITIC_PARA.model_layer_dim
         self.mlp = Sequential()
         input_dim = self.rnn_hidden_dim
@@ -414,9 +339,7 @@ class Critic_CrossAttentionMLP(Module):
             input_dim = dim
         self.fc_out = Linear(input_dim, self.output_dim)
 
-        # ======================================================================
         # Optimizer
-        # ======================================================================
         attn_params, gru_params, other_params = [], [], []
         for name, param in self.named_parameters():
             if not param.requires_grad: continue
@@ -438,72 +361,38 @@ class Critic_CrossAttentionMLP(Module):
 
     def forward(self, obs, rnn_state=None):
         obs_tensor = check(obs).to(**ACTOR_PARA.tpdv)
-        if obs_tensor.dim() == 2:
-            obs_tensor = obs_tensor.unsqueeze(1)
+        if obs_tensor.dim() == 2: obs_tensor = obs_tensor.unsqueeze(1)
         batch_size, seq_len, _ = obs_tensor.shape
 
-        # --- 1. 拆解 Hidden State (同 Actor) ---
-        h_air, h_missiles = None, None
-        if rnn_state is not None:
-            rnn_state = rnn_state.contiguous()
-            states = torch.split(rnn_state, self.rnn_hidden_dim, dim=-1)
-            if len(states) == 3:
-                h_air = states[0].contiguous()
-                h_missiles = torch.cat([states[1], states[2]], dim=1).contiguous()
-
-        # --- 准备数据 ---
         obs_flat = obs_tensor.view(-1, FULL_OBS_DIM)
-        missile1_obs = obs_tensor[..., 0:MISSILE_FEAT_DIM]
-        missile2_obs = obs_tensor[..., MISSILE_FEAT_DIM:2 * MISSILE_FEAT_DIM]
+        m1_embed = self.missile_encoder(obs_flat[..., 0:4])
+        m2_embed = self.missile_encoder(obs_flat[..., 4:8])
+        air_embed = self.aircraft_encoder(obs_flat)
 
-        # --- 2. 飞机流: GRU -> Encoder ---
-        gru_out_air, next_h_air = self.aircraft_gru(obs_tensor, h_air)
-        gru_out_air_flat = gru_out_air.reshape(-1, self.rnn_hidden_dim)
-        air_feat_flat = self.aircraft_encoder(gru_out_air_flat) + gru_out_air_flat
+        query = air_embed.unsqueeze(1)
+        keys = torch.stack([m1_embed, m2_embed], dim=1)
 
-        # --- 3. 导弹流: Stack -> GRU -> Encoder ---
-        missiles_gru_in = torch.cat([missile1_obs, missile2_obs], dim=0)
-
-        gru_out_missiles, next_h_missiles = self.missile_gru(missiles_gru_in, h_missiles)
-
-        gru_out_m_flat = gru_out_missiles.reshape(-1, self.rnn_hidden_dim)
-        missiles_embed_flat = self.missile_encoder(gru_out_m_flat)
-        missiles_feat_flat = missiles_embed_flat + gru_out_m_flat
-
-        # 拆回 separate M1/M2
-        # 拆回 separate M1/M2
-        missiles_feat_seq = missiles_feat_flat.view(batch_size * 2, seq_len, self.rnn_hidden_dim)
-
-        # 在 dim=0 切分
-        m1_feat_seq, m2_feat_seq = torch.split(missiles_feat_seq, batch_size, dim=0)
-
-        # Reshape to (Batch*Seq, H)
-        m1_feat_flat = m1_feat_seq.reshape(-1, self.rnn_hidden_dim)
-        m2_feat_flat = m2_feat_seq.reshape(-1, self.rnn_hidden_dim)
-
-        # --- 4. 打包 Next Hidden State ---
-        next_h_m1, next_h_m2 = torch.split(next_h_missiles, batch_size, dim=1)
-        next_rnn_state = torch.cat([next_h_air, next_h_m1, next_h_m2], dim=-1)
-
-        # --- 5. Attention ---
-        # Mask (同 Actor)
-        obs_flat_raw = obs_tensor.view(-1, FULL_OBS_DIM)
-        m1_raw = obs_flat_raw[..., 0:4]
-        m2_raw = obs_flat_raw[..., 4:8]
+        # Mask
         inactive = torch.tensor([1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
-        is_m1_in = torch.all(torch.isclose(m1_raw, inactive), dim=-1)
-        is_m2_in = torch.all(torch.isclose(m2_raw, inactive), dim=-1)
+        is_m1_in = torch.all(torch.isclose(obs_flat[..., 0:4], inactive), dim=-1)
+        is_m2_in = torch.all(torch.isclose(obs_flat[..., 4:8], inactive), dim=-1)
         mask = torch.stack([is_m1_in, is_m2_in], dim=1)
-
-        query = air_feat_flat.unsqueeze(1)
-        keys = torch.stack([m1_feat_flat, m2_feat_flat], dim=1)
 
         attn_out, _ = self.attention(query, keys, keys, key_padding_mask=mask)
         if torch.isnan(attn_out).any(): attn_out = torch.nan_to_num(attn_out, nan=0.0)
 
-        combined = air_feat_flat + attn_out.squeeze(1)
+        # Fused Features
+        fused = air_embed + attn_out.squeeze(1)
 
-        val = self.fc_out(self.mlp(combined))
+        # GRU
+        fused_seq = fused.view(batch_size, seq_len, self.entity_embed_dim)
+        gru_out, next_rnn_state = self.global_gru(fused_seq, rnn_state)
+
+        # <<< GRU 残差 >>>
+        gru_out = gru_out + fused_seq
+
+        # MLP
+        val = self.fc_out(self.mlp(gru_out.contiguous().view(-1, self.rnn_hidden_dim)))
         return val, next_rnn_state
 
 class PPO_continuous(object):
@@ -535,7 +424,7 @@ class PPO_continuous(object):
         self.gae_lambda = AGENTPARA.lamda
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.training_start_time = time.strftime("PPO_EntityCrossATT_GRU_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../../../save/save_evade_fuza两个导弹"
+        self.base_save_dir = "../../../../../save/save_evade_fuza两个导弹"
         win_rate_subdir = "胜率模型"
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
         self.win_rate_dir = os.path.join(self.run_save_dir, win_rate_subdir)
@@ -543,7 +432,7 @@ class PPO_continuous(object):
             if model_dir_path:
                 self.load_models_from_directory(model_dir_path)
             else:
-                self.load_models_from_directory("../../../test/test_evade")
+                self.load_models_from_directory("../../../../test/test_evade")
 
     # <<< 新增: 重置 RNN 状态的方法 >>>
     def reset_rnn_state(self):
@@ -663,14 +552,14 @@ class PPO_continuous(object):
                 if attention_weights_np is not None:
                     attention_weights_np = attention_weights_np[0]
             # ======================================================================
-            # [修改点] 初始化 temp_hidden 时的维度
+            # [修改点] 初始化 temp_hidden: 现在只需要 1 个 GRU 的维度
             # ======================================================================
             if current_actor_h is None:
-                # 第一步：初始化全0状态
-                # 注意这里乘 3，代表 (Aircraft + Missile1 + Missile2)
-                total_hidden_dim = self.Actor.rnn_hidden_dim * 3
-                self.temp_actor_h = torch.zeros(1, 1, total_hidden_dim).to(ACTOR_PARA.device)
-                self.temp_critic_h = torch.zeros(1, 1, total_hidden_dim).to(CRITIC_PARA.device)
+                batch_size = state_tensor.shape[0]
+                # 之前是 *3 (Air+M1+M2)，现在不需要了，因为 GRU 在 Attention 之后融合了
+                total_hidden_dim = self.Actor.rnn_hidden_dim
+                self.temp_actor_h = torch.zeros(1, batch_size, total_hidden_dim).to(ACTOR_PARA.device)
+                self.temp_critic_h = torch.zeros(1, batch_size, total_hidden_dim).to(CRITIC_PARA.device)
             else:
                 self.temp_actor_h = current_actor_h
                 self.temp_critic_h = current_critic_h
@@ -806,14 +695,14 @@ class PPO_continuous(object):
                 # 更新 Actor
                 self.Actor.optim.zero_grad()
                 actor_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.Actor.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(self.Actor.parameters(), max_norm=1.0)
                 self.Actor.optim.step()
 
                 # 更新 Critic
                 critic_loss = torch.nn.functional.mse_loss(new_value, return_)
                 self.Critic.optim.zero_grad()
                 critic_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.Critic.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(self.Critic.parameters(), max_norm=1.0)
                 self.Critic.optim.step()
 
                 # 记录日志
