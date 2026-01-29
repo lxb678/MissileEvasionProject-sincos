@@ -48,16 +48,16 @@ ACTION_RANGES = {
 # --- 实体注意力配置 (保持不变) ---
 NUM_MISSILES = 2
 # <<< 核心修改 1: 更新特征维度 >>>
-MISSILE_FEAT_DIM = 4 #5  # 原为 3. (1 for dist + 2 for beta_sincos + 2 for theta_sincos)
-AIRCRAFT_FEAT_DIM = 7 #8 # 原为 6. (1 av + 1 h + 2 ae_sincos + 2 am_sincos + 1 ir + 1 q)
-
+MISSILE_FEAT_DIM = 5 #4 #5  # 原为 3. (1 for dist + 2 for beta_sincos + 2 for theta_sincos) # 导弹特征改为 5 维: [dist_min, dist_max, beta_sin, beta_cos, theta_L]
+# AIRCRAFT_FEAT_DIM = 7 #8 # 原为 6. (1 av + 1 h + 2 ae_sincos + 2 am_sincos + 1 ir + 1 q) # 飞机特征改为 7 维: [av, h, ae, am_sin, am_cos, ir, q]
+AIRCRAFT_FEAT_DIM = 6  # <--- 修改这里：去掉 q，维度变为 6
 # <<< 核心修改 1: 计算全观测维度 >>>
 # 全局信息 = (导弹数量 * 导弹特征) + 飞机特征
 FULL_OBS_DIM = (NUM_MISSILES * MISSILE_FEAT_DIM) + AIRCRAFT_FEAT_DIM
 
 # <<< 修改结束 >>>
-ENTITY_EMBED_DIM = 32 #64 #64
-ATTN_NUM_HEADS = 2 #4 #4 #2 #4 #2 #4 #4
+ENTITY_EMBED_DIM = 64 #32 #64
+ATTN_NUM_HEADS = 2 #4 #2 #4 #4
 
 assert ENTITY_EMBED_DIM % ATTN_NUM_HEADS == 0, "ENTITY_EMBED_DIM must be divisible by ATTN_NUM_HEADS"
 
@@ -102,17 +102,46 @@ class Actor_CrossAttentionMLP(Module):
 
         encoder_hidden_dim = ENTITY_EMBED_DIM #// 2
 
+        # self.missile_encoder = Sequential(
+        #     Linear(MISSILE_FEAT_DIM, encoder_hidden_dim),
+        # )
+        #
+        # # self.aircraft_encoder = Sequential(
+        # #     Linear(FULL_OBS_DIM, encoder_hidden_dim),
+        # # )
+        # # 修改后
+        # self.aircraft_encoder = Sequential(
+        #     Linear(AIRCRAFT_FEAT_DIM, encoder_hidden_dim),
+        # )
+
+        # =====================================================================
+        # 修改后：增加非线性映射能力
+        # =====================================================================
+        # # 定义一个中间隐藏层大小，通常可以和 embedding dim 一样，或者稍微小一点
+        # encoder_mid_dim = 64
+
         self.missile_encoder = Sequential(
-            Linear(MISSILE_FEAT_DIM, encoder_hidden_dim),
+            Linear(MISSILE_FEAT_DIM, ENTITY_EMBED_DIM),
+            # LeakyReLU(),
+            # nn.LayerNorm(encoder_mid_dim), # 推荐加上 LN，有助于特征标准化
+            # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+            # 这里最后不需要再加激活函数，因为后面马上进 Attention 的 Dot Product
+            # 让特征保持线性空间分布对 Attention 计算更有利
         )
 
-        # self.aircraft_encoder = Sequential(
-        #     Linear(FULL_OBS_DIM, encoder_hidden_dim),
-        # )
-        # 修改后
         self.aircraft_encoder = Sequential(
-            Linear(AIRCRAFT_FEAT_DIM, encoder_hidden_dim),
+            Linear(AIRCRAFT_FEAT_DIM, ENTITY_EMBED_DIM),
+            # LeakyReLU(),
+            # nn.LayerNorm(encoder_mid_dim),
+            # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
         )
+
+        # # <<< Pre-Norm 层 >>>
+        # self.q_norm = nn.LayerNorm(ENTITY_EMBED_DIM)  # Query Norm
+        # self.k_norm = nn.LayerNorm(ENTITY_EMBED_DIM)  # Key Norm
+
+        # # [修改点 1]: 融合后的 Norm 维度改为 ENTITY_EMBED_DIM (不再是 *2)
+        # self.post_fusion_norm = nn.LayerNorm(ENTITY_EMBED_DIM)
 
         # self.ln_missile = LayerNorm(ENTITY_EMBED_DIM)
         # self.ln_aircraft = LayerNorm(ENTITY_EMBED_DIM)
@@ -125,9 +154,12 @@ class Actor_CrossAttentionMLP(Module):
         # # ✅ Pre-Norm: 归一化在注意力之前
         # self.attn_pre_norm = LayerNorm(ENTITY_EMBED_DIM)
 
+        # self.fusion_proj = nn.Linear(ENTITY_EMBED_DIM * 2, ENTITY_EMBED_DIM)
+        # self.fusion_norm = nn.LayerNorm(ENTITY_EMBED_DIM)
+
         # <<< 核心修改 1: 更新MLP的输入维度 >>>
         # 新的输入 = aircraft_context (Embed) + missile1_embed (Embed) + missile2_embed (Embed)
-        mlp_input_dim = ENTITY_EMBED_DIM * 2 #* (1 + NUM_MISSILES)  # 64 * 4 = 256
+        mlp_input_dim = ENTITY_EMBED_DIM * 2   #* (1 + NUM_MISSILES)  # 64 * 4 = 256
 
         split_point = 2
         mlp_dims = ACTOR_PARA.model_layer_dim
@@ -261,7 +293,7 @@ class Actor_CrossAttentionMLP(Module):
 
         # <<< 核心修正: 更新无效导弹的“指纹”以匹配环境 >>>
         # 新环境的无效指纹: [dist_norm=1.0, sin(beta)=0.0, cos(beta)=1.0, theta_norm=0.0]
-        inactive_missile_fingerprint = torch.tensor([1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
+        inactive_missile_fingerprint = torch.tensor([1.0, 1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
         # <<< 修正结束 >>>
 
         # 检查每个导弹的观测值是否与指纹匹配
@@ -286,22 +318,22 @@ class Actor_CrossAttentionMLP(Module):
         # m2_embed = self.ln_missile(m2_embed_raw)
         # ac_embed = self.ln_aircraft(ac_embed_raw)
 
-        # # 3. ✅ Pre-Norm: 先归一化飞机表示
-        # normalized_aircraft = self.attn_pre_norm(ac_embed)
+        # # # 3. ✅ Pre-Norm: 先归一化飞机表示
+        # # normalized_aircraft = self.attn_pre_norm(ac_embed)
+        # #
+        # # # 4. 交叉注意力（使用归一化后的查询）
+        # # aircraft_query = normalized_aircraft.unsqueeze(1)
         #
-        # # 4. 交叉注意力（使用归一化后的查询）
-        # aircraft_query = normalized_aircraft.unsqueeze(1)
-
-        # <<< 核心修改: 从全自注意力改为交叉注意力 >>>
-        # 2. 准备 Query, Key, Value
-        # Query: 我方飞机，代表决策主体。增加一个序列维度 (B, Embed) -> (B, 1, Embed)
-        aircraft_query = ac_embed.unsqueeze(1)
-        # Key/Value: 两个导弹，代表需要被关注的威胁源。(B, Embed) -> (B, 2, Embed)
-        missile_entities = torch.stack([m1_embed, m2_embed], dim=1)
-
-        # Value 使用 Raw (关键修改！！！)
-        # 这样注意力输出的特征就保留了原始的物理强度信息
-        missile_values_raw = torch.stack([m1_embed, m2_embed], dim=1)
+        # # <<< 核心修改: 从全自注意力改为交叉注意力 >>>
+        # # 2. 准备 Query, Key, Value
+        # # Query: 我方飞机，代表决策主体。增加一个序列维度 (B, Embed) -> (B, 1, Embed)
+        # aircraft_query = ac_embed.unsqueeze(1)
+        # # Key/Value: 两个导弹，代表需要被关注的威胁源。(B, Embed) -> (B, 2, Embed)
+        # missile_entities = torch.stack([m1_embed, m2_embed], dim=1)
+        #
+        # # Value 使用 Raw (关键修改！！！)
+        # # 这样注意力输出的特征就保留了原始的物理强度信息
+        # missile_values_raw = torch.stack([m1_embed, m2_embed], dim=1)
 
         # 3. 执行交叉注意力计算
         # 飞机(Q) 关注 导弹(K,V)，得到融合了导弹信息的飞机上下文
@@ -310,10 +342,20 @@ class Actor_CrossAttentionMLP(Module):
         #                                                key=missile_entities,
         #                                                value=missile_entities)
 
+        # # 2. Attention (Pre-Norm)
+        # # Q: 飞机 (归一化)
+        # ac_normed = self.q_norm(ac_embed)
+        # query = ac_normed.unsqueeze(1)
+
+        query = ac_embed.unsqueeze(1)
+
+        # K: 导弹 (归一化), V: 导弹 (Raw)
+        m_entities_raw = torch.stack([m1_embed, m2_embed], dim=1)
+        # m_entities_normed = self.k_norm(m_entities_raw)
         # 4. <<< 修改：执行带掩码的交叉注意力计算 >>>
-        attn_output, attn_weights_raw = self.attention(query=aircraft_query,
-                                                       key=missile_entities,
-                                                       value=missile_values_raw, #missile_entities,
+        attn_output, attn_weights_raw = self.attention(query=query,
+                                                       key=m_entities_raw,
+                                                       value=m_entities_raw, #missile_entities,
                                                        key_padding_mask=attention_mask
                                                        )  # <<< 新增参数
 
@@ -344,7 +386,7 @@ class Actor_CrossAttentionMLP(Module):
         # base_features = self.shared_base_mlp(aircraft_context)
 
         # --- 修改后建议 ---
-        attn_output_squeezed = attn_output.squeeze(1)  # 这是"威胁总览"
+        # attn_output_squeezed = attn_output.squeeze(1)  # 这是"威胁总览"
         # attn_output_squeezed = self.attn_layer_norm(attn_output_squeezed)
 
         # 步骤 A: 残差连接 (Residual Connection) -> 先相加
@@ -376,9 +418,36 @@ class Actor_CrossAttentionMLP(Module):
         # 输入维度: ENTITY_EMBED_DIM
         # combined_features = aircraft_context_normed
 
-        # # 拼接：[原本的飞机状态, 注意力提取的威胁状态]
-        # # 这样 MLP 既知道自己怎么飞(ac_embed)，也知道威胁多严重(attn_output_squeezed)
-        combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+        # # # 拼接：[原本的飞机状态, 注意力提取的威胁状态]
+        # # # 这样 MLP 既知道自己怎么飞(ac_embed)，也知道威胁多严重(attn_output_squeezed)
+        # combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+
+        # # 3. 拼接并进行总归一化 (Post-Fusion Norm)
+        # # 使用归一化后的飞机特征 ac_normed 与 注意力输出拼接，保证两者 1:1 对等
+        # combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+        # combined_features = self.post_fusion_norm(combined_features)  # 锁定分布
+
+        # # [修改点 3]: 残差连接 + Post-Fusion Norm
+        # attn_output_squeezed = attn_output.squeeze(1)
+        #
+        # # Residual: 原始飞机特征 + 注意力特征
+        # fusion_features = ac_embed + attn_output_squeezed
+
+        attn_output_squeezed = attn_output.squeeze(1)  # [B, D]
+
+        # ① 拼接
+        fusion_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)  # [B, 2D]
+        # fusion_features = ac_embed + attn_output_squeezed
+
+        # # ② 投影回 D（让后面 MLP 不用改输入维度）
+        # fusion_features = self.fusion_proj(fusion_cat)  # [B, D]
+
+        # # ③ 归一化（可选但建议）
+        # fusion_features = self.fusion_norm(fusion_features)
+
+        # # Norm: 进入 MLP 前的归一化
+        # combined_features = self.post_fusion_norm(fusion_features)
+
 
         # 5. 特征拼接
         # 推荐策略：拼接 [原始未归一化的飞机特征, 归一化且经过注意力的威胁特征]
@@ -387,7 +456,7 @@ class Actor_CrossAttentionMLP(Module):
 
         # 注意：需要调整 shared_base_mlp 的输入维度
         # mlp_input_dim = ENTITY_EMBED_DIM * 2
-        base_features = self.shared_base_mlp(combined_features)
+        base_features = self.shared_base_mlp(fusion_features)
 
         # 后续的MLP部分，使用融合了导弹威胁信息的 aircraft_context 作为输入
         # base_features = self.shared_base_mlp(aircraft_context)
@@ -425,7 +494,10 @@ class Actor_CrossAttentionMLP(Module):
         # has_flares_info现在代表 o_ir_norm, 是一个 [0, 1] 范围的浮点数。
         # 当 o_ir_norm > 0 时表示有弹，o_ir_norm == 0 时表示无弹。
         # 因此，掩码逻辑 `mask = (has_flares_info == 0)` 依然是正确的。
-        mask = (has_flares_info == 0)
+        # mask = (has_flares_info == 0)
+        # <<< 修改后 (正确) >>>
+        # 因为环境归一化后，0发对应 -1.0。考虑到浮点数误差，我们判断是否小于 -0.99
+        mask = (has_flares_info <= -0.99)
 
         # trigger_logits_masked = trigger_logits.clone()
         # if torch.any(mask):
@@ -519,17 +591,46 @@ class Critic_CrossAttentionMLP(Module):
 
         encoder_hidden_dim = ENTITY_EMBED_DIM #// 2
 
+        # self.missile_encoder = Sequential(
+        #     Linear(MISSILE_FEAT_DIM, encoder_hidden_dim),
+        # )
+        #
+        # # self.aircraft_encoder = Sequential(
+        # #     Linear(FULL_OBS_DIM, encoder_hidden_dim),
+        # # )
+        # # 修改后
+        # self.aircraft_encoder = Sequential(
+        #     Linear(AIRCRAFT_FEAT_DIM, encoder_hidden_dim),
+        # )
+
+        # =====================================================================
+        # 修改后：增加非线性映射能力
+        # =====================================================================
+        # # 定义一个中间隐藏层大小，通常可以和 embedding dim 一样，或者稍微小一点
+        # encoder_mid_dim = 64
+
         self.missile_encoder = Sequential(
-            Linear(MISSILE_FEAT_DIM, encoder_hidden_dim),
+            Linear(MISSILE_FEAT_DIM, ENTITY_EMBED_DIM),
+            # LeakyReLU(),
+            # nn.LayerNorm(encoder_mid_dim), # 推荐加上 LN，有助于特征标准化
+            # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+            # 这里最后不需要再加激活函数，因为后面马上进 Attention 的 Dot Product
+            # 让特征保持线性空间分布对 Attention 计算更有利
         )
 
-        # self.aircraft_encoder = Sequential(
-        #     Linear(FULL_OBS_DIM, encoder_hidden_dim),
-        # )
-        # 修改后
         self.aircraft_encoder = Sequential(
-            Linear(AIRCRAFT_FEAT_DIM, encoder_hidden_dim),
+            Linear(AIRCRAFT_FEAT_DIM, ENTITY_EMBED_DIM),
+            # LeakyReLU(),
+            # nn.LayerNorm(encoder_mid_dim),
+            # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
         )
+
+        # # <<< Pre-Norm 层 >>>
+        # self.q_norm = nn.LayerNorm(ENTITY_EMBED_DIM)
+        # self.k_norm = nn.LayerNorm(ENTITY_EMBED_DIM)
+
+        # # [修改点 1]: Norm 维度
+        # self.post_fusion_norm = nn.LayerNorm(ENTITY_EMBED_DIM)
 
         # self.ln_missile = LayerNorm(ENTITY_EMBED_DIM)
         # self.ln_aircraft = LayerNorm(ENTITY_EMBED_DIM)
@@ -538,12 +639,16 @@ class Critic_CrossAttentionMLP(Module):
                                             num_heads=ATTN_NUM_HEADS,
                                             dropout=0.0,
                                             batch_first=True)
+
+        # self.fusion_proj = nn.Linear(ENTITY_EMBED_DIM * 2, ENTITY_EMBED_DIM)
+        # self.fusion_norm = nn.LayerNorm(ENTITY_EMBED_DIM)
+
         # self.attn_layer_norm = LayerNorm(ENTITY_EMBED_DIM)
         # # ✅ Pre-Norm: 归一化在注意力之前
         # self.attn_pre_norm = LayerNorm(ENTITY_EMBED_DIM)
 
         # <<< 核心修改 1: 更新MLP的输入维度 >>>
-        mlp_input_dim = ENTITY_EMBED_DIM * 2  #* (1 + NUM_MISSILES)  # 192
+        mlp_input_dim = ENTITY_EMBED_DIM * 2   #* (1 + NUM_MISSILES)  # 192
 
         # mlp_input_dim = ENTITY_EMBED_DIM
         mlp_dims = CRITIC_PARA.model_layer_dim
@@ -647,10 +752,15 @@ class Critic_CrossAttentionMLP(Module):
         # inactive_missile_fingerprint = torch.tensor([1.0, 0.0, 1.0, 0.0, 1.0], device=obs_tensor.device)
         # # <<< 修改结束 >>>
 
-        # <<< 核心修正: 更新无效导弹的“指纹”以匹配环境 >>>
-        # 新环境的无效指纹: [dist_norm=1.0, sin(beta)=0.0, cos(beta)=1.0, theta_norm=0.0]
-        inactive_missile_fingerprint = torch.tensor([1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
-        # <<< 修正结束 >>>
+        # # <<< 核心修正: 更新无效导弹的“指纹”以匹配环境 >>>
+        # # 新环境的无效指纹: [dist_norm=1.0, sin(beta)=0.0, cos(beta)=1.0, theta_norm=0.0]
+        # inactive_missile_fingerprint = torch.tensor([1.0, 1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
+        # # <<< 修正结束 >>>
+        # <<< 修改开始：更新无效导弹指纹 >>>
+        # 对应环境中的非激活观测值: [1.0, 1.0, 0.0, 1.0, 0.0]
+        # 分别代表: [dist_min=1, dist_max=1, sin=0, cos=1, theta=0]
+        inactive_missile_fingerprint = torch.tensor([1.0, 1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
+        # <<< 修改结束 >>>
 
         # 检查每个导弹的观测值是否与指纹匹配
         is_m1_inactive = torch.all(torch.isclose(missile1_obs, inactive_missile_fingerprint), dim=-1)
@@ -677,22 +787,31 @@ class Critic_CrossAttentionMLP(Module):
         # # 4. 交叉注意力（使用归一化后的查询）
         # aircraft_query = normalized_aircraft.unsqueeze(1)
 
-        # <<< 核心修改: 交叉注意力 (与 Actor 相同) >>>
-        aircraft_query = ac_embed.unsqueeze(1)
-        missile_entities = torch.stack([m1_embed, m2_embed], dim=1)
+        # # <<< 核心修改: 交叉注意力 (与 Actor 相同) >>>
+        # aircraft_query = ac_embed.unsqueeze(1)
+        # missile_entities = torch.stack([m1_embed, m2_embed], dim=1)
+        #
+        # # Value 使用 Raw (关键修改！！！)
+        # # 这样注意力输出的特征就保留了原始的物理强度信息
+        # missile_values_raw = torch.stack([m1_embed, m2_embed], dim=1)
+        #
+        # # attn_output, _ = self.attention(query=aircraft_query,
+        # #                                 key=missile_entities,
+        # #                                 value=missile_entities)
 
-        # Value 使用 Raw (关键修改！！！)
-        # 这样注意力输出的特征就保留了原始的物理强度信息
-        missile_values_raw = torch.stack([m1_embed, m2_embed], dim=1)
+        # # 2. Attention 前归一化 (V不归一化)
+        # ac_normed = self.q_norm(ac_embed)
+        # query = ac_normed.unsqueeze(1)
 
-        # attn_output, _ = self.attention(query=aircraft_query,
-        #                                 key=missile_entities,
-        #                                 value=missile_entities)
+        query = ac_embed.unsqueeze(1)
+
+        m_entities_raw = torch.stack([m1_embed, m2_embed], dim=1)
+        # m_entities_normed = self.k_norm(m_entities_raw)
 
         # 4. <<< 修改：执行带掩码的交叉注意力计算 >>>
-        attn_output, _ = self.attention(query=aircraft_query,
-                                        key=missile_entities,
-                                        value=missile_values_raw, #missile_entities,
+        attn_output, _ = self.attention(query=query,
+                                        key=m_entities_raw,
+                                        value=m_entities_raw, #missile_entities,
                                         key_padding_mask=attention_mask
                                         )  # <<< 新增参数
 
@@ -719,7 +838,7 @@ class Critic_CrossAttentionMLP(Module):
         # base_features = self.shared_base_mlp(aircraft_context)
 
         # --- 修改后建议 ---
-        attn_output_squeezed = attn_output.squeeze(1)  # 这是"威胁总览"
+        # attn_output_squeezed = attn_output.squeeze(1)  # 这是"威胁总览"
         # attn_output_squeezed = self.attn_layer_norm(attn_output_squeezed)
 
         # 步骤 A: 残差连接 (Residual Connection) -> 先相加
@@ -751,13 +870,32 @@ class Critic_CrossAttentionMLP(Module):
         # 输入维度: ENTITY_EMBED_DIM
         # combined_features = aircraft_context_normed
 
-        # 拼接：[原本的飞机状态, 注意力提取的威胁状态]
-        # 这样 MLP 既知道自己怎么飞(ac_embed)，也知道威胁多严重(attn_output_squeezed)
-        combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+        # # 拼接：[原本的飞机状态, 注意力提取的威胁状态]
+        # # 这样 MLP 既知道自己怎么飞(ac_embed)，也知道威胁多严重(attn_output_squeezed)
+        # combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+
+        # # 3. 拼接并进行总归一化
+        # combined_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)
+        # combined_features = self.post_fusion_norm(combined_features)
+
+        # # [修改点 3]: 残差连接 + Post-Fusion Norm
+        # attn_output_squeezed = attn_output.squeeze(1)
+        #
+        # # Residual
+        # fusion_features = ac_embed + attn_output_squeezed
+
+        attn_output_squeezed = attn_output.squeeze(1)  # [B, D]
+        fusion_features = torch.cat([ac_embed, attn_output_squeezed], dim=-1)  # [B, 2D]
+        # fusion_features = ac_embed + attn_output_squeezed
+        # fusion_features = self.fusion_proj(fusion_cat)  # [B, D]
+        # fusion_features = self.fusion_norm(fusion_features)
+
+        # # Norm
+        # combined_features = self.post_fusion_norm(fusion_features)
 
         # 注意：需要调整 shared_base_mlp 的输入维度
         # mlp_input_dim = ENTITY_EMBED_DIM * 2
-        mlp_features = self.post_attention_mlp(combined_features)
+        mlp_features = self.post_attention_mlp(fusion_features)
 
         # mlp_features = self.post_attention_mlp(aircraft_context)
         value = self.fc_out(mlp_features)

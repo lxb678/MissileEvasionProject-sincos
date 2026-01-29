@@ -3,10 +3,10 @@ from typing import Optional
 
 # ------------------- 导入部分 -------------------
 # <<< 核心修改 >>>: 导入 交叉注意力 + GRU 的模型定义
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正优势归一化2 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 # 导入环境
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体 import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体2 import *
 
 # ------------------- 配置部分 -------------------
 LOAD_ABLE = True  # 测试模式必须为 True
@@ -82,8 +82,8 @@ set_seed(env)
 
 # 2. 指定模型路径
 # <<< 请修改这里的路径为你训练好的 GRU 模型文件夹路径 >>>
-# model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_GRU_2025-11-25_16-25-36"
-model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2025-12-08_17-09-57"
+# model_path = r"D:\code\规避导弹项目sincos\Interference_code\test\test_evade_fuza两个导弹"
+model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-01-28_13-52-03"#"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-01-27_17-37-39"  #"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-01-27_18-32-25"
 print(f"--- 正在加载 交叉注意力+GRU 模型: {model_path} ---")
 
 # 3. 初始化 Agent

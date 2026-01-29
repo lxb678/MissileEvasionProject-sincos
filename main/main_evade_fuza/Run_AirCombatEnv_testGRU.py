@@ -6,10 +6,10 @@
 
 import random
 # <<< GRU 修改 >>>: 导入包含GRU模型的PPO实现
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正 import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
 # <<< 更改 >>>: 确保您正在使用的环境与训练时一致
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim2 import *
 import time
 
 LOAD_ABLE = True  # 是否使用save文件夹中的模型
@@ -46,8 +46,8 @@ env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING)
 set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型
-# model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPOGRU_2025-12-05_21-12-20"  # 示例路径
+# model_path = r"D:\code\规避导弹项目sincos\Interference_code\test\test_evade_fuza"
+model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPOGRU_2026-01-27_12-18-31"  # 示例路径
 print(f"正在加载GRU模型: {model_path}")
 
 # <<< GRU 修改 >>>: 初始化Agent时，必须传入 use_rnn=True

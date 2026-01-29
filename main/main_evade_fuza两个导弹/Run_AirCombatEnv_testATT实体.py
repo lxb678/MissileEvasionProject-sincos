@@ -4,10 +4,10 @@ import random
 from typing import Optional
 
 # <<< 核心修改 >>>: 导入仅包含 Attention+MLP 的 PPO 模型
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力雅可比修正 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力雅可比修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 # 导入环境 (保持不变)
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体 import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体2 import *
 import time
 
 LOAD_ABLE = True  # 测试时必须为 True
@@ -78,8 +78,8 @@ set_seed(env)
 
 # <<< 核心修改 >>>: 确保此路径指向您训练好的【Attention+MLP】模型
 # model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza两个导弹"  # 请替换为您的实际模型路径
-model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_MLP_2025-12-07_17-34-02"  # 请替换为您的实际模型路径
-# model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_MLP_2025-11-24_10-33-43"
+# model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_MLP_2025-12-07_17-34-02"  # 请替换为您的实际模型路径
+model_path = r"D:\code\save\save_evade_fuza两个导弹\PPO_EntityCrossATT_MLP_2026-01-26_15-30-07"
 print(f"正在加载实体注意力MLP模型: {model_path}")
 
 # <<< 核心修改 >>>: 初始化Agent时，传入 use_rnn=False

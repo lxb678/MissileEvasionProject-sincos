@@ -4,9 +4,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 # ------------------- 导入模型和配置 -------------------
 # 保持你原有的导入路径不变
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正优势归一化2 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体 import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体2 import *
 
 # ------------------- 全局配置 -------------------
 LOAD_ABLE = False
@@ -82,7 +82,7 @@ agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_load_path, use_
 # ------------------- 训练主循环 -------------------
 global_step = 0
 success_num = 0
-MAX_EXE_NUM = 15000 #20000
+MAX_EXE_NUM = 20000 #20000
 MAX_STEP = 10000
 
 eval_reward_buffer = []
@@ -150,8 +150,8 @@ for i_episode in range(MAX_EXE_NUM):
         success_rate = success_num / 100.0
         print("-" * 50)
         print(f"最近100回合成功率: {success_rate * 100:.2f}%")
-        writer.add_scalar('Metrics/Success_Rate_per_100_ep', success_rate, i_episode)
-        if success_rate >= 0.95:
+        writer.add_scalar('Episode/Success_Rate_per_100_ep', success_rate, i_episode)
+        if success_rate >= 0.90:
             agent.save(prefix=f"success_{int(success_rate * 100)}_ep{i_episode + 1}")
         success_num = 0
 

@@ -2,11 +2,11 @@
 
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正 import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
 from torch.utils.tensorboard import SummaryWriter
 # from env.AirCombatEnv import *
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim2 import *
 import time
 
 LOAD_ABLE = False  # 是否使用save文件夹中的模型
@@ -87,7 +87,7 @@ agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_load_path, use_
 # ------------------- 训练主循环 -------------------
 global_step = 0
 success_num = 0
-MAX_EXE_NUM = 15000 #20000
+MAX_EXE_NUM = 20000 #15000 #20000
 MAX_STEP = 10000
 UPDATE_CYCLE = 10
 
@@ -159,7 +159,7 @@ for i_episode in range(MAX_EXE_NUM):
         print(f"最近100回合 (Ep {i_episode - 99}-{i_episode}) 统计:")  # 修正了索引
         print(f"  - 成功率: {success_rate * 100:.2f}% ({success_num}/100)")
         print("-" * 50)
-        writer.add_scalar('Metrics/Success_Rate_per_100_ep', success_rate, i_episode)
+        writer.add_scalar('Episode/Success_Rate_per_100_ep', success_rate, i_episode)
 
         if success_rate >= 0.95:
             agent.save(prefix=f"success_{int(success_rate * 100)}_ep{i_episode + 1}")

@@ -13,14 +13,14 @@ class AGENTPARA:
     mini_lr=最小的学习率
     ppo_epoch =每次训练的代数
     '''
-    OBS_DIM=  15 #18 #9
+    OBS_DIM=  16 #17 #18 #9
     ACTION_DIM= 8 #9
     MAX_EXE_NUM=  5e3 #1e4 #5e5
     RANDOM_SEED= 1
     epsilon= 0.2
     gamma= 0.99
     lamda= 0.95
-    entropy= 0.01 #0.001 #0.01 #0.01 #0.01 #0.03 #0.05 #0.1 #0.05 #0.01 #0.05 #0.01 #0.01 #0.05 #0.01 #0.01 #0.01
+    entropy= 0.005 #0.001 #0.01
     mini_lr= 5e-6
     ppo_epoch = 4 #2 #5 #3 #2 #3 #4 #5 #10 #5 #10 #5
 
@@ -28,7 +28,7 @@ class BUFFERPARA:
     '''
     BATCH_SIZE = 样本批次大小
     '''
-    BATCH_SIZE = 128 #256
+    BATCH_SIZE = 256
 
 
 class MODELPARA:
@@ -62,7 +62,7 @@ ACTOR_PARA = MODELPARA()
 ACTOR_PARA.input_dim = AGENTPARA.OBS_DIM
 # ACTOR_PARA.model_layer_dim = [256,128,64,32]
 # ACTOR_PARA.model_layer_dim = [256,256] # 推荐使用这个。输出维度为 256
-ACTOR_PARA.model_layer_dim =  [128,64,128] #[128,128,128] #[256,128,64]
+ACTOR_PARA.model_layer_dim =  [128,128,128]#[256,128,64] #[128,64,128] #[128,128,128] #[256,128,64]
 # ACTOR_PARA.model_layer_dim = [512,256,128,64]
 ACTOR_PARA.output_dim = AGENTPARA.ACTION_DIM   #多维的动作 每一维的动作输出0/1
 
@@ -74,7 +74,7 @@ CRITIC_PARA = MODELPARA()
 CRITIC_PARA.input_dim = AGENTPARA.OBS_DIM
 # CRITIC_PARA.model_layer_dim = [256,128,64,32]
 # CRITIC_PARA.model_layer_dim = [256,256]
-CRITIC_PARA.model_layer_dim = [128,64,128] #[128,128,128]#[256,128,64]
+CRITIC_PARA.model_layer_dim = [128,128,128]#[256,128,64] #[128,64,128] #[128,128,128]#[256,128,64]
 # CRITIC_PARA.model_layer_dim = [512,256,128,64]
 CRITIC_PARA.output_dim = 1
 

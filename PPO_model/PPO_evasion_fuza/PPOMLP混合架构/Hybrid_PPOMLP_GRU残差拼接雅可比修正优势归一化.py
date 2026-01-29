@@ -61,8 +61,8 @@ ACTION_RANGES = {
 
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
-RNN_HIDDEN_SIZE =  64  #128 #64 #128 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH =  5 #5 #15 #12 #15 #12 #20 #15 #10 #5  #10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
+RNN_HIDDEN_SIZE = 128 #64 #128 #64  #128 #64 #128 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
+SEQUENCE_LENGTH =  5 #15 #12 #15 #12 #20 #15 #10 #5  #10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
 
 
 class Actor_GRU(Module):
@@ -123,6 +123,11 @@ class Actor_GRU(Module):
         # 2. GRU 层
         # =====================================================================
         self.gru = GRU(self.pre_gru_output_dim, self.rnn_hidden_size, batch_first=True)
+        # # 3. [修正] 归一化层 (必须启用)
+        # # 用于 GRU 输入前，防止 MLP 输出数值过大
+        # self.pre_gru_norm = nn.LayerNorm(self.pre_gru_output_dim)
+        # # 用于残差连接后，稳定后续 MLP 的输入
+        # self.post_residual_norm = nn.LayerNorm(self.rnn_hidden_size)
 
         # # =====================================================================
         # # 3. 残差连接适配器 & 归一化
@@ -142,7 +147,12 @@ class Actor_GRU(Module):
 
         # 🔥 [修改点 1]：塔楼的输入维度 = GRU输出维度 + GRU输入特征维度
         # 这样实现了 Skip Connection 的拼接
-        tower_input_dim = self.rnn_hidden_size #+ self.pre_gru_output_dim
+        tower_input_dim = self.rnn_hidden_size + self.pre_gru_output_dim
+        # self.layer_norm = nn.LayerNorm(tower_input_dim)
+
+        # self.post_concat_norm = nn.LayerNorm(tower_input_dim)
+        # self.tower_proj = nn.Linear(tower_input_dim, self.rnn_hidden_size)  # 投影回 128（或你的hidden）
+        # tower_input_dim = self.rnn_hidden_size
 
         # 连续动作塔楼
         self.continuous_tower = Sequential()
@@ -186,6 +196,14 @@ class Actor_GRU(Module):
         # 初始化为 -0.5 左右 (std ≈ 0.6)，比 1.0 稳健，又比 0.1 有探索性
         init_log_std = np.log(self.target_init_std)
         self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), init_log_std))
+
+        # # --- [新增] 定义归一化层 ---
+        # # 1. 用于进入 GRU 前，稳定 MLP 提取的特征
+        # self.pre_gru_norm = nn.LayerNorm(self.pre_gru_output_dim)
+        #
+        # # # 2. 用于残差拼接后，稳定进入塔楼的混合特征
+        # # # 维度是：GRU隐藏层维度 + Pre-GRU输出维度
+        # # self.post_concat_norm = nn.LayerNorm(self.rnn_hidden_size + self.pre_gru_output_dim)
 
         # 初始化
         # self.apply(init_weights)
@@ -257,24 +275,42 @@ class Actor_GRU(Module):
         # Input: (B, S, Input_Dim) -> Output: (B, S, Pre_Dim)
         features = self.pre_gru_mlp(obs_tensor)
 
+        # 2. [修正] GRU 前归一化 (Pre-Norm) - 启用！
+        # 这一步保证进入 GRU 的数据分布是稳定的
+        # features_normed = self.pre_gru_norm(features)
+
         # 2. GRU 时序记忆
         # Input: (B, S, Pre_Dim) -> Output: (B, S, RNN_Hidden)
         gru_out, new_hidden = self.gru(features, hidden_state)
 
         # # 3. 🔥 残差连接 + LayerNorm 🔥
-        # combined_features = gru_out
+        # combined_features = gru_out + features
+        # 再次归一化 (非常重要，否则值会越加越大)
+        # combined_features = self.post_residual_norm(combined_features)
 
-        # 3. 🔥 [修改点 2] 拼接 (Concatenation) 🔥
-        # 将 "当前时刻特征(features)" 和 "历史记忆(gru_out)" 在最后一个维度拼接
-        # features shape: (B, S, pre_gru_dim)
-        # gru_out shape:  (B, S, rnn_hidden_size)
+        combined_features = torch.cat([features, gru_out], dim=-1)  # skip-concat
+        # combined_features = self.post_concat_norm(combined_features)  # 稳定
+        # combined_features = self.tower_proj(combined_features)  # 回到 hidden 维
+
+        # # 3. 🔥 [修改点 2] 拼接 (Concatenation) 🔥
+        # # 将 "当前时刻特征(features)" 和 "历史记忆(gru_out)" 在最后一个维度拼接
+        # # features shape: (B, S, pre_gru_dim)
+        # # gru_out shape:  (B, S, rnn_hidden_size)
         # combined_features = torch.cat([features, gru_out], dim=-1)
-        combined_features =  gru_out
+        #
+        # # --- [新增] 归一化位置 B (最关键！) ---
+        # combined_features = self.post_concat_norm(combined_features)
+        # # combined_features = self.layer_norm(combined_features)
+        # # combined_features =  gru_out
+
         # result shape:   (B, S, pre_gru_dim + rnn_hidden_size)
 
         # 4. 塔楼处理
         continuous_features = self.continuous_tower(combined_features)
         discrete_features = self.discrete_tower(combined_features)
+
+        # continuous_features = self.continuous_tower(gru_out)
+        # discrete_features = self.discrete_tower(gru_out)
 
         # 5. 单步处理适配
         if not is_sequence:
@@ -295,8 +331,11 @@ class Actor_GRU(Module):
         logits_parts = torch.split(all_disc_logits, split_sizes, dim=-1)
         trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
 
-        has_flares_info = obs_tensor[..., 9]  # 请确保索引对应正确
-        mask = (has_flares_info == 0)
+        has_flares_info = obs_tensor[..., 10]  # 请确保索引对应正确
+        # mask = (has_flares_info == 0)
+        # <<< 修改后 (正确) >>>
+        # 因为环境归一化后，0发对应 -1.0。考虑到浮点数误差，我们判断是否小于 -0.99
+        mask = (has_flares_info <= -0.99)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
             if mask.dim() < trigger_logits_masked.dim():
@@ -386,6 +425,9 @@ class Critic_GRU(Module):
         # 2. GRU 层
         # =====================================================================
         self.gru = GRU(self.pre_gru_output_dim, self.rnn_hidden_size, batch_first=True)
+        # # 3. [修正] 归一化层 (启用)
+        # self.pre_gru_norm = nn.LayerNorm(self.pre_gru_output_dim)
+        # self.post_residual_norm = nn.LayerNorm(self.rnn_hidden_size)
 
         # # =====================================================================
         # # 3. 残差连接适配器 & 归一化
@@ -403,7 +445,11 @@ class Critic_GRU(Module):
         post_gru_dims = CRITIC_PARA.model_layer_dim[split_point:]
 
         # 🔥 [修改点 1]：输入维度变为拼接后的维度
-        tower_input_dim = self.rnn_hidden_size #+ self.pre_gru_output_dim
+        tower_input_dim = self.rnn_hidden_size + self.pre_gru_output_dim
+        # self.layer_norm = nn.LayerNorm(tower_input_dim)
+        # self.post_concat_norm = nn.LayerNorm(tower_input_dim)
+        # self.tower_proj = nn.Linear(tower_input_dim, self.rnn_hidden_size)  # 投影回 128（或你的hidden）
+        # tower_input_dim = self.rnn_hidden_size
 
         self.post_gru_mlp = Sequential()
         current_dim = tower_input_dim
@@ -418,6 +464,10 @@ class Critic_GRU(Module):
         # 5. 输出头
         # =====================================================================
         self.fc_out = Linear(post_gru_output_dim, self.output_dim)
+
+        # # --- [新增] 定义归一化层 ---
+        # self.pre_gru_norm = nn.LayerNorm(self.pre_gru_output_dim)
+        # # self.post_concat_norm = nn.LayerNorm(self.rnn_hidden_size + self.pre_gru_output_dim)
 
         # 初始化
         # self.apply(init_weights)
@@ -484,17 +534,37 @@ class Critic_GRU(Module):
         # 1. Pre-GRU
         features = self.pre_gru_mlp(obs_tensor)
 
+        # 2. [修正] Pre-Norm (启用)
+        # features_normed = self.pre_gru_norm(features)
+
         # 2. GRU
         gru_out, new_hidden = self.gru(features, hidden_state)
 
-        # 3. 🔥 Residual 🔥
-        # features_projected = self.residual_projection(features)
-        # combined_features = gru_out
-        # 3. 🔥 [修改点 2] 拼接 (Skip Connection) 🔥
+        # # 3. 🔥 Residual 🔥
+        # # features_projected = self.residual_projection(features)
+        # # combined_features = gru_out
+        # # 3. 🔥 [修改点 2] 拼接 (Skip Connection) 🔥
         # combined_features = torch.cat([features, gru_out], dim=-1)
-        combined_features = gru_out
+        # # --- [新增] 归一化位置 B ---
+        # combined_features = self.post_concat_norm(combined_features)
+        # # combined_features = self.layer_norm(combined_features)
+        # # combined_features = gru_out
+
+        # 3. 🔥 [新增] 残差相加 🔥
+        # combined_features = gru_out + features
+        # 归一化
+        # combined_features = self.post_residual_norm(combined_features)
+
+        combined_features = torch.cat([features, gru_out], dim=-1)  # skip-concat
+        # combined_features = self.post_concat_norm(combined_features)  # 稳定
+        # combined_features = self.tower_proj(combined_features)  # 回到 hidden 维
+
         # 4. Post-GRU
         post_features = self.post_gru_mlp(combined_features)
+
+
+
+        # post_features = self.post_gru_mlp(gru_out)
 
         if not is_sequence:
             post_features = post_features.squeeze(1)
@@ -1939,6 +2009,19 @@ class PPO_continuous(object):
                 entropy_disc = sum(
                     dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
                 )
+
+                # # =================== [💥 核心修改点：针对 RNN 提取最后一步] ===================
+                # if self.use_rnn:
+                #     # 提取最后一步的数据用于 Loss 计算
+                #     # new_prob 形状从 (B, S) 变为 (B,)
+                #     new_prob = new_prob[:, -1]
+                #     old_prob = old_prob[:, -1]
+                #     advantage = advantage[:, -1]
+                #     # 熵也只计算最后一步
+                #     entropy_cont = entropy_cont[:, -1]
+                #     entropy_disc = entropy_disc[:, -1]
+                # # ==========================================================================
+
                 # 平均熵 (注意：entropy_cont 已经在上面算好了)
                 # 这里的 mean() 是对 batch 维度取平均
                 total_entropy_val = (entropy_cont.mean() + entropy_disc.mean())
@@ -1969,6 +2052,11 @@ class PPO_continuous(object):
                 # 5. Critic 更新
                 if self.use_rnn:
                     new_value, _ = self.Critic(state, initial_critic_h)
+                    # # =================== [💥 核心修改点：提取最后一步] ===================
+                    # # 确保 new_value 和 return_ 都是 (B, 1)
+                    # new_value = new_value[:, -1, :]
+                    # return_ = return_[:, -1, :]
+                    # # ==================================================================
                 else:
                     new_value = self.Critic(state)
 
@@ -2001,8 +2089,8 @@ class PPO_continuous(object):
         for key in train_info:
             train_info[key] = np.mean(train_info[key])
 
-        train_info['actor_lr'] = self.Actor.optim.param_groups[0]['lr']
-        train_info['critic_lr'] = self.Critic.optim.param_groups[0]['lr']
+        # train_info['actor_lr'] = self.Actor.optim.param_groups[0]['lr']
+        # train_info['critic_lr'] = self.Critic.optim.param_groups[0]['lr']
         self.save()
 
         return train_info

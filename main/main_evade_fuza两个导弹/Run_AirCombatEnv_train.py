@@ -127,7 +127,7 @@ for i_episode in range(MAX_EXE_NUM):
         print(f"最近100回合 (Ep {i_episode - 98}-{i_episode + 1}) 统计:")
         print(f"  - 成功率: {success_rate * 100:.2f}% ({success_num}/100)")
         print("-" * 50)
-        writer.add_scalar('Metrics/Success_Rate_per_100_ep', success_rate, i_episode)
+        writer.add_scalar('Episode/Success_Rate_per_100_ep', success_rate, i_episode)
 
         # 如果成功率很高，保存一个带标记的模型
         if success_rate >= 0.95:

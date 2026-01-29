@@ -211,6 +211,26 @@ class Aircraft:
         # 请根据您的JSBSim配置确认
         return self.fdm.get_property_value('accelerations/Nz')
 
+    def get_total_g_force(self):
+        """
+        获取飞机的总过载 (Total G-Force) 以及各轴分量。
+        基于飞行员位置的归一化加速度 (accelerations/n-pilot-*-norm)。
+
+        Returns:
+            total_g (float): 总过载大小 (G)
+            components (tuple): (g_x, g_y, g_z) 各轴分量
+        """
+        # 获取三个轴向过载 (单位: G)
+        # JSBSim 属性: accelerations/n-pilot-x-norm, y-norm, z-norm
+        g_x = self.fdm.get_property_value('accelerations/n-pilot-x-norm')
+        g_y = self.fdm.get_property_value('accelerations/n-pilot-y-norm')
+        g_z = self.fdm.get_property_value('accelerations/n-pilot-z-norm')
+
+        # 计算总过载 (使用文件头部导入的 numpy)
+        total_g = np.sqrt(g_x ** 2 + g_y ** 2 + g_z ** 2)
+
+        return total_g , (g_x, g_y, g_z)
+
     def beta_deg(self):
         '''
         计算并返回飞机的侧滑角 (beta)，单位：弧度。

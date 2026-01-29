@@ -256,8 +256,14 @@ class Actor(Module):
 
         # 4. 【动作掩码】逻辑 (只作用于触发器，如果没诱饵弹则不能投放)
         # 假设 obs_tensor 的第 7 个特征 (索引为7) 代表红外诱饵弹数量
-        has_flares_info = obs_tensor[:, 9]  # 原为 obs_tensor[:, 11]
-        mask = (has_flares_info == 0)
+        has_flares_info = obs_tensor[:, 10]  # 原为 obs_tensor[:, 11]
+        # mask = (has_flares_info == 0)
+        # <<< 修改前 (错误) >>>
+        # mask = (has_flares_info == 0)
+
+        # <<< 修改后 (正确) >>>
+        # 因为环境归一化后，0发对应 -1.0。考虑到浮点数误差，我们判断是否小于 -0.99
+        mask = (has_flares_info <= -0.99)
         trigger_logits_masked = trigger_logits.clone()
         if torch.any(mask):
             # 将没有诱饵弹的样本对应的 logit 设置为一个极小值，阻止选择该动作
@@ -269,6 +275,31 @@ class Actor(Module):
             # trigger_logits_masked[mask] = fill_value
             # 使用一个在 FP16 表示范围内且足够小的安全值
             # trigger_logits_masked[mask] = -1e4  # -10000.0
+
+        # # ===============================================================
+        # # 4. 【动作掩码】逻辑 (修正版)
+        # # ===============================================================
+        # # 假设 obs_tensor 的第 10 个特征 (索引为10) 代表红外诱饵弹数量
+        # has_flares_info = obs_tensor[:, 10]
+        #
+        # # --- 🔴 调试代码 (如果还不行，请取消下面两行的注释，查看实际值) ---
+        # # if torch.rand(1).item() < 0.01: # 只打印 1% 的步数防止刷屏
+        # # print(f"DEBUG: Flare Obs -> Min: {has_flares_info.min().item():.4f}, Max: {has_flares_info.max().item():.4f}")
+        #
+        # # 阈值设定：
+        # # 环境归一化逻辑: 2 * (count / 30) - 1.0
+        # # 0 发 -> -1.0
+        # # 1 发 -> -0.933
+        # # 因此，我们选 -0.95 作为阈值，既能包含 0 发 (甚至略微的浮点误差)，又不会误伤 1 发的情况。
+        # mask = (has_flares_info <= -0.95)
+        #
+        # trigger_logits_masked = trigger_logits.clone()
+        # if torch.any(mask):
+        #     # 使用 -1e9 (负十亿) 代替 finfo.min。
+        #     # finfo.min 是 -3.4e38，传入 sigmoid 会导致 exp(3.4e38) 溢出。
+        #     # -1e9 足够让 sigmoid 输出 0.0，且数值计算稳定。
+        #     fill_value = -1e9
+        #     trigger_logits_masked[mask] = fill_value
 
         # ===============================================================
         # 6️⃣ <<< 新增：层级控制逻辑 >>>
@@ -1076,8 +1107,8 @@ class PPO_continuous(object):
 
         self.buffer.clear_memory()
         for key in train_info: train_info[key] = np.mean(train_info[key])
-        train_info['actor_lr'] = self.Actor.optim.param_groups[0]['lr']
-        train_info['critic_lr'] = self.Critic.optim.param_groups[0]['lr']
+        # train_info['actor_lr'] = self.Actor.optim.param_groups[0]['lr']
+        # train_info['critic_lr'] = self.Critic.optim.param_groups[0]['lr']
         self.save()
         return train_info
 

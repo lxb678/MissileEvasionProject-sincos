@@ -41,12 +41,13 @@ ACTION_RANGES = {
 
 # --- 实体注意力配置 (保持不变) ---
 NUM_MISSILES = 2
-MISSILE_FEAT_DIM = 4
-AIRCRAFT_FEAT_DIM = 7
+MISSILE_FEAT_DIM = 5  # 导弹特征改为 5 维: [dist_min, dist_max, beta_sin, beta_cos, theta_L]
+# AIRCRAFT_FEAT_DIM = 7  # 飞机特征改为 7 维: [av, h, ae, am_sin, am_cos, ir, q]
+AIRCRAFT_FEAT_DIM = 6  # <--- 修改这里：去掉 q，维度变为 6: [av, h, ae, am_sin, am_cos, ir]
 FULL_OBS_DIM = (NUM_MISSILES * MISSILE_FEAT_DIM) + AIRCRAFT_FEAT_DIM
 
-ENTITY_EMBED_DIM = 32 #64
-ATTN_NUM_HEADS = 2 #4
+ENTITY_EMBED_DIM = 64 #32 #64
+ATTN_NUM_HEADS = 2
 
 assert ENTITY_EMBED_DIM % ATTN_NUM_HEADS == 0, "ENTITY_EMBED_DIM must be divisible by ATTN_NUM_HEADS"
 
@@ -84,23 +85,50 @@ class Actor_PostAttentionGRU(Module):
         self.weight_decay = weight_decay
 
         # 配置
-        self.rnn_hidden_dim = 64 #128 #64 #128 #ENTITY_EMBED_DIM
+        self.rnn_hidden_dim = 128 #64 #128 #ENTITY_EMBED_DIM
         self.entity_embed_dim = ENTITY_EMBED_DIM
         self.encoder_hidden_dim = ENTITY_EMBED_DIM
 
-        # 1. 编码器 (Feature Extraction)
-        # [修改] 恢复飞机编码器，确保 Query 和 Key 在同一语义空间
-        self.missile_encoder = Sequential(
-            Linear(MISSILE_FEAT_DIM, self.encoder_hidden_dim),
-        )
+        # # 1. 编码器 (Feature Extraction)
+        # # [修改] 恢复飞机编码器，确保 Query 和 Key 在同一语义空间
+        # self.missile_encoder = Sequential(
+        #     Linear(MISSILE_FEAT_DIM, self.encoder_hidden_dim),
+        # )
+        # # self.aircraft_encoder = Sequential(
+        # #     Linear(FULL_OBS_DIM, self.encoder_hidden_dim),  # 使用全观测或仅飞机特征均可，这里用FULL方便
+        # # )
+        #
+        # # 修改后
         # self.aircraft_encoder = Sequential(
-        #     Linear(FULL_OBS_DIM, self.encoder_hidden_dim),  # 使用全观测或仅飞机特征均可，这里用FULL方便
+        #     Linear(AIRCRAFT_FEAT_DIM, self.encoder_hidden_dim),
         # )
 
-        # 修改后
-        self.aircraft_encoder = Sequential(
-            Linear(AIRCRAFT_FEAT_DIM, self.encoder_hidden_dim),
+        # =====================================================================
+        # 修改后：增加非线性映射能力
+        # =====================================================================
+        # # 定义一个中间隐藏层大小，通常可以和 embedding dim 一样，或者稍微小一点
+        # encoder_mid_dim = 64
+
+        self.missile_encoder = Sequential(
+            Linear(MISSILE_FEAT_DIM, ENTITY_EMBED_DIM),
+            LeakyReLU(),
+            # nn.LayerNorm(encoder_mid_dim), # 推荐加上 LN，有助于特征标准化
+            Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+            # 这里最后不需要再加激活函数，因为后面马上进 Attention 的 Dot Product
+            # 让特征保持线性空间分布对 Attention 计算更有利
         )
+
+        self.aircraft_encoder = Sequential(
+            Linear(AIRCRAFT_FEAT_DIM, ENTITY_EMBED_DIM),
+            LeakyReLU(),
+            # nn.LayerNorm(encoder_mid_dim),
+            Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+        )
+
+        # # <<< Pre-Norm 层 >>>
+        # # 用于 Attention 的 Query (飞机) 和 Key (导弹)
+        # self.q_norm = nn.LayerNorm(self.entity_embed_dim)
+        # self.k_norm = nn.LayerNorm(self.entity_embed_dim)
 
         # 2. 交叉注意力 (保持不变)
         self.attention = MultiheadAttention(
@@ -110,6 +138,12 @@ class Actor_PostAttentionGRU(Module):
             batch_first=True
         )
 
+        # # 注意力拼接后维度 = 2D
+        # self.fusion_proj = nn.Linear(self.entity_embed_dim * 2,
+        #                              self.entity_embed_dim)
+
+        # self.fusion_norm = nn.LayerNorm(self.entity_embed_dim)
+
         # 3. GRU 层 (Global Memory)
         # [修改] GRU 移到这里。输入维度是 飞机特征 + 注意力上下文
         self.global_gru = nn.GRU(
@@ -117,10 +151,15 @@ class Actor_PostAttentionGRU(Module):
             hidden_size=self.rnn_hidden_dim,
             batch_first=True
         )
+        # ===== GRU 后：Skip-Concat + Projection =====
+        # self.gru_skipconcat_dim = self.entity_embed_dim + self.rnn_hidden_dim  # 128 + 128 = 256
+        # self.post_gru_concat_norm = nn.LayerNorm(self.gru_skipconcat_dim)
+        # self.gru_concat_proj = nn.Linear(self.gru_skipconcat_dim, self.rnn_hidden_dim)  # 256 -> 128
+
         # [修改 2] 添加 Layer Normalization
         # GRU输入维度是 entity_embed_dim * 2，输出是 rnn_hidden_dim
         # 残差连接后的维度是 input_size + hidden_size
-        residual_dim = (self.entity_embed_dim * 2) #+ self.rnn_hidden_dim
+        residual_dim = self.rnn_hidden_dim  + self.entity_embed_dim * 2
         # self.layer_norm = nn.LayerNorm(residual_dim)
 
         # MLP 决策层
@@ -177,6 +216,11 @@ class Actor_PostAttentionGRU(Module):
         #
         # init_value = 2.5 #2.0
         # self.log_std_param = torch.nn.Parameter(torch.full((1, CONTINUOUS_DIM), init_value))
+
+        # # --- __init__ 中 ---
+        # self.pre_gru_norm = nn.LayerNorm(self.entity_embed_dim)
+        # # 用于 GRU 残差后的归一化 (Addition 后建议加 LN)
+        # self.post_residual_norm = nn.LayerNorm(self.rnn_hidden_dim)
 
         # 优化器
         attention_params, gru_params, other_params = [], [], []
@@ -256,8 +300,8 @@ class Actor_PostAttentionGRU(Module):
         missiles_embed_seq = missiles_embed_flat.view(batch_size * 2, seq_len, self.entity_embed_dim)
         m1_feat_seq, m2_feat_seq = torch.split(missiles_embed_seq, batch_size, dim=0)
 
-        m1_feat_flat = m1_feat_seq.reshape(-1, self.entity_embed_dim)
-        m2_feat_flat = m2_feat_seq.reshape(-1, self.entity_embed_dim)
+        # m1_feat_flat = m1_feat_seq.reshape(-1, self.entity_embed_dim)
+        # m2_feat_flat = m2_feat_seq.reshape(-1, self.entity_embed_dim)
 
         # 飞机 (现在通过Encoder，而不是直接进GRU)
         # air_embed_seq = self.aircraft_encoder(obs_tensor)  # [B, Seq, Dim]
@@ -267,26 +311,64 @@ class Actor_PostAttentionGRU(Module):
         # 2. Attention (Spatial Relation)
         m1_raw = obs_flat_raw[..., 0:MISSILE_FEAT_DIM]
         m2_raw = obs_flat_raw[..., MISSILE_FEAT_DIM:2 * MISSILE_FEAT_DIM]
-        inactive_fingerprint = torch.tensor([1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
+        # inactive_fingerprint = torch.tensor([1.0, 1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
+        # <<< 修改开始：更新无效导弹指纹 >>>
+        # 原代码可能是 [1.0, 1.0, 0.0, 1.0, 0.0]，这是正确的。
+        # 对应环境中的非激活观测值: [dist_min=1, dist_max=1, sin=0, cos=1, theta=0]
+        # 确保这里的值与环境代码中的完全一致
+        inactive_fingerprint = torch.tensor([1.0, 1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
+        # <<< 修改结束 >>>
         is_m1_inactive = torch.all(torch.isclose(m1_raw, inactive_fingerprint), dim=-1)
         is_m2_inactive = torch.all(torch.isclose(m2_raw, inactive_fingerprint), dim=-1)
         attention_mask = torch.stack([is_m1_inactive, is_m2_inactive], dim=1)
 
+        # query = air_embed_flat.unsqueeze(1)
+        # keys = torch.stack([m1_feat_flat, m2_feat_flat], dim=1)
+        # [Pre-Norm 步骤 A]: 对 Query (飞机) 进行归一化
+        # 这里使用 q_norm 作为 Residual Block 内部的 Pre-Norm
+        # air_embed_flat_normed = self.q_norm(air_embed_flat)
+        # query = air_embed_flat_normed.unsqueeze(1)  # [B*S, 1, Dim]
+        # Query: 飞机 (保留原始物理特征分布)
+        # 此时 query 包含绝对的物理量级信息
         query = air_embed_flat.unsqueeze(1)
-        keys = torch.stack([m1_feat_flat, m2_feat_flat], dim=1)
 
-        attn_output, attn_weights = self.attention(query, keys, keys, key_padding_mask=attention_mask)
+        # 准备 Keys/Values (Keys 进行 Norm，Values 保持原样或也 Norm 视情况，这里保持原逻辑 K_norm)
+        m_entities_raw = torch.stack([m1_feat_seq.reshape(-1, self.entity_embed_dim),
+                                      m2_feat_seq.reshape(-1, self.entity_embed_dim)], dim=1)
+        keys = m_entities_raw   # 不归一化 self.k_norm(m_entities_raw)
+        values = m_entities_raw
+        # 2. Attention 计算 (现在的 query 和 keys 都是归一化后的)
+        attn_output, attn_weights = self.attention(query, keys, values, key_padding_mask=attention_mask)
         if torch.isnan(attn_output).any():
             attn_output = torch.nan_to_num(attn_output, nan=0.0)
 
         # 3. 特征融合 (Fusion)
         # 将飞机自身的理解与对环境威胁的理解拼接
         # [Batch*Seq, 1, Dim] -> [Batch*Seq, Dim]
-        fusion_features_flat = torch.cat([air_embed_flat, attn_output.squeeze(1)], dim=-1)
+        # 使用原始飞机特征拼接原始威胁特征，保持物理量级一致
+        # fusion_features_flat = torch.cat([air_embed_flat, attn_output.squeeze(1)], dim=-1)
+
+        # [Pre-Norm 步骤 B]: 残差连接 (Residual Connection)
+        # 公式: x = x + Attention(LN(x))
+        # 注意: 加的是原始的 air_embed_flat (未归一化的)，而不是 air_embed_flat_normed
+        # fusion_features_flat = air_embed_flat + attn_output.squeeze(1)  # [B*S, Dim]
+
+        attn_flat = attn_output.squeeze(1)
+
+        # 拼接
+        fusion_features_flat = torch.cat([air_embed_flat, attn_flat], dim=-1)  # [B*S, 2D]
+
+        # # 投影回 D 维
+        # fusion_features_flat = self.fusion_proj(fusion_cat)
+
+        # # 稳定训练（强烈推荐）
+        # fusion_features_flat = self.fusion_norm(fusion_features_flat)
 
         # 4. GRU (Temporal Processing - Post Attention)
         # 恢复序列维度以进入GRU: [Batch, Seq, Dim*2]
         fusion_features_seq = fusion_features_flat.view(batch_size, seq_len, -1)
+
+        # fusion_features_seq_norm = self.pre_gru_norm(fusion_features_seq)  # [LN A] 保护 GRU
 
         gru_out, next_h = self.global_gru(fusion_features_seq, h_prev)
 
@@ -295,10 +377,18 @@ class Actor_PostAttentionGRU(Module):
         # gru_out shape: [Batch, Seq, Hidden]
         # fusion_features_seq shape: [Batch, Seq, Input_Dim]
 
-        # 5. 残差连接 + LayerNorm (关键修改点)
-        # 将 GRU 的输出与 GRU 的输入拼接
+        # # 5. 残差连接 + LayerNorm (关键修改点)
+        # # 将 GRU 的输出与 GRU 的输入拼接
         # residual_features = torch.cat([fusion_features_seq, gru_out], dim=-1)
-        residual_features = gru_out
+        #
+        # residual_features = self.post_residual_norm(residual_features)  # [LN B] 保护 MLP
+        # residual_features = gru_out + fusion_features_seq
+        # residual_features = self.post_residual_norm(residual_features)
+
+        # ===== GRU 后：Skip-Concat + LN + Projection =====
+        residual_features = torch.cat([fusion_features_seq, gru_out], dim=-1)  # [B, T, 256]
+        # residual_features = self.post_gru_concat_norm(residual_features)  # 稳定 PPO
+        # residual_features = self.gru_concat_proj(residual_features)  # [B, T, 128]
 
         # [新增] 对拼接后的特征进行 LayerNorm
         # residual_features = self.layer_norm(residual_features)
@@ -332,10 +422,16 @@ class Actor_PostAttentionGRU(Module):
         split_sizes = list(DISCRETE_DIMS.values())
         logits_parts = torch.split(all_disc_logits, split_sizes, dim=-1)
         trigger_logits, salvo_size_logits, num_groups_logits, inter_interval_logits = logits_parts
-
+        # <<< 修改开始：更新诱饵弹信息索引 >>>
+        # 飞机特征结构: [av, h, ae, am_sin, am_cos, ir, q]
+        # o_ir_norm 是第 6 个元素 (索引为 5)
+        # 全局索引 = 导弹部分总长 + 飞机内部索引
         flare_info_index = 2 * MISSILE_FEAT_DIM + 5
         has_flares_info = obs_flat_raw[..., flare_info_index]
-        mask = (has_flares_info == 0).view(-1)
+        # mask = (has_flares_info == 0).view(-1)
+        # <<< 修改后 (正确) >>>
+        # 因为环境归一化后，0发对应 -1.0。考虑到浮点数误差，我们判断是否小于 -0.99
+        mask = (has_flares_info <= -0.99).view(-1)
 
         NEG_INF = -1e8
         trigger_logits_masked = trigger_logits.clone()
@@ -420,21 +516,47 @@ class Critic_PostAttentionGRU(Module):
         self.output_dim = CRITIC_PARA.output_dim
         self.weight_decay = weight_decay
 
-        self.rnn_hidden_dim = 64 #128 #64 #128 #ENTITY_EMBED_DIM
+        self.rnn_hidden_dim = 128 #ENTITY_EMBED_DIM
         self.entity_embed_dim = ENTITY_EMBED_DIM
         self.encoder_hidden_dim = ENTITY_EMBED_DIM
 
-        # 1. Encoders
-        self.missile_encoder = Sequential(
-            Linear(MISSILE_FEAT_DIM, self.encoder_hidden_dim),
-        )
-        # self.aircraft_encoder = Sequential(
-        #     Linear(FULL_OBS_DIM, self.encoder_hidden_dim),
+        # # 1. Encoders
+        # self.missile_encoder = Sequential(
+        #     Linear(MISSILE_FEAT_DIM, self.encoder_hidden_dim),
         # )
-        # 修改后
-        self.aircraft_encoder = Sequential(
-            Linear(AIRCRAFT_FEAT_DIM, self.encoder_hidden_dim),
+        # # self.aircraft_encoder = Sequential(
+        # #     Linear(FULL_OBS_DIM, self.encoder_hidden_dim),
+        # # )
+        # # 修改后
+        # self.aircraft_encoder = Sequential(
+        #     Linear(AIRCRAFT_FEAT_DIM, self.encoder_hidden_dim),
+        # )
+
+        # =====================================================================
+        # 修改后：增加非线性映射能力
+        # =====================================================================
+        # # 定义一个中间隐藏层大小，通常可以和 embedding dim 一样，或者稍微小一点
+        # encoder_mid_dim = 64
+
+        self.missile_encoder = Sequential(
+            Linear(MISSILE_FEAT_DIM, ENTITY_EMBED_DIM),
+            LeakyReLU(),
+            # nn.LayerNorm(encoder_mid_dim), # 推荐加上 LN，有助于特征标准化
+            Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+            # 这里最后不需要再加激活函数，因为后面马上进 Attention 的 Dot Product
+            # 让特征保持线性空间分布对 Attention 计算更有利
         )
+
+        self.aircraft_encoder = Sequential(
+            Linear(AIRCRAFT_FEAT_DIM, ENTITY_EMBED_DIM),
+            LeakyReLU(),
+            # nn.LayerNorm(encoder_mid_dim),
+            Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+        )
+
+        # # <<< Pre-Norm 层 >>>
+        # self.q_norm = nn.LayerNorm(self.entity_embed_dim)
+        # self.k_norm = nn.LayerNorm(self.entity_embed_dim)
 
         # 2. Attention
         self.attention = MultiheadAttention(
@@ -443,6 +565,10 @@ class Critic_PostAttentionGRU(Module):
             batch_first=True
         )
 
+        # self.fusion_proj = nn.Linear(self.entity_embed_dim * 2,
+        #                              self.entity_embed_dim)
+        # self.fusion_norm = nn.LayerNorm(self.entity_embed_dim)
+
         # 3. Post-Attention GRU
         self.global_gru = nn.GRU(
             input_size=self.entity_embed_dim * 2,  # Concat Input
@@ -450,8 +576,13 @@ class Critic_PostAttentionGRU(Module):
             batch_first=True
         )
 
+        # ===== GRU 后：Skip-Concat + Projection =====
+        # self.gru_skipconcat_dim = self.entity_embed_dim + self.rnn_hidden_dim
+        # self.post_gru_concat_norm = nn.LayerNorm(self.gru_skipconcat_dim)
+        # self.gru_concat_proj = nn.Linear(self.gru_skipconcat_dim, self.rnn_hidden_dim)
+
         # [!!! 修正这里 !!!] 定义 LayerNorm
-        # residual_dim = (self.entity_embed_dim * 2) + self.rnn_hidden_dim
+        residual_dim =  self.rnn_hidden_dim #+ (self.entity_embed_dim * 2)
         # self.layer_norm = nn.LayerNorm(residual_dim)
 
         # 4. MLP
@@ -459,12 +590,17 @@ class Critic_PostAttentionGRU(Module):
         self.mlp = Sequential()
         # input_dim = self.rnn_hidden_dim  # 来自 GRU 的输出
         gru_input_dim = self.entity_embed_dim * 2
-        input_dim = self.rnn_hidden_dim #+ gru_input_dim
+        input_dim = self.rnn_hidden_dim + gru_input_dim
         for i, dim in enumerate(mlp_dims):
             self.mlp.add_module(f'fc_{i}', Linear(input_dim, dim))
             self.mlp.add_module(f'act_{i}', LeakyReLU())
             input_dim = dim
         self.fc_out = Linear(input_dim, self.output_dim)
+
+        # # --- __init__ 中 ---
+        # self.pre_gru_norm = nn.LayerNorm(self.entity_embed_dim)
+        # # 新增
+        # self.post_residual_norm = nn.LayerNorm(self.rnn_hidden_dim)
 
         # Optimizer
         attn_params, gru_params, other_params = [], [], []
@@ -540,36 +676,69 @@ class Critic_PostAttentionGRU(Module):
         missiles_embed_flat = self.missile_encoder(missiles_raw.view(-1, MISSILE_FEAT_DIM))
         missiles_embed_seq = missiles_embed_flat.view(batch_size * 2, seq_len, self.entity_embed_dim)
         m1_feat_seq, m2_feat_seq = torch.split(missiles_embed_seq, batch_size, dim=0)
-        m1_feat_flat = m1_feat_seq.reshape(-1, self.entity_embed_dim)
-        m2_feat_flat = m2_feat_seq.reshape(-1, self.entity_embed_dim)
+        # m1_feat_flat = m1_feat_seq.reshape(-1, self.entity_embed_dim)
+        # m2_feat_flat = m2_feat_seq.reshape(-1, self.entity_embed_dim)
 
         # 2. Attention
-        m1_raw = obs_flat_raw[..., 0:4]
-        m2_raw = obs_flat_raw[..., 4:8]
-        inactive = torch.tensor([1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
+        m1_raw = obs_flat_raw[..., 0:MISSILE_FEAT_DIM]
+        m2_raw = obs_flat_raw[..., MISSILE_FEAT_DIM:2 * MISSILE_FEAT_DIM]
+        # <<< 修改开始：更新无效导弹指纹 (与 Actor 保持一致) >>>
+        # 确保这里的值与环境代码中的完全一致: [1.0, 1.0, 0.0, 1.0, 0.0]
+        inactive = torch.tensor([1.0, 1.0, 0.0, 1.0, 0.0], device=obs_tensor.device)
+        # <<< 修改结束 >>>
         is_m1_in = torch.all(torch.isclose(m1_raw, inactive), dim=-1)
         is_m2_in = torch.all(torch.isclose(m2_raw, inactive), dim=-1)
         mask = torch.stack([is_m1_in, is_m2_in], dim=1)
 
-        query = air_embed_flat.unsqueeze(1)
-        keys = torch.stack([m1_feat_flat, m2_feat_flat], dim=1)
+        # query = air_embed_flat.unsqueeze(1)
+        # keys = torch.stack([m1_feat_flat, m2_feat_flat], dim=1)
+        # <<< 修改：Attention 前的归一化 >>>
+        # # 1. 准备 Q, K, V (V不归一化)
+        # # [Pre-Norm 步骤 A]
+        # air_embed_flat_normed = self.q_norm(air_embed_flat)
+        # query = air_embed_flat_normed.unsqueeze(1)
 
-        attn_out, _ = self.attention(query, keys, keys, key_padding_mask=mask)
+        query = air_embed_flat.unsqueeze(1)
+
+        m_entities_raw = torch.stack([m1_feat_seq.reshape(-1, self.entity_embed_dim),
+                                      m2_feat_seq.reshape(-1, self.entity_embed_dim)], dim=1)
+        keys = m_entities_raw #self.k_norm(m_entities_raw)
+        values = m_entities_raw
+
+        attn_out, _ = self.attention(query, keys, values, key_padding_mask=mask)
         if torch.isnan(attn_out).any(): attn_out = torch.nan_to_num(attn_out, nan=0.0)
 
         # 3. Fusion
-        fusion_features_flat = torch.cat([air_embed_flat, attn_out.squeeze(1)], dim=-1)
+        # 同样使用未归一化的飞机特征进行拼接
+        # fusion_features_flat = torch.cat([air_embed_flat, attn_out.squeeze(1)], dim=-1)
+
+        # [Pre-Norm 步骤 B]: 残差相加
+        # x = x + Attention(LN(x))
+        # fusion_features_flat = air_embed_flat + attn_out.squeeze(1)
+        attn_flat = attn_out.squeeze(1)
+        fusion_features_flat = torch.cat([air_embed_flat, attn_flat], dim=-1)
+        # fusion_features_flat = self.fusion_proj(fusion_cat)
+        # fusion_features_flat = self.fusion_norm(fusion_features_flat)
 
         # 4. GRU
         fusion_features_seq = fusion_features_flat.view(batch_size, seq_len, -1)
+
+        # fusion_features_seq_norm = self.pre_gru_norm(fusion_features_seq)  # [LN A] 保护 GRU
+
         gru_out, next_h = self.global_gru(fusion_features_seq, h_prev)
 
-        # [修改点 2]：残差拼接
+        # # [修改点 2]：残差拼接
         # residual_features = torch.cat([fusion_features_seq, gru_out], dim=-1)
-        residual_features = gru_out
+        #
+        # residual_features = self.post_residual_norm(residual_features)  # [LN B] 保护 MLP
+        # residual_features = gru_out + fusion_features_seq
+
+        residual_features = torch.cat([fusion_features_seq, gru_out], dim=-1)
+        # residual_features = self.post_gru_concat_norm(residual_features)
+        # residual_features = self.gru_concat_proj(residual_features)
 
         # 加上这一行：
-        # residual_features = self.layer_norm(residual_features)
+        # residual_features = self.post_residual_norm(residual_features)
 
         # 5. MLP
         mlp_input = residual_features.reshape(-1, residual_features.shape[-1])
@@ -588,7 +757,7 @@ class PPO_continuous(object):
         self.use_rnn = use_rnn  # True
         print(f"--- 初始化 PPO Agent (Post-Attention GRU) use_rnn={self.use_rnn} ---")
 
-        self.rnn_seq_len = 5 #15 #12 #15 #12 #20 #15 #10 #5 #15 #10 #15 #10 #5 #10
+        self.rnn_seq_len = 5 #15 #12 #15 #12 #20
         self.rnn_batch_size = BUFFERPARA.BATCH_SIZE
 
         # 初始化模型
@@ -764,6 +933,190 @@ class PPO_continuous(object):
             advantage[t] = gae
         return advantage
 
+    # def learn(self, next_visual_value=0.0):
+    #     """
+    #     执行 PPO 的学习和更新步骤。
+    #     集成特性：
+    #     1. Post-Attention GRU 架构 (支持全序列输入)
+    #     2. 全局优势归一化
+    #     3. 雅可比修正 (Jacobian Correction)
+    #     4. 💥 修复版：针对 RNN 模式的维度对齐与最后一步切片训练
+    #     """
+    #     # 如果 Buffer 中的数据不足一个批次，则跳过学习
+    #     if self.buffer.get_buffer_size() < BUFFERPARA.BATCH_SIZE:
+    #         return None
+    #
+    #     # 1. 提取所有数据 (Numpy 数组)
+    #     states, values, actions, old_probs, rewards, dones, _, _, attn_weights = self.buffer.get_all_data()
+    #
+    #     # 2. 计算 GAE 优势
+    #     advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones, next_value=next_visual_value)
+    #
+    #     # 维度对齐处理
+    #     values = np.squeeze(values)
+    #     if values.ndim == 1:
+    #         values = values.reshape(-1, 1)
+    #     if advantages.ndim == 1:
+    #         advantages = advantages.reshape(-1, 1)
+    #
+    #     returns = advantages + values
+    #     adv_mean = np.mean(advantages)
+    #     adv_std = np.std(advantages)
+    #     advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+    #
+    #     train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'entropy_cont': [], 'adv_targ': [],
+    #                   'ratio': []}
+    #
+    #     # 3. PPO 更新循环
+    #     for _ in range(self.ppo_epoch):
+    #         if self.use_rnn:
+    #             batch_generator = self.buffer.generate_sequence_batches(
+    #                 self.rnn_seq_len, self.rnn_batch_size, advantages, returns
+    #             )
+    #         else:
+    #             batch_generator = self.buffer.generate_batches()
+    #
+    #         for batch_data in batch_generator:
+    #             if self.use_rnn:
+    #                 # [GRU模式] 解包数据
+    #                 (b_s, b_a, b_p, b_adv, b_ret, b_v, b_h_a, b_h_c, _) = batch_data
+    #
+    #                 # 获取当前的 Batch 和 Seq 长度用于后续还原
+    #                 batch_size = b_s.shape[0]
+    #                 seq_len = b_s.shape[1]
+    #
+    #                 # 转 Tensor：保留序列结构 (B, S, ...)
+    #                 state = torch.FloatTensor(b_s).to(**ACTOR_PARA.tpdv)
+    #                 action_batch = torch.FloatTensor(b_a).to(**ACTOR_PARA.tpdv)
+    #                 old_prob = torch.FloatTensor(b_p).to(**ACTOR_PARA.tpdv)  # (B, S)
+    #                 advantage = torch.FloatTensor(b_adv).to(**ACTOR_PARA.tpdv)  # (B, S, 1)
+    #                 return_ = torch.FloatTensor(b_ret).to(**CRITIC_PARA.tpdv)  # (B, S, 1)
+    #
+    #                 rnn_h_a = torch.FloatTensor(b_h_a).to(**ACTOR_PARA.tpdv)
+    #                 rnn_h_c = torch.FloatTensor(b_h_c).to(**CRITIC_PARA.tpdv)
+    #
+    #                 # 前向传播：模型内部会处理序列，输出通常是展平的 (B*S, Dim)
+    #                 new_dists, _, _ = self.Actor(state, rnn_h_a)
+    #                 new_value, _ = self.Critic(state, rnn_h_c)
+    #
+    #                 # 【💥 关键修复】：将 Buffer 里的动作展平，以匹配 new_dists 的 (B*S) 形状
+    #                 u_from_buffer = action_batch[..., :CONTINUOUS_DIM].reshape(-1, CONTINUOUS_DIM)
+    #                 discrete_actions_from_buffer = {
+    #                     'trigger': action_batch[..., CONTINUOUS_DIM].reshape(-1),
+    #                     'salvo_size': action_batch[..., CONTINUOUS_DIM + 1].reshape(-1).long(),
+    #                     'num_groups': action_batch[..., CONTINUOUS_DIM + 2].reshape(-1).long(),
+    #                     'inter_interval': action_batch[..., CONTINUOUS_DIM + 3].reshape(-1).long(),
+    #                 }
+    #             else:
+    #                 # [MLP模式]
+    #                 batch_indices = batch_data
+    #                 state = check(states[batch_indices]).to(**ACTOR_PARA.tpdv)
+    #                 action_batch = check(actions[batch_indices]).to(**ACTOR_PARA.tpdv)
+    #                 old_prob = check(old_probs[batch_indices]).to(**ACTOR_PARA.tpdv)
+    #                 advantage = check(advantages[batch_indices]).to(**ACTOR_PARA.tpdv).view(-1, 1)
+    #                 return_ = check(returns[batch_indices]).to(**CRITIC_PARA.tpdv).view(-1, 1)
+    #
+    #                 new_dists, _, _ = self.Actor(state)
+    #                 new_value, _ = self.Critic(state)
+    #
+    #                 u_from_buffer = action_batch[..., :CONTINUOUS_DIM]
+    #                 discrete_actions_from_buffer = {
+    #                     'trigger': action_batch[..., CONTINUOUS_DIM],
+    #                     'salvo_size': action_batch[..., CONTINUOUS_DIM + 1].long(),
+    #                     'num_groups': action_batch[..., CONTINUOUS_DIM + 2].long(),
+    #                     'inter_interval': action_batch[..., CONTINUOUS_DIM + 3].long(),
+    #                 }
+    #
+    #             # --- 雅可比修正与 LogProb 计算 ---
+    #             # 此时所有的输入都是展平后的，计算出的 log_prob 形状为 (B*S) 或 (B)
+    #             log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+    #             correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
+    #             new_log_prob_cont = log_prob_u_buffer - correction_buffer
+    #
+    #             entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
+    #             u_curr_sample = new_dists['continuous'].rsample()
+    #             correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
+    #             entropy_cont = entropy_base + correction_curr
+    #
+    #             new_log_prob_disc = sum(
+    #                 new_dists[key].log_prob(discrete_actions_from_buffer[key]) for key in discrete_actions_from_buffer)
+    #
+    #             new_prob = new_log_prob_cont + new_log_prob_disc
+    #             entropy_disc = sum(dist.entropy() for key, dist in new_dists.items() if key != 'continuous')
+    #
+    #             # =================== [💥 核心逻辑：还原形状并切片提取最后一步] ===================
+    #             if self.use_rnn:
+    #                 # 1. 将展平的 (B*S) 还原回 (B, S)
+    #                 new_prob = new_prob.view(batch_size, seq_len)
+    #                 entropy_cont = entropy_cont.view(batch_size, seq_len)
+    #                 entropy_disc = entropy_disc.view(batch_size, seq_len)
+    #                 # new_value 从 (B*S, 1) 还原回 (B, S, 1)
+    #                 new_value = new_value.view(batch_size, seq_len, 1)
+    #
+    #                 # 2. 提取最后一步 [:, -1]
+    #                 new_prob_train = new_prob[:, -1]
+    #                 old_prob_train = old_prob[:, -1]
+    #                 advantage_train = advantage[:, -1].squeeze(-1)  # (B, S, 1) -> (B,)
+    #
+    #                 entropy_cont_train = entropy_cont[:, -1]
+    #                 entropy_disc_train = entropy_disc[:, -1]
+    #
+    #                 new_value_train = new_value[:, -1, :]  # (B, 1)
+    #                 return_train = return_[:, -1, :]  # (B, 1)
+    #             else:
+    #                 new_prob_train = new_prob
+    #                 old_prob_train = old_prob
+    #                 advantage_train = advantage.squeeze(-1)
+    #                 entropy_cont_train = entropy_cont
+    #                 entropy_disc_train = entropy_disc
+    #                 new_value_train = new_value
+    #                 return_train = return_
+    #             # ==========================================================================
+    #
+    #             # 4. 计算最终的 Loss
+    #             total_entropy = (entropy_cont_train.mean() + entropy_disc_train.mean())
+    #
+    #             log_ratio = new_prob_train - old_prob_train
+    #             ratio = torch.exp(torch.clamp(log_ratio, -20.0, 20.0))
+    #
+    #             surr1 = ratio * advantage_train
+    #             surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage_train
+    #             actor_loss = -torch.min(surr1, surr2).mean() - AGENTPARA.entropy * total_entropy
+    #
+    #             # 更新 Actor
+    #             self.Actor.optim.zero_grad()
+    #             actor_loss.backward()
+    #             torch.nn.utils.clip_grad_norm_(self.Actor.parameters(), max_norm=1.0)
+    #             self.Actor.optim.step()
+    #
+    #             # Critic Loss
+    #             critic_loss = torch.nn.functional.mse_loss(new_value_train, return_train)
+    #             self.Critic.optim.zero_grad()
+    #             critic_loss.backward()
+    #             torch.nn.utils.clip_grad_norm_(self.Critic.parameters(), max_norm=1.0)
+    #             self.Critic.optim.step()
+    #
+    #             # 记录信息
+    #             train_info['critic_loss'].append(critic_loss.item())
+    #             train_info['actor_loss'].append(actor_loss.item())
+    #             train_info['dist_entropy'].append(total_entropy.item())
+    #             train_info['entropy_cont'].append(entropy_cont_train.mean().item())
+    #             train_info['adv_targ'].append(advantage_train.mean().item())
+    #             train_info['ratio'].append(ratio.mean().item())
+    #
+    #     if not train_info['critic_loss']:
+    #         print("  [Warning] No batches were generated for training.")
+    #         self.buffer.clear_memory()
+    #         return None
+    #
+    #     # 4. 清理与保存
+    #     self.buffer.clear_memory()
+    #     for key in train_info:
+    #         train_info[key] = np.mean(train_info[key])
+    #
+    #     self.save()
+    #     return train_info
+
     def learn(self, next_visual_value=0.0):
         """
         执行 PPO 的学习和更新步骤。
@@ -917,6 +1270,7 @@ class PPO_continuous(object):
                 entropy_disc = sum(
                     dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
                 )
+
                 total_entropy = (entropy_cont.mean() + entropy_disc.mean())
 
                 # 计算 Ratio

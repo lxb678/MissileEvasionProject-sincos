@@ -211,6 +211,64 @@ class Aircraft:
         # 请根据您的JSBSim配置确认
         return self.fdm.get_property_value('accelerations/Nz')
 
+    def get_nz_g_force(self):
+        """
+        获取飞机的总过载 (Total G-Force) 以及各轴分量。
+        基于飞行员位置的归一化加速度 (accelerations/n-pilot-*-norm)。
+
+        Returns:
+            total_g (float): 总过载大小 (G)
+            components (tuple): (g_x, g_y, g_z) 各轴分量
+        """
+        # 获取三个轴向过载 (单位: G)
+        # JSBSim 属性: accelerations/n-pilot-x-norm, y-norm, z-norm
+        # g_x = self.fdm.get_property_value('accelerations/n-pilot-x-norm')
+        # g_y = self.fdm.get_property_value('accelerations/n-pilot-y-norm')
+        g_z = self.fdm.get_property_value('accelerations/n-pilot-z-norm')
+
+        # 计算总过载 (使用文件头部导入的 numpy)
+        # total_g = np.sqrt(g_x ** 2 + g_y ** 2 + g_z ** 2)
+
+        return - g_z
+
+    def get_total_g_force(self):
+        """
+        获取飞机的总过载 (Total G-Force) 以及各轴分量。
+        基于飞行员位置的归一化加速度 (accelerations/n-pilot-*-norm)。
+
+        Returns:
+            total_g (float): 总过载大小 (G)
+            components (tuple): (g_x, g_y, g_z) 各轴分量
+        """
+        # 获取三个轴向过载 (单位: G)
+        # JSBSim 属性: accelerations/n-pilot-x-norm, y-norm, z-norm
+        g_x = self.fdm.get_property_value('accelerations/n-pilot-x-norm')
+        g_y = self.fdm.get_property_value('accelerations/n-pilot-y-norm')
+        g_z = self.fdm.get_property_value('accelerations/n-pilot-z-norm')
+
+        # 计算总过载 (使用文件头部导入的 numpy)
+        total_g = np.sqrt(g_x ** 2 + g_y ** 2 + g_z ** 2)
+
+        return total_g , (g_x, g_y, g_z)
+
+    def get_pilot_normal_g(self) -> float:
+        """
+        获取飞行员位置的法向过载 (Pilot Normal G-Force)。
+        基于属性: accelerations/n-pilot-z-norm
+
+        符号约定 (通常情况):
+        - 拉杆 (Pull): 正值 (Positive) -> 用于转弯
+        - 平飞 (Level): 接近 1.0
+        - 压杆 (Push): < 1.0 (例如 0.5 或 负数) -> 导致失重或负G
+        """
+        try:
+            # 获取标准化过载值
+            return self.fdm.get_property_value('accelerations/n-pilot-z-norm')
+        except Exception as e:
+            print(f"无法获取飞行员过载: {e}")
+            # 如果获取失败，返回安全默认值 (平飞 1.0)
+            return 1.0
+
     def beta_deg(self):
         '''
         计算并返回飞机的侧滑角 (beta)，单位：弧度。

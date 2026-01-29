@@ -1,10 +1,10 @@
 import random
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构雅可比修正 import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构雅可比修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
 from torch.utils.tensorboard import SummaryWriter
 #from env.AirCombatEnv import *
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim2 import *
 import time
 
 LOAD_ABLE = False  #是否使用save文件夹中的模型
@@ -88,7 +88,7 @@ agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_load_path)
 # ------------------- 训练主循环 -------------------
 global_step = 0
 success_num = 0
-MAX_EXE_NUM = 15000 #20000  # 最大训练回合数
+MAX_EXE_NUM = 20000 #15000 #20000  # 最大训练回合数
 MAX_STEP = 10000  # 每回合最大步数
 UPDATE_CYCLE = 10  # 每多少回合训练一次
 
@@ -155,7 +155,7 @@ for i_episode in range(MAX_EXE_NUM):
         print(f"最近100回合 (Ep {i_episode - 98}-{i_episode + 1}) 统计:")
         print(f"  - 成功率: {success_rate * 100:.2f}% ({success_num}/100)")
         print("-" * 50)
-        writer.add_scalar('Metrics/Success_Rate_per_100_ep', success_rate, i_episode)
+        writer.add_scalar('Episode/Success_Rate_per_100_ep', success_rate, i_episode)
 
         # 如果成功率很高，保存一个带标记的模型
         if success_rate >= 0.95:
@@ -226,19 +226,19 @@ for i_episode in range(MAX_EXE_NUM):
             # 记录评估结果
             print(f"评估回合奖励: {eval_reward_sum:.2f}")
             writer.add_scalar('Eval/Reward_Sum', eval_reward_sum, global_step)
-            eval_reward_buffer.append(eval_reward_sum)  # 存入列表
-            # --- 核心修改：判断是否攒够了 10 个 ---
-            if len(eval_reward_buffer) >= 10:
-                mean_reward = np.mean(eval_reward_buffer)
-                print(f"\n{'#' * 40}")
-                print(f"### 统计报告: 过去10次测试平均奖励: {mean_reward:.2f} ###")
-                print(f"{'#' * 40}\n")
-
-                # 记录到 Tensorboard，使用的是'Eval/Mean_10_Buffer'
-                writer.add_scalar('Eval/Mean_10_Buffer', mean_reward, global_step)
-
-                # 清空缓存，准备下一轮积累
-                eval_reward_buffer = []
+            # eval_reward_buffer.append(eval_reward_sum)  # 存入列表
+            # # --- 核心修改：判断是否攒够了 10 个 ---
+            # if len(eval_reward_buffer) >= 10:
+            #     mean_reward = np.mean(eval_reward_buffer)
+            #     print(f"\n{'#' * 40}")
+            #     print(f"### 统计报告: 过去10次测试平均奖励: {mean_reward:.2f} ###")
+            #     print(f"{'#' * 40}\n")
+            #
+            #     # 记录到 Tensorboard，使用的是'Eval/Mean_10_Buffer'
+            #     writer.add_scalar('Eval/Mean_10_Buffer', mean_reward, global_step)
+            #
+            #     # 清空缓存，准备下一轮积累
+            #     eval_reward_buffer = []
 
         print("--- 评估结束 ---\n")
 
