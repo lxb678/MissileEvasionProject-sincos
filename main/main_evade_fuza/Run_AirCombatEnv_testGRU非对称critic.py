@@ -15,11 +15,21 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+import sys
+import os
+
+# 获取当前脚本的绝对路径，并向上推导到项目根目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# main_evade_fuza -> main -> Interference_code -> 规避导弹项目sincos
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 # <<< GRU 修改 >>>: 导入包含GRU模型的PPO实现
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正优势归一化 import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正优势归一化非对称critic import *
 from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
 # <<< 更改 >>>: 确保您正在使用的环境与训练时一致
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim2 import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim3非对称critic import *
 import time
 
 LOAD_ABLE = True  # 是否使用save文件夹中的模型
@@ -57,7 +67,7 @@ set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型
 # model_path = r"D:\code\规避导弹项目sincos\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPOGRU_2026-03-09_11-10-42"  # 示例路径
+model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPOGRU_2026-03-08_18-48-04"  # 示例路径
 print(f"正在加载GRU模型: {model_path}")
 
 # <<< GRU 修改 >>>: 初始化Agent时，必须传入 use_rnn=True
@@ -77,6 +87,7 @@ for i_episode in range(episodes):
     with torch.no_grad():
         done_eval = False
         observation_eval, info = env.reset(seed=AGENTPARA.RANDOM_SEED + i_episode)
+        global_state = info["global_state"]  # <<< 新增
 
         # <<< GRU 修改 >>>: 在每个测试回合开始时，重置隐藏状态
         # 这是GRU模型与MLP模型在测试时的关键区别
@@ -90,12 +101,14 @@ for i_episode in range(episodes):
             #    测试时我们不需要prob, value等，所以用 `_` 忽略它们
             action_eval_flat, _, _, _, \
                 new_actor_hidden, new_critic_hidden = agent.choose_action(observation_eval,
+                                                                          global_state,
                                                                           actor_hidden,
                                                                           critic_hidden,
                                                                           deterministic=True)
 
             # 2. 将扁平数组打包成字典 (这部分不变)
             action_dict_eval = pack_action_into_dict(action_eval_flat)
+            global_state_to_store = global_state  # <<< 保存当前的上帝视角
             # print(f"Step {step + 1}, Action: {action_dict_eval}")
 
             # 3. 将打包好的字典传递给环境
@@ -104,6 +117,7 @@ for i_episode in range(episodes):
             # <<< GRU 修改 >>>: 更新隐藏状态以备下一个时间步使用
             actor_hidden = new_actor_hidden
             critic_hidden = new_critic_hidden
+            global_state = info["global_state"]  # <<< 获取下一步的上帝视角
 
             # done_eval 现在是 terminated 或 truncated 的组合
             done_eval = terminated or truncated

@@ -7,7 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttn import *
 from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体2 import *
-
+#todo:后续要实现并行训练
 # ------------------- 全局配置 -------------------
 LOAD_ABLE = False
 USE_RNN_MODEL = True  # 保持开启 RNN

@@ -13,8 +13,8 @@ class Flare:
     """
 
     def __init__(self, position: np.ndarray, velocity: np.ndarray, release_time: float,
-                 m0=0.5, m_dot=0.01, rho=1.225, c=0.5, s=0.01,
-                 I_max=10000, t1=0.5, t2=3.5, t3=5.0):
+                 m0=0.5, m_dot=0.01, rho=1.225, c=0.5, s=0.005,
+                 I_max=20000, t1=0.5, t2=4.0, t3=5.0):   #原来是10000，0.01,3.5
         """
         初始化单个诱饵弹。
         """
@@ -87,7 +87,7 @@ class FlareManager:
     管理所有诱饵弹的投放计划、创建和更新。
     """
 
-    def __init__(self, flare_per_group=1, interval=0.1, release_speed=50):
+    def __init__(self, flare_per_group=1, interval=0.1, release_speed=50):  #原来是50
         self.flare_per_group = flare_per_group
         self.interval = interval
         self.release_speed = release_speed
@@ -174,7 +174,8 @@ class FlareManager:
 
             # --- 计算释放方向 ---
             # 机体坐标系下的“后下方”方向向量 (x前, y上, z右)
-            v_b = np.array([-1.0, -1.0, 0.0])
+            # v_b = np.array([-1.0, -1.0, 0.0])
+            v_b = np.array([0.0, -1.0, 0.0])
             v_b /= np.linalg.norm(v_b)
 
             # (中文) 使用更标准的 ZYX 欧拉角旋转顺序 (Yaw-Pitch-Roll)

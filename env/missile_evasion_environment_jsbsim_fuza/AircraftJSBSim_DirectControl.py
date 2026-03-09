@@ -70,11 +70,26 @@ class Aircraft:
         return self.state
 
     # ------------------------------------------------------------------
-    def update(self, action: list):
+    def update(self, action: list,dt=None):
         """
         根据 AI 动作更新飞机状态。
         action: [throttle, elevator, aileron, rudder]
         """
+        # # 1. 尝试修改 dt
+        # if dt is not None:
+        #     # # 在 JSBSim Python API 中，直接修改属性是最稳妥的方法
+        #     # self.fdm['simulation/dt'] = dt
+        #     # 暂停积分
+        #     self.fdm.suspend_integration()
+        #
+        #     # 恢复积分
+        #     self.fdm.resume_integration()
+        #     # 设置新步长
+        #     self.fdm.set_dt(dt)  # 设置为0.005秒（200Hz）
+
+            # 记录运行前的 JSBSim 内部时间
+        t_before = self.fdm['simulation/sim-time-sec']
+
         throttle, elevator, aileron, rudder = action
         self.fdm['fcs/throttle-cmd-norm'] = np.clip(throttle, 0.0, 1.0)
         self.fdm['fcs/elevator-cmd-norm'] = np.clip(elevator, -1.0, 1.0)
@@ -83,6 +98,13 @@ class Aircraft:
 
         # 运行一步 JSBSim
         self.fdm.run()
+
+        # # 记录运行后的 JSBSim 内部时间，并计算真实的 dt
+        # t_after = self.fdm['simulation/sim-time-sec']
+        # actual_dt = t_after - t_before
+        #
+        # # 3. 打印检测结果（测试时开启，确认后删掉）
+        # print(f"[检测] 环境请求 dt: {dt}, JSBSim 实际执行 dt: {actual_dt:.4f}")
 
         # 更新状态向量
         self._update_state_from_jsbsim()

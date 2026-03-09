@@ -2,6 +2,16 @@ import gym
 import torch
 import numpy as np
 import random
+import sys
+import os
+
+# 获取当前脚本的绝对路径，并向上推导到项目根目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# main_evade -> main -> Interference_code -> 规避导弹项目sincos
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 from Interference_code.PPO_model.PPO_evasion.Hybrid_PPO_jsbsim import *
 from Interference_code.PPO_model.PPO_evasion.Config import *
 from torch.utils.tensorboard import SummaryWriter

@@ -22,7 +22,7 @@ class Missile:
         # --- 物理与导引参数 (源自您的 AirCombatEnv) ---
         self.g = 9.81
         self.N = 5.0  # 比例导引系数
-        self.mass = 60.0  # (kg) 导弹质量
+        self.mass = 85.0 #60.0  # (kg) 导弹质量
         self.diameter = 0.127  # (m) 导弹直径
         self.max_g_load = 50.0  # 导弹最大过载
 
@@ -441,16 +441,43 @@ class Missile:
         rho = 1.293 * P_H * (273 / (T_H + 0.01))
         Ma = V / 340.0
 
-        # 阻力系数函数 (内嵌)
-        def get_Cx_AIM9X(m):
-            if m <= 0.9:
-                return 0.20
-            elif m <= 1.2:
-                return 0.20 + (0.38 - 0.20) * (m - 0.9) / 0.3
-            elif m <= 4.0:
-                return 0.38 * np.exp(-0.35 * (m - 1.2)) + 0.15
+        # # 阻力系数函数 (内嵌)
+        # def get_Cx_AIM9X(m):
+        #     if m <= 0.9:
+        #         return 0.20
+        #     elif m <= 1.2:
+        #         return 0.20 + (0.38 - 0.20) * (m - 0.9) / 0.3
+        #     elif m <= 4.0:
+        #         return 0.38 * np.exp(-0.35 * (m - 1.2)) + 0.15
+        #     else:
+        #         return 0.15
+
+        def get_Cx_AIM9X(M):
+            """
+            AIM-9X 导弹阻力系数 Cx 分段拟合函数
+            参数:
+                M : float
+                    马赫数
+            返回:
+                Cx : float
+                    拟合阻力系数
+            """
+            if M <= 0.9:
+                return 0.5
+            elif M <= 1.1:
+                return 1.4 * M - 0.76
+            elif M <= 4.0:
+                return (-0.0212 * M ** 3 +
+                        0.2062 * M ** 2 -
+                        0.7373 * M +
+                        1.3699)
             else:
-                return 0.15
+                # 超出拟合范围时，默认按 M=4 的值处理
+                M = 4.0
+                return (-0.0212 * M ** 3 +
+                        0.2062 * M ** 2 -
+                        0.7373 * M +
+                        1.3699)
 
         Cx = get_Cx_AIM9X(Ma)
         S = np.pi * (self.diameter ** 2) / 4

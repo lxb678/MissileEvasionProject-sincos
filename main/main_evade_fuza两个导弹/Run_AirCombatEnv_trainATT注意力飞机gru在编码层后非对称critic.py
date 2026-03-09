@@ -4,9 +4,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 # ------------------- 导入模型和配置 -------------------
 # 保持你原有的导入路径不变
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正优势归一化2 import *
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.PPOMLP混合架构.Hybrid_PPO_ATTMLP注意力GRU注意力后yakebi修正优势归一化3非对称critic import *
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttngru import *
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体2 import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza两个导弹.Vec_missile_evasion_environment_jsbsim实体3非对称critic import *
 
 # ------------------- 全局配置 -------------------
 LOAD_ABLE = False
@@ -63,7 +63,7 @@ def pack_action_into_dict(flat_action_np: np.ndarray, attn_weights: Optional[np.
 
 
 # ------------------- Tensorboard 设置 -------------------
-model_type_str = "交叉注意力ATT_GRU" if USE_RNN_MODEL else "交叉注意力ATT_MLP"
+model_type_str = "交叉注意力ATT_GRU非对称critic" if USE_RNN_MODEL else "交叉注意力ATT_MLP"
 writer_log_dir = f'../../log/log_evade_fuza两个导弹/PPO_{model_type_str}_EP_UPDATE_{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}'
 writer = SummaryWriter(log_dir=writer_log_dir)
 print(f"Tensorboard 日志将保存在: {writer_log_dir}")
@@ -91,6 +91,7 @@ eval_counter = 0  # 计数器，专门用来控制测试的种子
 for i_episode in range(MAX_EXE_NUM):
     # --- 1. 重置环境 ---
     observation, info = env.reset(seed=AGENTPARA.RANDOM_SEED + i_episode)
+    global_state = info["global_state"]  # <<< 新增
 
     # [RNN关键点] 每个 Episode 开始必须重置 RNN 状态
     if USE_RNN_MODEL:
@@ -112,8 +113,9 @@ for i_episode in range(MAX_EXE_NUM):
 
         # 1. 获取动作
         with torch.no_grad():
-            env_action_flat, action_to_store, prob, value, attn_weights = agent.choose_action(observation)
+            env_action_flat, action_to_store, prob, value, attn_weights = agent.choose_action(observation,global_state)
             state_to_store = observation
+            global_state_to_store = global_state  # <<< 保存当前的上帝视角
 
         # 2. 执行动作
         action_dict = pack_action_into_dict(env_action_flat, attn_weights)
@@ -122,11 +124,12 @@ for i_episode in range(MAX_EXE_NUM):
         env.reward_calculator.set_attention_blending_alpha(current_alpha)
 
         observation, reward, terminated, truncated, info = env.step(action_dict)
+        global_state = info["global_state"]  # <<< 获取下一步的上帝视角
         done = terminated or truncated
         episode_reward += reward
 
         # 3. 存储经验
-        agent.store_experience(state_to_store, action_to_store, prob, value, reward, done, attn_weights=attn_weights)
+        agent.store_experience(state_to_store, global_state_to_store, action_to_store, prob, value, reward, done, attn_weights=attn_weights)
 
         global_step += 1
         step += 1
@@ -169,7 +172,9 @@ for i_episode in range(MAX_EXE_NUM):
         # 如果最后一个回合是因为 done (撞击/被击落/成功) 结束，其实这个值会被 mask 掉，不影响
         # 如果是因为 truncated (超时) 结束，这个值很重要
 
-        last_observation_tensor = torch.as_tensor(observation, dtype=torch.float32, device=CRITIC_PARA.device)
+        # last_observation_tensor = torch.as_tensor(observation, dtype=torch.float32, device=CRITIC_PARA.device)
+        # ✅ 修正后 (必须传入 global_state)
+        last_observation_tensor = torch.as_tensor(global_state, dtype=torch.float32, device=CRITIC_PARA.device)
 
         with torch.no_grad():
             if last_observation_tensor.dim() == 1:
@@ -213,7 +218,8 @@ for i_episode in range(MAX_EXE_NUM):
             current_test_seed = AGENTPARA.RANDOM_SEED + TEST_SEED_OFFSET + i_episode
 
             # 显式传入计算好的种子
-            eval_obs, _ = env.reset(seed=current_test_seed)
+            eval_obs, eval_info = env.reset(seed=current_test_seed)
+            eval_global_state = eval_info["global_state"]  # <<< 新增：提取评估阶段的上帝视角
 
             print(f"    (使用测试种子: {current_test_seed})")  # 打印出来方便检查
 
@@ -227,11 +233,12 @@ for i_episode in range(MAX_EXE_NUM):
             eval_reward_sum = 0
             for _ in range(MAX_STEP):
                 # 确定性策略
-                eval_action_flat, _, _, _, eval_attn_weights = agent.choose_action(eval_obs, deterministic=True)
+                eval_action_flat, _, _, _, eval_attn_weights = agent.choose_action(eval_obs, eval_global_state,deterministic=True)
 
                 eval_action_dict = pack_action_into_dict(eval_action_flat, eval_attn_weights)
 
-                eval_obs, eval_reward, eval_terminated, eval_truncated, _ = env.step(eval_action_dict)
+                eval_obs, eval_reward, eval_terminated, eval_truncated, eval_step_info = env.step(eval_action_dict)
+                eval_global_state = eval_step_info["global_state"]  # <<< 新增：更新上帝视角状态
                 eval_done = eval_terminated or eval_truncated
 
                 eval_reward_sum += eval_reward

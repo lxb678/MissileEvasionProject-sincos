@@ -61,7 +61,7 @@ class Actor(Module):
 
         # 1. 共享基座网络 (Shared Base)
         # 假设 model_layer_dim = [256, 256, 256]，我们在第2层后拆分
-        split_point = 2
+        split_point = 1 #2
         base_dims = ACTOR_PARA.model_layer_dim[:split_point]
 
         # 离散塔楼使用剩余的层配置
@@ -158,15 +158,15 @@ class Actor(Module):
         num_groups_logits_masked = num_groups_logits.clone()
         inter_interval_logits_masked = inter_interval_logits.clone()
 
-        if torch.any(no_trigger_mask):
-            INF = 1e6
-            NEG_INF = -1e6
-            for logits_tensor in [salvo_size_logits_masked, num_groups_logits_masked, inter_interval_logits_masked]:
-                logits_sub = logits_tensor[no_trigger_mask]
-                if logits_sub.numel() > 0:
-                    logits_sub[:] = NEG_INF  # 全部置为极小
-                    logits_sub[:, 0] = INF  # 仅 index=0 置为极大 (默认值)
-                    logits_tensor[no_trigger_mask] = logits_sub
+        # if torch.any(no_trigger_mask):
+        #     INF = 1e6
+        #     NEG_INF = -1e6
+        #     for logits_tensor in [salvo_size_logits_masked, num_groups_logits_masked, inter_interval_logits_masked]:
+        #         logits_sub = logits_tensor[no_trigger_mask]
+        #         if logits_sub.numel() > 0:
+        #             logits_sub[:] = NEG_INF  # 全部置为极小
+        #             logits_sub[:, 0] = INF  # 仅 index=0 置为极大 (默认值)
+        #             logits_tensor[no_trigger_mask] = logits_sub
 
         # 7. 创建分布对象
         distributions = {
@@ -302,13 +302,32 @@ class PPO_discrete(object):
             num_groups_action = sampled_actions_dict['num_groups']
             inter_interval_action = sampled_actions_dict['inter_interval']
 
-            # 3. 计算离散动作总对数概率
-            log_prob_disc = (dists['trigger'].log_prob(trigger_action) +
-                             dists['salvo_size'].log_prob(salvo_size_action) +
-                             dists['num_groups'].log_prob(num_groups_action) +
-                             dists['inter_interval'].log_prob(inter_interval_action))
+            # ================= [修改开始] =================
+            # 3. 计算离散动作总对数概率 (Ratio 一致性修复)
 
-            total_log_prob = log_prob_disc
+            # A. Trigger 的 LogProb 永远要算
+            log_prob_trigger = dists['trigger'].log_prob(trigger_action)
+
+            # B. 子动作 LogProb 总和
+            sub_log_prob_sum = (dists['salvo_size'].log_prob(salvo_size_action) +
+                                dists['num_groups'].log_prob(num_groups_action) +
+                                dists['inter_interval'].log_prob(inter_interval_action))
+
+            # C. 🌟 灵魂掩码 🌟：如果 trigger=0，子动作概率不计入 (视为确定性，log_prob=0)
+            # 注意：trigger_action 是 float (0.0 或 1.0)
+            valid_sub_log_prob = sub_log_prob_sum * trigger_action
+
+            # D. 合并
+            total_log_prob = log_prob_trigger + valid_sub_log_prob
+            # ================= [修改结束] =================
+
+            # # 3. 计算离散动作总对数概率
+            # log_prob_disc = (dists['trigger'].log_prob(trigger_action) +
+            #                  dists['salvo_size'].log_prob(salvo_size_action) +
+            #                  dists['num_groups'].log_prob(num_groups_action) +
+            #                  dists['inter_interval'].log_prob(inter_interval_action))
+            #
+            # total_log_prob = log_prob_disc
 
             # 4. 准备存入 Buffer 的动作向量 (仅离散索引)
             action_to_store = torch.stack([
@@ -378,7 +397,7 @@ class PPO_discrete(object):
         adv_std = np.std(advantages)
         advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
-        train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'ratio': []}
+        train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'ratio': [], 'mean_entropy_trigger':[], 'mean_entropy_sub': []}
 
         for _ in range(self.ppo_epoch):
             for batch in self.buffer.generate_batches():
@@ -401,16 +420,67 @@ class PPO_discrete(object):
                 # 2. 新策略评估
                 new_dists = self.Actor(state)
 
-                # 3. 计算新 Log Prob (仅离散部分)
-                new_log_prob_disc = sum(
-                    new_dists[key].log_prob(discrete_actions_from_buffer[key])
-                    for key in discrete_actions_from_buffer
-                )
-                new_prob = new_log_prob_disc
+                # ================= [修改开始] =================
 
-                # 4. 计算熵
-                entropy_disc = sum(dist.entropy() for key, dist in new_dists.items())
-                total_entropy = entropy_disc.mean()
+                # --- 3. Ratio 计算 (带掩码) ---
+                actual_triggers = discrete_actions_from_buffer['trigger']  # Buffer 里的真实动作
+
+                # A. Trigger LogProb
+                new_log_prob_trigger = new_dists['trigger'].log_prob(actual_triggers)
+
+                # B. 子动作 LogProb (原始和)
+                sub_log_probs_raw = sum(
+                    new_dists[key].log_prob(discrete_actions_from_buffer[key])
+                    for key in discrete_actions_from_buffer if key != 'trigger'
+                )
+
+                # C. 🌟 灵魂掩码 (Ratio) 🌟
+                # 只有 Buffer 里记录开火了，子动作的概率变化才影响 Ratio
+                valid_sub_log_probs = sub_log_probs_raw * actual_triggers
+
+                # D. 总 LogProb
+                new_prob = new_log_prob_trigger + valid_sub_log_probs
+
+                # --- 4. 熵计算 (条件熵) ---
+
+                # A. Trigger 熵 (无条件计算)
+                entropy_trigger = new_dists['trigger'].entropy().mean()
+
+                # B. 子动作熵 (原始)
+                entropy_sub_raw = sum(
+                    dist.entropy() for key, dist in new_dists.items() if key != 'trigger'
+                )
+
+                # # C. 🌟 灵魂掩码 (Entropy) 🌟
+                # # 只有实际开火的样本，才奖励子动作的多样性
+                # num_triggered = actual_triggers.sum()
+                # if num_triggered > 0:
+                #     mean_entropy_sub = (entropy_sub_raw * actual_triggers).sum() / num_triggered
+                # else:
+                #     mean_entropy_sub = torch.tensor(0.0).to(**ACTOR_PARA.tpdv)
+
+                # 3. 🌟 灵魂掩码 (Entropy) 🌟：改为全局平均
+                # 逻辑：(子动作熵 * 真实开火掩码).mean()
+                # 效果：不开火的时候熵贡献为0，分母为总步数 (Batch * Seq)。
+                # 结果：如果开火很稀疏，这个值会非常小（这是正常的）。
+                mean_entropy_sub = (entropy_sub_raw * actual_triggers).mean()
+
+                # D. 总熵
+                # 可以给 trigger 熵更高的权重，鼓励尝试开火
+                total_entropy = entropy_trigger + mean_entropy_sub #* 0.1
+
+                # ================= [修改结束] =================
+
+                # # 3. 计算新 Log Prob (仅离散部分)
+                # new_log_prob_disc = sum(
+                #     new_dists[key].log_prob(discrete_actions_from_buffer[key])
+                #     for key in discrete_actions_from_buffer
+                # )
+                # new_prob = new_log_prob_disc
+                #
+                # # 4. 计算熵
+                # entropy_disc = sum(dist.entropy() for key, dist in new_dists.items())
+                # total_entropy = entropy_disc.mean()
 
                 # 5. PPO Loss
                 log_ratio = new_prob - old_prob
@@ -438,6 +508,8 @@ class PPO_discrete(object):
                 # 记录
                 train_info['critic_loss'].append(critic_loss.item())
                 train_info['actor_loss'].append(actor_loss.item())
+                train_info['mean_entropy_trigger'].append(entropy_trigger.item())
+                train_info['mean_entropy_sub'].append(mean_entropy_sub.item())
                 train_info['dist_entropy'].append(total_entropy.item())
                 train_info['ratio'].append(ratio.mean().item())
 

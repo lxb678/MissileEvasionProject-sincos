@@ -1,5 +1,15 @@
 import numpy as np
 import random
+import sys
+import os
+
+# 获取当前脚本的绝对路径，并向上推导到项目根目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# main_evade_fuza -> main -> Interference_code -> 规避导弹项目sincos
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构雅可比修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
 #from env.AirCombatEnv import *
@@ -65,7 +75,7 @@ set_seed(env)
 # 假设您的模型保存在 "../../test/test_evade"
 # model_path = "../../test/test_evade" # 或者您训练模型时使用的其他路径
 # model_path = r"D:\code\规避导弹项目\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPO_2026-01-23_23-59-40"
+model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPO_2026-03-06_18-35-53"
 agent = PPO_continuous(load_able=LOAD_ABLE, model_dir_path=model_path)
 
 success_num = 0

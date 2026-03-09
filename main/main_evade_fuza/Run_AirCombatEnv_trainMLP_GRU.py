@@ -1,6 +1,16 @@
 # --- START OF FILE Run_AirCombatEnv_train.py ---
 
 import random
+import sys
+import os
+
+# 获取当前脚本的绝对路径，并向上推导到项目根目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# main_evade_fuza -> main -> Interference_code -> 规避导弹项目sincos
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
 from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *

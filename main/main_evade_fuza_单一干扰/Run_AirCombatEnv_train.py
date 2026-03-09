@@ -68,7 +68,7 @@ global_step = 0
 success_num = 0
 MAX_EXE_NUM = 20000  # 最大训练回合数
 MAX_STEP = 10000  # 每回合最大步数
-UPDATE_CYCLE = 5 #10  # 每多少回合训练一次
+UPDATE_CYCLE = 10  # 每多少回合训练一次
 
 eval_reward_buffer = []
 
@@ -129,7 +129,7 @@ for i_episode in range(MAX_EXE_NUM):
         writer.add_scalar('Episode/Success_Rate', rate, i_episode)
 
         # 保存高成功率模型
-        if rate >= 0.90:
+        if rate >= 0.80:
             agent.save(prefix=f"Succ_{int(rate * 100)}")
 
         success_num = 0

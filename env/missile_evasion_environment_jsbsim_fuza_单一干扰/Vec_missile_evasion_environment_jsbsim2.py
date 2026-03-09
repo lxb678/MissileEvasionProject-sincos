@@ -66,15 +66,15 @@ class AirCombatEnv(gym.Env):
 
         # --- 3. 仿真步长参数 ---
         self.dt_normal = dt  # 大步长
-        self.dt_small = dt  # 小步长
+        self.dt_small = dt #0.02 #dt  # 小步长
         self.dt_flare = dt  # 投放时的步长
-        self.R_switch = 500  # 切换精细步长的距离阈值
-        self.dt_dec = 0.2  # 决策间隔 (RL动作更新频率)
+        self.R_switch = 400  # 切换精细步长的距离阈值
+        self.dt_dec = 0.5 #0.4 #0.2  # 决策间隔 (RL动作更新频率)
         self.physical_dt = dt  # 物理仿真基准步长
 
         # --- 4. 导引头与环境参数 ---
         self.t_end = 60.0
-        self.R_kill = 12.0
+        self.R_kill = 15.0 #12.0
         self.D_max = 30000.0
         self.Angle_IR_rad = np.deg2rad(90)
         self.omega_max_rad_s = np.deg2rad(90.0)
@@ -266,7 +266,7 @@ class AirCombatEnv(gym.Env):
         release_flare_program = (trigger_cmd_idx == 1)
         if release_flare_program:
             # 假设 intra_interval 固定为 0.04s (与 PPO 定义一致)
-            intra_interval = 0.04
+            intra_interval = 0.04 #0.05 #0.04
             self._execute_flare_program(salvo_size_idx, intra_interval, num_groups_idx, inter_interval_idx)
 
         # --- 3. 准备物理循环 ---
@@ -274,8 +274,18 @@ class AirCombatEnv(gym.Env):
         self.prev_missile_state = self.missile.state_vector.copy()
         self.prev_R_rel = np.linalg.norm(self.aircraft.pos - self.missile.pos)
 
-        # 确定循环步长 (简单处理，统一用 dt_dec 拆分为 physical_dt)
-        num_steps = int(round(self.dt_dec / self.physical_dt))
+        # # 确定循环步长 (简单处理，统一用 dt_dec 拆分为 physical_dt)
+        # num_steps = int(round(self.dt_dec / self.physical_dt))
+
+        # --- 4. 物理仿真循环 (逻辑不变) ---
+        R_rel_start = self.prev_R_rel
+        if R_rel_start < self.R_switch:
+            num_steps, step_dt = int(round(self.dt_dec / self.dt_small)), self.dt_small
+            # print("进入small")
+        elif self.flare_manager.schedule:  # 检查是否有待投放的计划
+            num_steps, step_dt = int(round(self.dt_dec / self.dt_flare)), self.dt_flare
+        else:
+            num_steps, step_dt = int(round(self.dt_dec / self.dt_normal)), self.dt_normal
 
         for i in range(num_steps):
             # ================= PID 飞行控制接管核心 =================
@@ -285,7 +295,7 @@ class AirCombatEnv(gym.Env):
             # 2. 计算 PID 输出
             # output: [aileron, elevator, rudder, throttle] (顺序根据 F16PIDController 决定)
             # 注意：flight_output 内部已包含姿态保持和机动逻辑
-            pid_output = self.pid_controller.flight_output(pid_input_obs, dt=self.physical_dt)
+            pid_output = self.pid_controller.flight_output(pid_input_obs, dt=step_dt)#self.physical_dt)
 
             # 3. 映射到 Aircraft 类需要的控制顺序
             # F16PIDController 返回: [aileron(0), elevator(1), rudder(2), throttle(3)]
@@ -299,7 +309,7 @@ class AirCombatEnv(gym.Env):
             # ======================================================
 
             # 执行物理更新
-            self.run_one_step(self.physical_dt, aircraft_action)
+            self.run_one_step(step_dt, aircraft_action)#self.physical_dt
 
             if self.done:
                 break
@@ -758,6 +768,89 @@ class AirCombatEnv(gym.Env):
     #         if self.tacview_enabled and not self.tacview.tacview_final_frame_sent:
     #             self.tacview.stream_explosion(t_exp_global, ac_pos_exp, ms_pos_exp)
 
+    # def _check_fuze_condition(self, dt):
+    #     """
+    #     (单导弹 V4 - 终极几何修正版)
+    #     检查引信条件。
+    #     核心改进：如果引信触发时导弹仍在高速接近，直接计算【几何点到直线距离】作为最终脱靶量。
+    #     """
+    #     # 1. 历史数据检查
+    #     if len(self.missile_history) < 2:
+    #         return
+    #
+    #     # 2. 获取位置矢量
+    #     T2 = self.aircraft_history[-1][:3]
+    #     T1 = self.aircraft_history[-2][:3]
+    #     M2 = self.missile_history[-1][3:6]
+    #     M1 = self.missile_history[-2][3:6]
+    #
+    #     R_rel_now = np.linalg.norm(T2 - M2)
+    #     R_rel_prev = np.linalg.norm(T1 - M1)
+    #
+    #     # 3. 🚀 性能优化：远距离跳过
+    #     if min(R_rel_now, R_rel_prev) > 40.0:
+    #         return
+    #
+    #     # 4. 准备矢量运算
+    #     A = T1 - M1  # 初始相对位置
+    #     B = (T2 - T1) - (M2 - M1)  # 相对位移向量
+    #     B_dot_B = np.dot(B, B)
+    #
+    #     # 5. 计算数学上的极值点 tau_min (无约束)
+    #     #    tau_min 代表：从 T1/M1 时刻开始，经过多少个 dt 时间，两者距离最近
+    #     if B_dot_B < 1e-6:
+    #         tau_min = 0.0
+    #     else:
+    #         tau_min = -np.dot(A, B) / B_dot_B
+    #
+    #     # 6. 计算当前步长内的实际最小距离 (物理仿真层面的碰撞检测)
+    #     tau_clamped = np.clip(tau_min, 0.0, 1.0)
+    #     min_dist_in_step = np.linalg.norm(A + tau_clamped * B)
+    #
+    #     # 7. 命中判定
+    #     if min_dist_in_step < self.R_kill:
+    #         self.done = True
+    #         self.success = False
+    #         self.missile_exploded = True
+    #
+    #         # ==========================================================
+    #         # <<< 核心修正逻辑 >>>
+    #         # 即使判定了命中，我们也要看看"如果继续飞，会不会更近？"
+    #         # 如果 tau_min > 1.0，说明最近点其实在"未来"。
+    #         # 我们直接用数学公式算出那个"未来"的最近距离，作为惩罚依据。
+    #         # ==========================================================
+    #         if tau_min > 1.0:
+    #             # 安全限制：只预测未来一小段时间内的 (例如 0.5秒内, dt=0.02, tau~25)
+    #             # 防止平行飞行时的数值不稳定导致预测到无限远
+    #             if tau_min < 25.0:
+    #                 theoretical_min_dist = np.linalg.norm(A + tau_min * B)
+    #                 self.miss_distance = theoretical_min_dist
+    #                 # print(f"    (修正) 命中时仍在接近，使用几何极值: {min_dist_in_step:.2f}m -> {theoretical_min_dist:.2f}m")
+    #             else:
+    #                 self.miss_distance = min_dist_in_step
+    #         else:
+    #             # 最近点就在这一帧内，或者是已经飞过头了(远离中)，直接用算出来的值
+    #             self.miss_distance = min_dist_in_step
+    #
+    #         # 打印最终结果供调试
+    #         print(f">>> 引信引爆！最终判定脱靶量 = {self.miss_distance:.2f} m")
+    #
+    #         # --- Tacview 爆炸效果处理 ---
+    #         # 视觉上我们依然在引信触发的那一刻(tau_clamped)爆炸，这样看起来才自然
+    #         if self.tacview_enabled and self.tacview.is_connected and not self.tacview.tacview_final_frame_sent:
+    #             t1_global = self.tacview_global_time - dt
+    #             explosion_time_global = t1_global + tau_clamped * dt
+    #
+    #             aircraft_pos_at_explosion = T1 + tau_clamped * (T2 - T1)
+    #             missile_pos_at_explosion = M1 + tau_clamped * (M2 - M1)
+    #
+    #             self.tacview.stream_explosion(
+    #                 t_explosion=explosion_time_global,
+    #                 aircraft_pos=aircraft_pos_at_explosion,
+    #                 missile_pos=missile_pos_at_explosion
+    #             )
+    #             self.tacview.tacview_final_frame_sent = True
+
     def _check_fuze_condition(self, dt):
         if len(self.missile_history) < 2: return
         T2 = self.aircraft_history[-1][:3]
@@ -773,7 +866,7 @@ class AirCombatEnv(gym.Env):
 
         # 2. 区间插值判定
         R_rel_prev = np.linalg.norm(T1 - M1)
-        if min(R_rel_prev, R_rel_now) > 100: return
+        if min(R_rel_prev, R_rel_now) > 20: return
 
         A = T1 - M1
         B = (T2 - T1) - (M2 - M1)
@@ -796,7 +889,7 @@ class AirCombatEnv(gym.Env):
             # 修正 Tacview 时间
             t_exp_global = self.tacview_global_time - dt + tau_check * dt
 
-            print(f">>> [步间引信] 判定命中！插值最小距离: {min_dist:.2f} m")  # <--- 新增这行
+            # print(f">>> [步间引信] 判定命中！插值最小距离: {min_dist:.2f} m")  # <--- 新增这行
 
             self.done = True
             self.success = False
@@ -816,7 +909,7 @@ class AirCombatEnv(gym.Env):
     #         self.tacview.stream_explosion(self.tacview_global_time, ac_pos, ms_pos)
 
     def _trigger_explosion(self, dist, ac_pos, ms_pos):
-        print(f">>> [引信触发] 判定命中！距离: {dist:.2f} m")  # <--- 新增这行
+        # print(f">>> [引信触发] 判定命中！距离: {dist:.2f} m")  # <--- 新增这行
         self.done = True
         self.success = False
         self.miss_distance = dist

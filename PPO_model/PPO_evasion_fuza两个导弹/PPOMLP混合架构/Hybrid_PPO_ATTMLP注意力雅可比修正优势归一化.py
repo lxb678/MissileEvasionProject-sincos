@@ -161,7 +161,7 @@ class Actor_CrossAttentionMLP(Module):
         # 新的输入 = aircraft_context (Embed) + missile1_embed (Embed) + missile2_embed (Embed)
         mlp_input_dim = ENTITY_EMBED_DIM * 2   #* (1 + NUM_MISSILES)  # 64 * 4 = 256
 
-        split_point = 2
+        split_point = 1 #2
         mlp_dims = ACTOR_PARA.model_layer_dim
         base_dims = mlp_dims[:split_point]
         tower_dims = mlp_dims[split_point:]
@@ -466,7 +466,7 @@ class Actor_CrossAttentionMLP(Module):
 
         # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
         # 只要不让它跑到 10 这种离谱的值就行
-        mu = torch.clamp(mu, -3.0, 3.0)
+        mu = torch.clamp(mu, -2.0, 2.0)
 
         all_disc_logits = self.discrete_head(discrete_features)
 
@@ -521,17 +521,17 @@ class Actor_CrossAttentionMLP(Module):
         num_groups_logits_masked = num_groups_logits.clone()
         inter_interval_logits_masked = inter_interval_logits.clone()
 
-        NEG_INF = -1e8
-        forced_salvo_logits = torch.full_like(salvo_size_logits_masked, NEG_INF)
-        forced_salvo_logits[..., 0] = 1.0
-        salvo_size_logits_masked = torch.where(no_trigger_mask, forced_salvo_logits, salvo_size_logits_masked)
-        forced_groups_logits = torch.full_like(num_groups_logits_masked, NEG_INF)
-        forced_groups_logits[..., 0] = 1.0
-        num_groups_logits_masked = torch.where(no_trigger_mask, forced_groups_logits, num_groups_logits_masked)
-        forced_interval_logits = torch.full_like(inter_interval_logits_masked, NEG_INF)
-        forced_interval_logits[..., 0] = 1.0
-        inter_interval_logits_masked = torch.where(no_trigger_mask, forced_interval_logits,
-                                                   inter_interval_logits_masked)
+        # NEG_INF = -1e8
+        # forced_salvo_logits = torch.full_like(salvo_size_logits_masked, NEG_INF)
+        # forced_salvo_logits[..., 0] = 1.0
+        # salvo_size_logits_masked = torch.where(no_trigger_mask, forced_salvo_logits, salvo_size_logits_masked)
+        # forced_groups_logits = torch.full_like(num_groups_logits_masked, NEG_INF)
+        # forced_groups_logits[..., 0] = 1.0
+        # num_groups_logits_masked = torch.where(no_trigger_mask, forced_groups_logits, num_groups_logits_masked)
+        # forced_interval_logits = torch.full_like(inter_interval_logits_masked, NEG_INF)
+        # forced_interval_logits[..., 0] = 1.0
+        # inter_interval_logits_masked = torch.where(no_trigger_mask, forced_interval_logits,
+        #                                            inter_interval_logits_masked)
 
         log_std = torch.clamp(self.log_std_param, self.log_std_min, self.log_std_max)
         std = torch.exp(log_std).expand_as(mu)
@@ -1032,10 +1032,45 @@ class PPO_continuous(object):
                 else:
                     sampled_actions_dict[key] = dist.sample()
 
-            log_prob_disc = sum(dists[key].log_prob(act) for key, act in sampled_actions_dict.items())
+            # --- 显式提取动作 (防止字典乱序) ---
+            trigger_action = sampled_actions_dict['trigger']  # 注意：这里你的key是 flare_trigger
+            salvo_size_action = sampled_actions_dict['salvo_size']
+            num_groups_action = sampled_actions_dict['num_groups']
+            inter_interval_action = sampled_actions_dict['inter_interval']
+
+            # ================= [修改开始：Ratio 一致性修复] =================
+
+            # 1. Trigger 的 Log Prob 永远要算
+            log_prob_trigger = dists['trigger'].log_prob(trigger_action)
+
+            # 2. 计算所有子动作的 Log Prob 总和
+            sub_log_prob_sum = (dists['salvo_size'].log_prob(salvo_size_action) +
+                                dists['num_groups'].log_prob(num_groups_action) +
+                                dists['inter_interval'].log_prob(inter_interval_action))
+
+            # 3. 🌟 灵魂掩码 🌟：如果 trigger=0，子动作概率不计入 (即 log_prob = 0)
+            # 注意：trigger_action 是 float (0.0 或 1.0)
+            valid_sub_log_prob = sub_log_prob_sum * trigger_action
+
+            # 4. 合并离散部分
+            log_prob_disc = log_prob_trigger + valid_sub_log_prob
+
+            # 5. 总 Log Prob
             total_log_prob = log_prob_cont + log_prob_disc
 
-            action_disc_to_store = torch.stack(list(sampled_actions_dict.values()), dim=-1).float()
+            # ================= [修改结束] =================
+
+            # --- 显式堆叠存入 Buffer 的动作 (顺序必须与 Learn 解析一致) ---
+            # 顺序: [Trigger, Salvo, Groups, Interval]
+            action_disc_to_store = torch.stack([
+                trigger_action, salvo_size_action,
+                num_groups_action, inter_interval_action
+            ], dim=-1).float()
+
+            # log_prob_disc = sum(dists[key].log_prob(act) for key, act in sampled_actions_dict.items())
+            # total_log_prob = log_prob_cont + log_prob_disc
+            # action_disc_to_store = torch.stack(list(sampled_actions_dict.values()), dim=-1).float()
+
             action_to_store = torch.cat([u, action_disc_to_store], dim=-1)
             env_action_cont = self.scale_action(action_cont_tanh)
             final_env_action_tensor = torch.cat([env_action_cont, action_disc_to_store], dim=-1)
@@ -1133,7 +1168,7 @@ class PPO_continuous(object):
         # =======================================================================
 
         train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'entropy_cont': [], 'adv_targ': [],
-                      'ratio': []}
+                      'ratio': [],'mean_entropy_trigger': [], 'mean_entropy_sub': []}
 
         # 3. PPO 更新循环
         for _ in range(self.ppo_epoch):
@@ -1167,46 +1202,113 @@ class PPO_continuous(object):
                 # Actor 返回分布和注意力权重 (权重此处只用于调试，不用于Loss)
                 new_dists, _ = self.Actor(state)
 
-                # ================= [雅可比修正与 LogProb 计算] =================
+                # ================= [修改开始：雅可比修正 + Ratio一致性 + 条件熵] =================
 
-                # --- A. 连续动作 Log Prob ---
-                # 1. 计算旧动作在高斯分布下的 log_prob
+                # --- A. 连续动作 Log Prob (保持不变) ---
                 log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
-
-                # 2. 计算雅可比修正项 (稳定公式)
                 correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
-
-                # 3. 得到最终 Log Prob
                 new_log_prob_cont = log_prob_u_buffer - correction_buffer
 
-                # --- B. 熵计算 (使用重采样技巧) ---
-                # 1. 基础高斯熵
+                # --- B. 离散动作 Log Prob (Ratio 一致性修复) ---
+                # 1. 提取 Buffer 中的真实开火情况
+                # 注意：这里要跟 choose_action 的存储顺序对应
+                actual_triggers = discrete_actions_from_buffer['trigger']
+
+                # 2. Trigger LogProb
+                new_log_prob_trigger = new_dists['trigger'].log_prob(actual_triggers)
+
+                # 3. 子动作 LogProb (原始和)
+                # 注意：Key 要对应 DISCRETE_DIMS 中的定义
+                sub_log_probs_raw = (
+                        new_dists['salvo_size'].log_prob(discrete_actions_from_buffer['salvo_size']) +
+                        new_dists['num_groups'].log_prob(discrete_actions_from_buffer['num_groups']) +
+                        new_dists['inter_interval'].log_prob(discrete_actions_from_buffer['inter_interval'])
+                )
+
+                # 4. 🌟 灵魂掩码 (Ratio) 🌟
+                valid_sub_log_probs = sub_log_probs_raw * actual_triggers
+
+                # 5. 合并 Log Prob
+                new_prob = new_log_prob_cont + new_log_prob_trigger + valid_sub_log_probs
+
+                # --- C. 熵计算 (条件熵逻辑) ---
+
+                # 1. 连续动作熵 (保持不变)
                 entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
-
-                # 2. 重采样当前策略动作
                 u_curr_sample = new_dists['continuous'].rsample()
-
-                # 3. 计算修正期望
                 correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
-
-                # 4. 得到最终熵
                 entropy_cont = entropy_base + correction_curr
 
-                # --- C. 离散动作 Log Prob ---
-                new_log_prob_disc = sum(
-                    new_dists[key].log_prob(discrete_actions_from_buffer[key])
-                    for key in discrete_actions_from_buffer
+                # 2. Trigger 熵 (无条件)
+                entropy_trigger = new_dists['trigger'].entropy()  # .mean() 在后面算
+
+                # 3. 子动作熵 (原始)
+                entropy_sub_raw = (
+                        new_dists['salvo_size'].entropy() +
+                        new_dists['num_groups'].entropy() +
+                        new_dists['inter_interval'].entropy()
                 )
 
-                # 合并 Log Prob
-                new_prob = new_log_prob_cont + new_log_prob_disc
-                # ==========================================================
+                # # 4. 🌟 灵魂掩码 (Entropy) 🌟：条件均值熵
+                # # 只有实际开火的样本，才奖励子动作的多样性
+                # num_triggered = actual_triggers.sum()
+                # if num_triggered > 0:
+                #     mean_entropy_sub = (entropy_sub_raw * actual_triggers).sum() / num_triggered
+                # else:
+                #     mean_entropy_sub = torch.tensor(0.0).to(**ACTOR_PARA.tpdv)
 
-                # 计算总熵
-                entropy_disc = sum(
-                    dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
-                )
-                total_entropy = (entropy_cont.mean() + entropy_disc.mean())
+                # 3. 🌟 灵魂掩码 (Entropy) 🌟：改为全局平均
+                # 逻辑：(子动作熵 * 真实开火掩码).mean()
+                # 效果：不开火的时候熵贡献为0，分母为总步数 (Batch * Seq)。
+                # 结果：如果开火很稀疏，这个值会非常小（这是正常的）。
+                mean_entropy_sub = (entropy_sub_raw * actual_triggers).mean()
+
+                # 5. 总熵计算
+                # 连续动作取平均 + Trigger平均 + 子动作条件平均
+                total_entropy = entropy_cont.mean() + entropy_trigger.mean() + mean_entropy_sub #* 0.1
+
+                # ================= [修改结束] =================
+
+                # # ================= [雅可比修正与 LogProb 计算] =================
+                #
+                # # --- A. 连续动作 Log Prob ---
+                # # 1. 计算旧动作在高斯分布下的 log_prob
+                # log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
+                #
+                # # 2. 计算雅可比修正项 (稳定公式)
+                # correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
+                #
+                # # 3. 得到最终 Log Prob
+                # new_log_prob_cont = log_prob_u_buffer - correction_buffer
+                #
+                # # --- B. 熵计算 (使用重采样技巧) ---
+                # # 1. 基础高斯熵
+                # entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
+                #
+                # # 2. 重采样当前策略动作
+                # u_curr_sample = new_dists['continuous'].rsample()
+                #
+                # # 3. 计算修正期望
+                # correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
+                #
+                # # 4. 得到最终熵
+                # entropy_cont = entropy_base + correction_curr
+                #
+                # # --- C. 离散动作 Log Prob ---
+                # new_log_prob_disc = sum(
+                #     new_dists[key].log_prob(discrete_actions_from_buffer[key])
+                #     for key in discrete_actions_from_buffer
+                # )
+                #
+                # # 合并 Log Prob
+                # new_prob = new_log_prob_cont + new_log_prob_disc
+                # # ==========================================================
+                #
+                # # 计算总熵
+                # entropy_disc = sum(
+                #     dist.entropy() for key, dist in new_dists.items() if key != 'continuous'
+                # )
+                # total_entropy = (entropy_cont.mean() + entropy_disc.mean())
 
                 # 计算 Ratio
                 log_ratio = new_prob - old_prob
@@ -1252,6 +1354,9 @@ class PPO_continuous(object):
                 train_info['actor_loss'].append(actor_loss.item())
                 train_info['dist_entropy'].append(total_entropy.item())
                 train_info['entropy_cont'].append(entropy_cont.mean().item())
+                # 新增：记录子熵
+                train_info['mean_entropy_trigger'].append(entropy_trigger.mean().item())
+                train_info['mean_entropy_sub'].append(mean_entropy_sub.item())
                 train_info['adv_targ'].append(advantage.mean().item())
                 train_info['ratio'].append(ratio.mean().item())
 

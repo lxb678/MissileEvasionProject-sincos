@@ -18,13 +18,13 @@ class RewardCalculator:
 
     def __init__(self):
         # --- 所有超参数保持不变 ---
-        self.W = 20
-        self.U = -20
+        self.W = 6 #5 #10 #20
+        self.U = -10 #-20
 
         # <<< 新增 >>>: 单枚导弹成功规避的补偿奖励
         # 即使任务失败，每躲过一枚导弹，惩罚减少 5.0
         # 逻辑: 2枚导弹，全中=-20，躲过1枚=-10，全躲过=SUCCESS(+20)
-        self.PARTIAL_EVASION_BONUS = 10.0
+        self.PARTIAL_EVASION_BONUS = 5.0
 
         # self.SAFE_ALTITUDE_M = 3000.0
         # --- 所有超参数 ---
@@ -66,10 +66,20 @@ class RewardCalculator:
 
         # <<< 新增：定义关注无效目标的惩罚值 >>>
         self.PENALTY_FOR_ATTENDING_INACTIVE = -1.0  # 这是一个可以调整的超参数
+        # [新增] 能量保持奖励相关的状态变量
+        self.initial_specific_energy = None
+        # --- [修改这里] ---
+        # [修改] 能量保持奖励相关的状态变量
+        self.prev_energy = None  # <<< 改为记录上一时刻的能量
 
     def reset(self):
         """为新回合重置状态变量。"""
         self.history.clear()
+        # [新增] 重置初始能量记录
+        self.initial_specific_energy = None
+        # ---[修改这里] ---
+        # [修改] 重置能量记录
+        self.prev_energy = None  # <<< 回合开始时重置为None
 
     # <<< 新增 >>>: 用于在外部更新 alpha 的接口
     def set_attention_blending_alpha(self, alpha: float):
@@ -86,43 +96,111 @@ class RewardCalculator:
     #     else:
     #         return self.U
 
-    # <<< 核心修改：基于标志位的稀疏奖励 >>>
-    def get_sparse_reward(self, success: bool, missiles: List[Missile]) -> float:
-        """
-        计算稀疏奖励。
-        :param success: 回合是否判定为完全成功
-        :param missiles: 导弹对象列表 (检查 terminated 和 caused_hit 标志)
-        :return: 最终奖励值
-        """
-        if success:
-            # 这里的 success 是 environment 判定的（通常意味着所有导弹terminated且未命中）
-            return self.W
-        else:
-            # --- 失败情况 (被命中 或 撞地) ---
-            total_reward = self.U  # 基础惩罚 -20
+    # # <<< 核心修改：基于标志位的稀疏奖励 >>>
+    # def get_sparse_reward(self, success: bool, missiles: List[Missile]) -> float:
+    #     """
+    #     计算稀疏奖励。
+    #     :param success: 回合是否判定为完全成功
+    #     :param missiles: 导弹对象列表 (检查 terminated 和 caused_hit 标志)
+    #     :return: 最终奖励值
+    #     """
+    #     if success:
+    #         # 这里的 success 是 environment 判定的（通常意味着所有导弹terminated且未命中）
+    #         return self.W
+    #     else:
+    #         # --- 失败情况 (被命中 或 撞地) ---
+    #         total_reward = self.U  # 基础惩罚 -20
+    #
+    #         # 计算补偿：统计有多少枚导弹是被成功“耗死”或“躲过”的
+    #         evaded_count = 0
+    #         for m in missiles:
+    #             # 条件1: 导弹已经停止活动 (terminated == True)
+    #             # 条件2: 导弹不是导致坠机的凶手 (没有 caused_hit 属性 或 为 False)
+    #             is_dead = m.terminated
+    #             is_killer = getattr(m, 'caused_hit', False)
+    #
+    #             if is_dead and not is_killer:
+    #                 evaded_count += 1
+    #
+    #         # 添加补偿 (每躲过一枚加 5 分)
+    #         bonus = evaded_count * self.PARTIAL_EVASION_BONUS  # 建议设为 5.0
+    #
+    #         total_reward += bonus
+    #
+    #         # 打印调试信息（可选）
+    #         # if evaded_count > 0:
+    #         #     print(f"[Reward] 任务失败，但成功规避了 {evaded_count} 枚导弹。总分: {min(total_reward, -5.0)}")
+    #
+    #         # 同样限制最高分为 -5.0，保证失败永远比成功分低
+    #         return min(total_reward, -5.0)
 
-            # 计算补偿：统计有多少枚导弹是被成功“耗死”或“躲过”的
+    # <<< 核心修改：基于连续脱靶量的多导弹稀疏奖励 >>>
+    def get_sparse_reward(self, success: bool, missiles: List[Missile], closest_distances: List[float],
+                          R_kill: float) -> float:
+        """
+        (多导弹连续脱靶量改进版) 根据最终脱靶量计算回合结束时的稀疏奖励。
+        提供平滑的梯度，支持多导弹的部分规避补偿。
+        """
+        # 防止异常值
+        if not closest_distances:
+            return self.U
+
+        if success:
+            # ==========================================
+            # 1. 完全成功逃逸区 (Miss All)
+            # ==========================================
+            base_reward = self.W  # 基础成功奖励 (+20)
+
+            total_safety_bonus = 0.0
+            # 动态分配满分奖励：假如有2枚导弹，满分额外奖励20分，则每枚贡献10分
+            max_bonus_per_missile = 4.0 / len(missiles)
+
+            for dist in closest_distances:
+                extra_margin = max(0.0, dist - R_kill)
+                # 每枚导弹的安全裕度奖励 (指数衰减，防止无限刷分)
+                bonus = max_bonus_per_missile * (1.0 - math.exp(-extra_margin / 100.0))
+                total_safety_bonus += bonus
+
+            # print("成功奖励: ", base_reward + total_safety_bonus)
+
+            # 最终奖励：基础分 + 每枚导弹的安全分累加
+            return base_reward + total_safety_bonus
+
+        else:
+            # ==========================================
+            # 2. 失败区 (Hit or Crash)
+            # ==========================================
+            total_reward = self.U  # 基础失败惩罚 (-50)
+
             evaded_count = 0
-            for m in missiles:
-                # 条件1: 导弹已经停止活动 (terminated == True)
-                # 条件2: 导弹不是导致坠机的凶手 (没有 caused_hit 属性 或 为 False)
+            killer_miss_distance = 0.0
+
+            for m, dist in zip(missiles, closest_distances):
                 is_dead = m.terminated
                 is_killer = getattr(m, 'caused_hit', False)
 
+                # 统计成功“耗死”或躲过的导弹数量
                 if is_dead and not is_killer:
                     evaded_count += 1
 
-            # 添加补偿 (每躲过一枚加 5 分)
-            bonus = evaded_count * self.PARTIAL_EVASION_BONUS  # 建议设为 5.0
+                # 提取出那枚真正把你击落的导弹的脱靶量
+                if is_killer:
+                    killer_miss_distance = dist
 
-            total_reward += bonus
+            # --- 补偿 A: 局部成功奖励 ---
+            # 假设2枚导弹躲过了1枚，这1枚给你提供额外的存活补偿分 (例如 +25分)
+            partial_bonus = evaded_count * self.PARTIAL_EVASION_BONUS
 
-            # 打印调试信息（可选）
-            # if evaded_count > 0:
-            #     print(f"[Reward] 任务失败，但成功规避了 {evaded_count} 枚导弹。总分: {min(total_reward, -5.0)}")
+            # # --- 补偿 B: 致命导弹的挽回分 (连续脱靶量梯度) ---
+            # # 鼓励智能体“即使死，也要死得离导弹远一点”
+            # max_recovery = 15.0  # 挽回分上限
+            # saving_grace = max_recovery * (killer_miss_distance / R_kill)
 
-            # 同样限制最高分为 -5.0，保证失败永远比成功分低
-            return min(total_reward, -5.0)
+            total_reward += partial_bonus #+ saving_grace)
+            # print("失败惩罚",total_reward)
+
+            # 强制封顶限制：失败的总分绝对不能超过 -5.0，保证其永远低于成功的最低分
+            return total_reward #min(total_reward, -5.0)
 
     # <<< 全新的 calculate_dense_reward 实现 >>>
     def calculate_dense_reward(self, aircraft: Aircraft, missiles: List[Missile],
@@ -263,6 +341,9 @@ class RewardCalculator:
         # reward_closing_velocity = 0.5 * self._reward_for_closing_velocity_change(aircraft, missile, dt=0.2)
         # reward_ata_rate = 1.0 * self._reward_for_los_rate(aircraft, missile, dt=0.2)
         # reward_flare_timing = 1.0 * self._compute_flare_timing_reward(flare_trigger_action, aircraft, missile) #去掉看效果
+        # <<< 新增：计算纯尾后姿态奖励 (权重 0.5) >>>
+        # reward_posture = 0.5 * self._compute_missile_posture_reward_pure_posture(missile, aircraft)
+        # reward_posture = 0.5 * self._compute_missile_posture_reward_sraam_beaming(missile, aircraft)  #纯三九
         reward_los_rate = 1.0 * self._reward_for_los_rate(aircraft, missile, dt=0.2)
         # 高G机动奖励可以与机动有效性（ATA Rate）相乘
         reward_high_g = 1.0 * self._reward_for_high_g_maneuver(aircraft)
@@ -271,7 +352,7 @@ class RewardCalculator:
         # # <<< 新增：调用分离加速度奖励 >>>
         # reward_separation_accel = 0.5 * self._reward_for_separation_acceleration(aircraft, missile)
 
-        return final_high_g_reward #+ reward_los_rate
+        return final_high_g_reward #+ reward_posture #+ reward_los_rate
 
     def _calculate_general_rewards(self, aircraft: Aircraft, flare_trigger_action: float,
                                    remaining_flares: int, total_flares: int,
@@ -283,7 +364,11 @@ class RewardCalculator:
         # reward_coordinated_turn = 0.5 * self._reward_for_coordinated_turn(aircraft, 0.2)  # 降低权重
         reward_punish_push_down = 0.5 * self._reward_for_punish_push_down(aircraft)
         # reward_speed = 0.5 * self._reward_for_maintaining_speed(aircraft)
-        reward_survivaltime = 0.5 #0.2  # 每步存活奖励
+        reward_survivaltime = 0.5 #0.4 #0.2 #0.5 #0.2  # 每步存活奖励
+        # <<< 新增：能量保持奖励 >>>
+        # 权重建议：0.5。
+        # 如果飞机能量掉得太快（例如做完机动就失速坠毁），可以将权重提高到 1.0
+        reward_energy_maintain = 10.0 * self._reward_for_energy_rate_simple(aircraft)
 
         return (
                 missile_related_reward +
@@ -293,8 +378,157 @@ class RewardCalculator:
                 # reward_coordinated_turn +
                 reward_punish_push_down +
                 # reward_speed +
-                reward_survivaltime
+                reward_survivaltime +
+                reward_energy_maintain  # <--- 加入总和
         )
+
+    def _reward_for_energy_rate_simple(self, aircraft: Aircraft) -> float:
+        """
+        极简版能量奖励：(当前能量 - 上一时刻能量) / 上一时刻能量
+        """
+        g = 9.81
+        altitude = max(0.0, aircraft.pos[1])  # 限制下限防bug
+        velocity = aircraft.velocity
+
+        # 1. 计算当前能量 (单位: J/kg)
+        current_energy = g * altitude + 0.5 * (velocity ** 2)
+
+        # 2. 捕获初始能量 (如果第一步，记录能量并返回 0)
+        if self.prev_energy is None:
+            self.prev_energy = current_energy
+            return 0.0
+
+        # 3. 防御性检查：防止极低空低速时除以 0 导致崩溃
+        if self.prev_energy < 1.0:
+            self.prev_energy = current_energy
+            return 0.0
+
+        # 4. 核心计算：(当前 - 之前) / 之前
+        energy_ratio = (current_energy - self.prev_energy) / self.prev_energy
+
+        # 5. 更新记录以备下一步使用
+        self.prev_energy = current_energy
+
+        return energy_ratio
+
+    def _reward_for_initial_energy_maintenance(self, aircraft: Aircraft) -> float:
+        """
+        (新增) 奖励相对于初始状态的能量保持。
+        目标：鼓励智能体在规避机动中，尽量减少能量损失，或者在规避后恢复能量。
+
+        计算公式：比能量 Es = 高度 + (速度^2 / 2g)
+        奖励值 = (当前能量 - 初始能量) / 初始能量
+        """
+        g = 9.81
+        altitude = aircraft.pos[1]
+        velocity = aircraft.velocity
+
+        # # 1. 计算当前的比能量 (Specific Energy)
+        # # 单位近似为米 (能量高度)
+        # current_energy = altitude + (velocity ** 2) / (2 * g)
+
+        # 使用您建议的公式 (J/kg)
+        current_energy = g * altitude + 0.5 * (velocity ** 2)
+
+        # 2. 捕获初始能量 (Lazy Initialization)
+        # 如果是回合的第一步，记录下当前的能量作为基准
+        if self.initial_specific_energy is None:
+            self.initial_specific_energy = current_energy
+            # 第一步没有变化，返回 0.0
+            return 0.0
+
+        # 3. 防止除零异常 (极低概率，但为了健壮性)
+        if self.initial_specific_energy < 1.0:
+            return 0.0
+
+        # 4. 计算能量变化率 (Ratio)
+        # 结果说明：
+        #   0.0  : 能量未变
+        #   -0.2 : 能量损失了 20%
+        #   +0.1 : 能量增加了 10%
+        energy_ratio = (current_energy - self.initial_specific_energy) / self.initial_specific_energy
+
+        # 5. 返回奖励
+        # 这里直接返回比率，是一个以负值为主的软约束。
+        # 如果你希望它更强硬，可以乘一个系数，或者使用 clip
+        # 例如: return np.clip(energy_ratio, -1.0, 0.5)
+
+        return energy_ratio
+    def _compute_missile_posture_reward_sraam_beaming(self, missile: Missile, aircraft: Aircraft):
+        """
+        (专为近距空空导弹定制) 纯三九线姿态奖励。
+        鼓励飞机将侧面（90度）对准导弹的飞行方向，最大化视线旋转率（LOS Rate），迫使导弹拉高G脱锁。
+        """
+        # 1. 获取速度向量
+        missile_v_vec = missile.get_velocity_vector()
+        aircraft_v_vec = aircraft.get_velocity_vector()
+
+        # 2. 计算速度向量夹角的余弦值
+        norm_product = np.linalg.norm(missile_v_vec) * np.linalg.norm(aircraft_v_vec) + 1e-6
+        angle_cos = np.dot(missile_v_vec, aircraft_v_vec) / norm_product
+        angle_cos = np.clip(angle_cos, -1.0, 1.0)
+
+        # 3. 计算与 90 度的夹角误差
+        angle_rad = np.arccos(angle_cos)
+        angle_deg = np.rad2deg(angle_rad)
+        angle_error_deg = abs(angle_deg - 90.0)
+
+        # 4. 核心奖励计算：使用高斯函数
+        # 当飞机完全侧对导弹 (误差0度) 时，奖励为 1.0
+        # 当飞机背对或面对导弹 (误差90度) 时，奖励接近 0.0
+        # self.ASPECT_REWARD_WIDTH_DEG 通常设为 30 到 45 度
+        reward = math.exp(-(angle_error_deg ** 2) / (2 * self.ASPECT_REWARD_WIDTH_DEG ** 2))
+
+        # --- 5. 安全检查：如果飞机成功绕到了导弹的后半球 ---
+        los_vec_m_to_a = aircraft.pos[0:3] - missile.pos[0:3]
+        norm_product_ata = np.linalg.norm(los_vec_m_to_a) * np.linalg.norm(missile_v_vec) + 1e-6
+        cos_ata = np.dot(los_vec_m_to_a, missile_v_vec) / norm_product_ata
+        cos_ata = np.clip(cos_ata, -1.0, 1.0)
+
+        # 如果导弹飞过头了（飞机在导弹后方），这是终极的安全态，直接给满分
+        is_aircraft_behind_missile = cos_ata < 0
+        if is_aircraft_behind_missile:
+            reward = 1.0
+
+        return reward
+
+    def _compute_missile_posture_reward_pure_posture(self, missile: Missile, aircraft: Aircraft):
+        """
+        (v5 - 纯姿态版) 计算导弹姿态奖励。
+        奖励完全由导弹与飞机速度矢量的夹角决定。
+        同时，保留了关键的“失锁”安全检查。
+        """
+        # 1. 获取速度向量
+        missile_v_vec = missile.get_velocity_vector()
+        aircraft_v_vec = aircraft.get_velocity_vector()
+
+        # 2. 计算速度向量夹角的余弦值 (核心姿态指标)
+        norm_product = np.linalg.norm(missile_v_vec) * np.linalg.norm(aircraft_v_vec) + 1e-6
+        angle_cos = np.dot(missile_v_vec, aircraft_v_vec) / norm_product
+        angle_cos = np.clip(angle_cos, -1.0, 1.0)
+
+        # 3. 基于姿态计算奖励
+        # - angle_cos > 0 (尾追/同向): 奖励为正
+        # - angle_cos < 0 (迎头/对冲): 奖励为负
+        reward = angle_cos
+
+        # --- 4. 核心修正：使用简化的几何条件进行安全检查 ---
+        # a) 计算导弹到飞机的视线矢量
+        los_vec_m_to_a = aircraft.pos[0:3] - missile.pos[0:3]
+
+        # b) 计算视线矢量与导弹速度矢量的夹角余弦值 (ATA)
+        norm_product_ata = np.linalg.norm(los_vec_m_to_a) * np.linalg.norm(missile_v_vec) + 1e-6
+        cos_ata = np.dot(los_vec_m_to_a, missile_v_vec) / norm_product_ata
+        cos_ata = np.clip(cos_ata, -1.0, 1.0)
+
+        # c) 判断飞机是否在导弹的后半球 (视为失锁)
+        is_aircraft_behind_missile = cos_ata < 0
+
+        if is_aircraft_behind_missile:
+            reward = 1.0
+
+        # 5. 返回最终计算出的奖励值
+        return reward * 1.0
 
     def _reward_for_los_rate(self, aircraft: Aircraft, missile: Missile, dt: float) -> float:
         """

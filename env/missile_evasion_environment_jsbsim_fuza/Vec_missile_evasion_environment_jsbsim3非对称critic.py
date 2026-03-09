@@ -291,8 +291,8 @@ class AirCombatEnv(gym.Env):
             self.tacview.stream_frame(0.0, self.aircraft, self.missile, [])
 
         # <<< GYMNASIUM CHANGE >>> 返回 observation 和一个空的 info 字典
-        observation = self._get_observation()
-        info = {}
+        observation,critic_state = self._get_observation()
+        info = {"global_state": critic_state}
 
         return observation, info
 
@@ -372,12 +372,13 @@ class AirCombatEnv(gym.Env):
             terminated = True  # 通常超时也算 terminated
             self.success = True
 
-        observation = self._get_observation()
+        observation, critic_state = self._get_observation()
         info = {}
         # 只有当回合真的结束时，才把最终信息放入 info 字典
         if terminated or truncated:
             # self.success 的值是在 _check_termination_conditions 中设置的
             info["success"] = self.success
+        info["global_state"] = critic_state
         # return self._get_observation(), reward, self.done, {}, {}
         return observation, reward, terminated, truncated, info
 
@@ -990,100 +991,149 @@ class AirCombatEnv(gym.Env):
 
     # --- (中文) 私有辅助方法 ---
 
-    def _get_observation(self) -> np.ndarray:
+    def _get_observation(self) -> tuple:
         """
-        <<< 核心修改: 去除clip，允许归一化值超出[-1, 1]，距离模糊化 >>>
-        组装观测向量。
-        - 距离被量化为公里级整数，然后归一化，模拟模糊感知。
-        - 允许归一化后的值超出[-1, 1]，让网络感知超调量。
-        - (注意) np.arcsin内部的clip被保留，以防止数学错误。
+        <<< 核心修改：分离 Actor观测(模糊) 和 Critic状态(上帝视角) >>>
         """
-        # --- 1. 计算导弹相关的观测值 ---
+        # --- 1. 提取共同的几何与运动特征 ---
         R_vec = self.aircraft.pos - self.missile.pos
         R_rel = np.linalg.norm(R_vec)
-
         o_beta_rad = self._compute_relative_beta2(self.aircraft.state_vector, self.missile.state_vector)
         Ry_rel = self.missile.pos[1] - self.aircraft.pos[1]
-
-        # 为了数值稳定性，此处的clip必须保留，防止arcsin的输入超出定义域
         o_theta_L_rel_rad = np.arcsin(np.clip(Ry_rel / (R_rel + 1e-6), -1.0, 1.0))
 
-        # --- 归一化 ---
-        # --- 导弹观测 ---
+        # 共用：角度和自身状态归一化
+        o_beta_sin = np.sin(o_beta_rad)
+        o_beta_cos = np.cos(o_beta_rad)
+        o_theta_L_rel_norm = o_theta_L_rel_rad / (np.pi / 2)
 
-        # # 1. 距离模糊化与归一化 (无 clip)
-        # quantized_distance_km = int(R_rel / 1000.0)
-        # max_quantized_dist = 10.0
-        # # 如果实际距离超过10km，o_dis_norm 将会大于 1.0
-        # o_dis_norm = 2 * (quantized_distance_km / max_quantized_dist) - 1.0
+        aircraft_pitch_rad = self.aircraft.state_vector[4]
+        aircraft_bank_rad = self.aircraft.state_vector[6]
+        o_av_norm = 2 * ((self.aircraft.velocity - 150) / 250) - 1
+        o_h_norm = 2 * ((self.aircraft.pos[1] - 500) / 11500) - 1
+        o_ae_norm = aircraft_pitch_rad / (np.pi / 2)
+        o_am_sin = np.sin(aircraft_bank_rad)
+        o_am_cos = np.cos(aircraft_bank_rad)
+        o_ir_norm = 2 * (self.o_ir / self.N_infrared) - 1.0
 
-        # <<< 修改开始：实现模糊距离区间 + [-1, 1] 归一化 >>>
+        # 其他9个保持一致的特征
+        common_features = [o_beta_sin, o_beta_cos, o_theta_L_rel_norm,
+                           o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm]
 
-        # 1. 生成随机模糊参数 (单位: 米)
-        d_mohu = np.random.randint(500, 1000)  # 总的不确定范围
-        d_min_offset = np.random.randint(100, 400)  # 向下偏差量
-        d_max_offset = d_mohu - d_min_offset  # 向上偏差量
-
-        # 2. 计算模糊后的物理距离区间
-        # 使用 max(0, ...) 防止距离变成负数
+        # --- 2. 组装 Actor 的观测 (模糊距离区间) ---
+        d_mohu = np.random.randint(500, 1000)
+        d_min_offset = np.random.randint(100, 400)
+        d_max_offset = d_mohu - d_min_offset
         o_dis_min_val = max(0.0, R_rel - d_min_offset)
         o_dis_max_val = R_rel + d_max_offset
-
-        # 3. 归一化到 [-1, 1]
-        # 设定参考最大距离为 10000 米。
-        # 当距离=0时，值为-1；当距离=10000时，值为1；距离>10000时，值>1 (允许超调)
         max_obs_dist = 10000.0
 
         o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
         o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
+        actor_obs = [o_dis_min_norm, o_dis_max_norm] + common_features
 
-        # <<< 修改结束 >>>
+        # --- 3. 组装 Critic 的上帝视角 (精准距离 + 导弹精准速度) ---
+        precise_dis_norm = 2 * (R_rel / max_obs_dist) - 1.0
+        # 假设导弹速度主要在 [400, 900] 之间，进行 [-1, 1] 归一化
+        precise_vel_norm = 2 * ((self.missile.velocity - 400) / 500) - 1.0
+        critic_state = [precise_dis_norm, precise_vel_norm] + common_features
 
-        # 2. 角度使用 sin/cos 表示，天然在 [-1, 1]
-        o_beta_sin = np.sin(o_beta_rad)
-        o_beta_cos = np.cos(o_beta_rad)
+        return np.array(actor_obs, dtype=np.float32), np.array(critic_state, dtype=np.float32)
 
-        # 3. 相对俯仰角归一化到 [-1, 1]
-        o_theta_L_rel_norm = o_theta_L_rel_rad / (np.pi / 2)
-
-        # missile_obs = [o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm]
-        # <<< 修改列表组合：将两个距离特征放入列表头部 >>>
-        missile_obs = [o_dis_min_norm, o_dis_max_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm]
-
-        # --- 2. 获取飞机自身状态 ---
-        aircraft_pitch_rad = self.aircraft.state_vector[4]  # 俯仰角 theta
-        aircraft_bank_rad = self.aircraft.state_vector[6]  # 滚转角 phi
-
-        # --- 飞机观测 ---
-        # 1. 速度归一化 (无 clip)
-        # 如果速度超出[150, 400]范围，归一化值会超出[-1, 1]
-        o_av_norm = 2 * ((self.aircraft.velocity - 150) / 250) - 1
-
-        # 2. 高度归一化 (无 clip)
-        # 如果高度超出[500, 12000]范围，归一化值会超出[-1, 1]
-        o_h_norm = 2 * ((self.aircraft.pos[1] - 500) / 11500) - 1
-
-        # 3. 飞机俯仰角归一化
-        o_ae_norm = aircraft_pitch_rad / (np.pi / 2)
-
-        # 4. 滚转角使用 sin/cos 表示
-        o_am_sin = np.sin(aircraft_bank_rad)
-        o_am_cos = np.cos(aircraft_bank_rad)
-
-        # 5. 剩余诱饵弹数量归一化
-        o_ir_norm = 2 * (self.o_ir / self.N_infrared) - 1.0
-
-        # # 6. 滚转速率归一化
-        # o_q_norm = self.aircraft.roll_rate_rad_s / (4.0 * np.pi / 3.0)
-
-        # aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm, o_q_norm]
-        # 这里的列表里去掉了 o_q_norm
-        aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm]
-        # print(o_ir_norm)
-
-        # --- 拼接 ---
-        observation = np.array(missile_obs + aircraft_obs)
-        return observation.astype(np.float32)
+    # def _get_observation(self) -> np.ndarray:
+    #     """
+    #     <<< 核心修改: 去除clip，允许归一化值超出[-1, 1]，距离模糊化 >>>
+    #     组装观测向量。
+    #     - 距离被量化为公里级整数，然后归一化，模拟模糊感知。
+    #     - 允许归一化后的值超出[-1, 1]，让网络感知超调量。
+    #     - (注意) np.arcsin内部的clip被保留，以防止数学错误。
+    #     """
+    #     # --- 1. 计算导弹相关的观测值 ---
+    #     R_vec = self.aircraft.pos - self.missile.pos
+    #     R_rel = np.linalg.norm(R_vec)
+    #
+    #     o_beta_rad = self._compute_relative_beta2(self.aircraft.state_vector, self.missile.state_vector)
+    #     Ry_rel = self.missile.pos[1] - self.aircraft.pos[1]
+    #
+    #     # 为了数值稳定性，此处的clip必须保留，防止arcsin的输入超出定义域
+    #     o_theta_L_rel_rad = np.arcsin(np.clip(Ry_rel / (R_rel + 1e-6), -1.0, 1.0))
+    #
+    #     # --- 归一化 ---
+    #     # --- 导弹观测 ---
+    #
+    #     # # 1. 距离模糊化与归一化 (无 clip)
+    #     # quantized_distance_km = int(R_rel / 1000.0)
+    #     # max_quantized_dist = 10.0
+    #     # # 如果实际距离超过10km，o_dis_norm 将会大于 1.0
+    #     # o_dis_norm = 2 * (quantized_distance_km / max_quantized_dist) - 1.0
+    #
+    #     # <<< 修改开始：实现模糊距离区间 + [-1, 1] 归一化 >>>
+    #
+    #     # 1. 生成随机模糊参数 (单位: 米)
+    #     d_mohu = np.random.randint(500, 1000)  # 总的不确定范围
+    #     d_min_offset = np.random.randint(100, 400)  # 向下偏差量
+    #     d_max_offset = d_mohu - d_min_offset  # 向上偏差量
+    #
+    #     # 2. 计算模糊后的物理距离区间
+    #     # 使用 max(0, ...) 防止距离变成负数
+    #     o_dis_min_val = max(0.0, R_rel - d_min_offset)
+    #     o_dis_max_val = R_rel + d_max_offset
+    #
+    #     # 3. 归一化到 [-1, 1]
+    #     # 设定参考最大距离为 10000 米。
+    #     # 当距离=0时，值为-1；当距离=10000时，值为1；距离>10000时，值>1 (允许超调)
+    #     max_obs_dist = 10000.0
+    #
+    #     o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
+    #     o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
+    #
+    #     # <<< 修改结束 >>>
+    #
+    #     # 2. 角度使用 sin/cos 表示，天然在 [-1, 1]
+    #     o_beta_sin = np.sin(o_beta_rad)
+    #     o_beta_cos = np.cos(o_beta_rad)
+    #
+    #     # 3. 相对俯仰角归一化到 [-1, 1]
+    #     o_theta_L_rel_norm = o_theta_L_rel_rad / (np.pi / 2)
+    #
+    #     # missile_obs = [o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm]
+    #     # <<< 修改列表组合：将两个距离特征放入列表头部 >>>
+    #     missile_obs = [o_dis_min_norm, o_dis_max_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm]
+    #
+    #     # --- 2. 获取飞机自身状态 ---
+    #     aircraft_pitch_rad = self.aircraft.state_vector[4]  # 俯仰角 theta
+    #     aircraft_bank_rad = self.aircraft.state_vector[6]  # 滚转角 phi
+    #
+    #     # --- 飞机观测 ---
+    #     # 1. 速度归一化 (无 clip)
+    #     # 如果速度超出[150, 400]范围，归一化值会超出[-1, 1]
+    #     o_av_norm = 2 * ((self.aircraft.velocity - 150) / 250) - 1
+    #
+    #     # 2. 高度归一化 (无 clip)
+    #     # 如果高度超出[500, 12000]范围，归一化值会超出[-1, 1]
+    #     o_h_norm = 2 * ((self.aircraft.pos[1] - 500) / 11500) - 1
+    #
+    #     # 3. 飞机俯仰角归一化
+    #     o_ae_norm = aircraft_pitch_rad / (np.pi / 2)
+    #
+    #     # 4. 滚转角使用 sin/cos 表示
+    #     o_am_sin = np.sin(aircraft_bank_rad)
+    #     o_am_cos = np.cos(aircraft_bank_rad)
+    #
+    #     # 5. 剩余诱饵弹数量归一化
+    #     o_ir_norm = 2 * (self.o_ir / self.N_infrared) - 1.0
+    #
+    #     # # 6. 滚转速率归一化
+    #     # o_q_norm = self.aircraft.roll_rate_rad_s / (4.0 * np.pi / 3.0)
+    #
+    #     # aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm, o_q_norm]
+    #     # 这里的列表里去掉了 o_q_norm
+    #     aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm]
+    #     # print(o_ir_norm)
+    #
+    #     # --- 拼接 ---
+    #     observation = np.array(missile_obs + aircraft_obs)
+    #     return observation.astype(np.float32)
 
     # def _get_observation(self) -> np.ndarray:
     #     """

@@ -1,12 +1,22 @@
 # --- START OF FILE Run_AirCombatEnv_train.py ---
 
 import random
+import sys
+import os
+
+# 获取当前脚本的绝对路径，并向上推导到项目根目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# main_evade_fuza -> main -> Interference_code -> 规避导弹项目sincos
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
-from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正优势归一化 import *
+from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPOMLP_GRU残差拼接雅可比修正优势归一化非对称critic import *
 from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
 from torch.utils.tensorboard import SummaryWriter
 # from env.AirCombatEnv import *
-from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim2 import *
+from Interference_code.env.missile_evasion_environment_jsbsim_fuza.Vec_missile_evasion_environment_jsbsim3非对称critic import *
 import time
 
 LOAD_ABLE = False  # 是否使用save文件夹中的模型
@@ -67,7 +77,7 @@ def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
 
 # ------------------- Tensorboard 设置 -------------------
 # <<< GRU/RNN 修改 >>>: 在日志文件名中加入 RNN 标识
-model_type_str = "GRU_MLP" if USE_RNN_MODEL else "MLP"
+model_type_str = "GRU_MLP非对称critic" if USE_RNN_MODEL else "MLP"
 writer_log_dir = f'../../log/log_evade_fuza/PPO_{model_type_str}_{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}_load{LOAD_ABLE}'
 writer = SummaryWriter(log_dir=writer_log_dir)
 print(f"Tensorboard 日志将保存在: {writer_log_dir}")
@@ -97,6 +107,7 @@ eval_counter = 0  # 计数器，专门用来控制测试的种子
 for i_episode in range(MAX_EXE_NUM):
     # --- 1. 经验收集阶段 ---
     observation, info = env.reset(seed=AGENTPARA.RANDOM_SEED + i_episode)
+    global_state = info["global_state"]  # <<< 新增
 
     if np.isnan(observation).any():
         print(f"!!! 严重错误: 第 {i_episode + 1} 回合 reset() 返回了 NaN! 退出训练。")
@@ -118,22 +129,24 @@ for i_episode in range(MAX_EXE_NUM):
             # <<< GRU/RNN 修改 >>>: 将隐藏状态传入 choose_action，并接收新的隐藏状态
             # a. 获取动作、价值和新的隐藏状态
             env_action_flat, action_to_store, prob, value, \
-                new_actor_hidden, new_critic_hidden = agent.choose_action(observation, actor_hidden, critic_hidden)
+                new_actor_hidden, new_critic_hidden = agent.choose_action(observation, global_state, actor_hidden, critic_hidden)
 
             # b. 记录当前状态
             state_to_store = observation
+            global_state_to_store = global_state  # <<< 保存当前的上帝视角
 
         # c. 将扁平动作打包成字典
         action_dict = pack_action_into_dict(env_action_flat)
 
         # d. 与环境交互
         observation, reward, terminated, truncated, info = env.step(action_dict)
+        global_state = info["global_state"]  # <<< 获取下一步的上帝视角
         done = terminated or truncated
 
         episode_reward += reward
 
         # e. 将经验存入Buffer，注意传入的是【做出动作前】的隐藏状态
-        agent.store_experience(state_to_store, action_to_store, prob, value, reward, done, actor_hidden, critic_hidden)
+        agent.store_experience(state_to_store, global_state_to_store, action_to_store, prob, value, reward, done, actor_hidden, critic_hidden)
 
         # <<< GRU/RNN 修改 >>>: 更新隐藏状态以备下一个时间步使用
         if USE_RNN_MODEL:
@@ -205,7 +218,9 @@ for i_episode in range(MAX_EXE_NUM):
             current_test_seed = AGENTPARA.RANDOM_SEED + TEST_SEED_OFFSET + i_episode
 
             # 显式传入计算好的种子
-            eval_obs, _ = env.reset(seed=current_test_seed)
+            eval_obs, eval_info = env.reset(seed=current_test_seed)
+            eval_global_state = eval_info["global_state"]  # <<< 新增：提取评估阶段的上帝视角
+
 
             print(f"    (使用测试种子: {current_test_seed})")  # 打印出来方便检查
 
@@ -222,7 +237,7 @@ for i_episode in range(MAX_EXE_NUM):
             for _ in range(MAX_STEP):
                 # a. 获取动作和新的隐藏状态
                 eval_action_flat, _, _, _, \
-                    new_eval_actor_hidden, new_eval_critic_hidden = agent.choose_action(eval_obs, eval_actor_hidden,
+                    new_eval_actor_hidden, new_eval_critic_hidden = agent.choose_action(eval_obs,eval_global_state, eval_actor_hidden,
                                                                                         eval_critic_hidden,
                                                                                         deterministic=True)
 
@@ -230,7 +245,8 @@ for i_episode in range(MAX_EXE_NUM):
                 eval_action_dict = pack_action_into_dict(eval_action_flat)
 
                 # c. 与环境交互
-                eval_obs, eval_reward, eval_terminated, eval_truncated, _ = env.step(eval_action_dict)
+                eval_obs, eval_reward, eval_terminated, eval_truncated, eval_step_info = env.step(eval_action_dict)
+                eval_global_state = eval_step_info["global_state"]  # <<< 新增：更新上帝视角状态
                 eval_done = eval_terminated or eval_truncated
 
                 eval_reward_sum += eval_reward

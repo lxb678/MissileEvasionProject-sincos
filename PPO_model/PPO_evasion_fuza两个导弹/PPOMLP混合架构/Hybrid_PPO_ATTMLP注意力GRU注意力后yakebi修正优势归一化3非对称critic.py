@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.distributions import Bernoulli, Categorical, Normal
 # 导入配置文件
 from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.ConfigAttngru import *
-from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.BufferGRUAttn实体 import Buffer
+from Interference_code.PPO_model.PPO_evasion_fuza两个导弹.BufferGRUAttn实体非对称critic import Buffer
 from torch.optim import lr_scheduler
 import numpy as np
 import os
@@ -920,25 +920,27 @@ class PPO_continuous(object):
         highs = torch.tensor([ACTION_RANGES[k]['high'] for k in CONTINUOUS_ACTION_KEYS], **ACTOR_PARA.tpdv)
         return lows + (action_cont_tanh + 1.0) * 0.5 * (highs - lows)
 
-    def store_experience(self, state, action, probs, value, reward, done, attn_weights=None):
-        self.buffer.store_transition(state, value, action, probs, reward, done,
+    def store_experience(self, state, global_state, action, probs, value, reward, done, attn_weights=None):
+        self.buffer.store_transition(state, global_state, value, action, probs, reward, done,
                                      actor_hidden=self.temp_actor_h,
                                      critic_hidden=self.temp_critic_h,
                                      attn_weights=attn_weights)
         if done:
             self.reset_rnn_state()
 
-    def choose_action(self, state, deterministic=False):
+    def choose_action(self, state,global_state, deterministic=False):
         state_tensor = torch.as_tensor(state, dtype=torch.float32, device=ACTOR_PARA.device)
+        global_state_tensor = torch.as_tensor(global_state, dtype=torch.float32, device=CRITIC_PARA.device)  # <<< 新增
         is_batch = state_tensor.dim() > 1
         if not is_batch:
             state_tensor = state_tensor.unsqueeze(0)
+            global_state_tensor = global_state_tensor.unsqueeze(0)  # <<< 新增
 
         current_actor_h = self.actor_rnn_state
         current_critic_h = self.critic_rnn_state
 
         with torch.no_grad():
-            value, self.critic_rnn_state = self.Critic(state_tensor, self.critic_rnn_state)
+            value, self.critic_rnn_state = self.Critic(global_state_tensor, self.critic_rnn_state)
             dists, attention_weights, self.actor_rnn_state = self.Actor(state_tensor, self.actor_rnn_state)
 
             attention_weights_for_reward = attention_weights
@@ -1259,7 +1261,7 @@ class PPO_continuous(object):
             return None
 
         # 1. 提取所有数据 (此时都在 CPU 上，为 Numpy 数组)
-        states, values, actions, old_probs, rewards, dones, _, _, attn_weights = self.buffer.get_all_data()
+        states, global_states, values, actions, old_probs, rewards, dones, _, _, attn_weights = self.buffer.get_all_data()
 
         # 2. 计算 GAE 优势 (使用传入的 next_visual_value 处理截断)
         advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones, next_value=next_visual_value)
@@ -1308,10 +1310,11 @@ class PPO_continuous(object):
                     # [GRU模式] 解包数据 (注意：return_ 和 advantage 已经是处理过的了)
                     # 这里的解包需要根据你 Buffer 的具体实现来确定
                     # 假设 Buffer 返回的是 (s, a, p, adv, ret, v, h_a, h_c, mask)
-                    (b_s, b_a, b_p, b_adv, b_ret, b_v, b_h_a, b_h_c, _) = batch_data
+                    (b_s, b_g, b_a, b_p, b_adv, b_ret, b_v, b_h_a, b_h_c, _) = batch_data
 
                     # 转 Tensor
                     state = torch.FloatTensor(b_s).to(**ACTOR_PARA.tpdv)
+                    global_state = torch.FloatTensor(b_g).to(**ACTOR_PARA.tpdv)
                     action_batch = torch.FloatTensor(b_a).to(**ACTOR_PARA.tpdv)
                     old_prob = torch.FloatTensor(b_p).to(**ACTOR_PARA.tpdv).view(-1)
 
@@ -1327,7 +1330,7 @@ class PPO_continuous(object):
 
                     # 前向传播
                     new_dists, _, _ = self.Actor(state, rnn_h_a)
-                    new_value, _ = self.Critic(state, rnn_h_c)
+                    new_value, _ = self.Critic(global_state, rnn_h_c)
 
                     # 维度调整
                     new_value = new_value.view(-1, 1)

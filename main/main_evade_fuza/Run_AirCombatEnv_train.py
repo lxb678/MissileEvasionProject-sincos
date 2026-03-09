@@ -1,4 +1,14 @@
 import random
+import sys
+import os
+
+# 获取当前脚本的绝对路径，并向上推导到项目根目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# main_evade_fuza -> main -> Interference_code -> 规避导弹项目sincos
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 # from Interference_code.PPO_model.PPO_evasion_fuza.Hybrid_PPO_jsbsim import *
 from Interference_code.PPO_model.PPO_evasion_fuza.PPOMLP混合架构.Hybrid_PPO_混合架构雅可比修正优势归一化 import *
 from Interference_code.PPO_model.PPO_evasion_fuza.Config import *
@@ -226,19 +236,19 @@ for i_episode in range(MAX_EXE_NUM):
             # 记录评估结果
             print(f"评估回合奖励: {eval_reward_sum:.2f}")
             writer.add_scalar('Eval/Reward_Sum', eval_reward_sum, global_step)
-            # eval_reward_buffer.append(eval_reward_sum)  # 存入列表
-            # # --- 核心修改：判断是否攒够了 10 个 ---
-            # if len(eval_reward_buffer) >= 10:
-            #     mean_reward = np.mean(eval_reward_buffer)
-            #     print(f"\n{'#' * 40}")
-            #     print(f"### 统计报告: 过去10次测试平均奖励: {mean_reward:.2f} ###")
-            #     print(f"{'#' * 40}\n")
-            #
-            #     # 记录到 Tensorboard，使用的是'Eval/Mean_10_Buffer'
-            #     writer.add_scalar('Eval/Mean_10_Buffer', mean_reward, global_step)
-            #
-            #     # 清空缓存，准备下一轮积累
-            #     eval_reward_buffer = []
+            eval_reward_buffer.append(eval_reward_sum)  # 存入列表
+            # --- 核心修改：判断是否攒够了 10 个 ---
+            if len(eval_reward_buffer) >= 10:
+                mean_reward = np.mean(eval_reward_buffer)
+                print(f"\n{'#' * 40}")
+                print(f"### 统计报告: 过去10次测试平均奖励: {mean_reward:.2f} ###")
+                print(f"{'#' * 40}\n")
+
+                # 记录到 Tensorboard，使用的是'Eval/Mean_10_Buffer'
+                writer.add_scalar('Eval/Mean_10_Buffer', mean_reward, global_step)
+
+                # 清空缓存，准备下一轮积累
+                eval_reward_buffer = []
 
         print("--- 评估结束 ---\n")
 

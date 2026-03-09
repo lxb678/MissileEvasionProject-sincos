@@ -304,8 +304,10 @@ class AirCombatEnv(gym.Env):
                 flares=self.flare_manager.flares
             )
 
-        observation = self._get_observation()
-        info = {}
+        # <<< 核心修改 >>> 接收两个观测，并将上帝视角存入 info 字典返回
+        observation, critic_state = self._get_observation()
+        info = {"global_state": critic_state}
+
         return observation, info
 
     def step(self, action: dict) -> tuple:
@@ -397,11 +399,14 @@ class AirCombatEnv(gym.Env):
             )
 
         # --- 5. 准备并返回结果 ---
-        observation = self._get_observation()
+        # <<< 核心修改 >>> 接收两个观测，并将上帝视角存入 info
+        observation, critic_state = self._get_observation()
         info = {}
         if terminated:
             # 报告由核心逻辑函数最终确定的 self.success
             info["success"] = self.success
+
+        info["global_state"] = critic_state
 
         return observation, reward, terminated, truncated, info
 
@@ -509,34 +514,22 @@ class AirCombatEnv(gym.Env):
                 flares=self.flare_manager.flares
             )
 
-    def _get_observation(self) -> np.ndarray:
-        """ <<< 核心修改: 统一归一化至[-1, 1]，并使用与单导弹版相同的模糊距离和物理边界 >>>
-        组装观测向量。为每个导弹（无论是否激活）生成观测值。
-        - 激活导弹: 使用精确的相对几何关系并进行归一化。
-        - 非激活导弹: 提供一个标准的“无威胁”观测值，其归一化值也落在[-1, 1]区间。
+    def _get_observation(self) -> tuple:
         """
-        """ 
-                <<< 核心修改: 统一归一化至[-1, 1]，增加距离模糊化 >>>
-                组装观测向量。为每个导弹生成 5 个观测值 + 飞机 7 个观测值。
-                """
-        obs_parts = []
+        <<< 核心修改: 分离 Actor 观测 (模糊) 和 Critic 状态 (上帝视角) >>>
+        组装观测向量。为每个导弹生成 5 个观测值 + 飞机 6 个观测值。
+        """
+        actor_obs_parts = []
+        critic_state_parts = []
 
         # --- 1. 遍历每个导弹，计算其相对观测值 ---
         for missile in self.missiles:
             if missile.terminated or self.t_now < missile.launch_time:
-                # # --- 非激活导弹的观测值 (统一到 [-1, 1] 区间) ---
-                # o_dis_norm = 1.0  # 距离最远 -> 1.0
-                # o_beta_sin, o_beta_cos = 0.0, 1.0  # beta=0度 (正前方)
-                # o_theta_L_rel_norm = 0.0  # 相对俯仰角为0 (水平) -> 0.0
-                #
-                # obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
-                # continue
-
                 # --- 非激活导弹的观测值 (统一到 [-1, 1] 区间) ---
-                # 距离最远 -> min=1.0, max=1.0
-                # beta=0度 -> sin=0.0, cos=1.0
-                # theta_L=0 -> 0.0
-                obs_parts.extend([1.0, 1.0, 0.0, 1.0, 0.0])
+                # Actor 视角: 距离最远 -> 模糊上下界都为 1.0, beta=0, theta_L=0
+                actor_obs_parts.extend([1.0, 1.0, 0.0, 1.0, 0.0])
+                # Critic 视角: 距离最远 -> 精确距离为 1.0, 速度为 0 (归一化到 -1.0), 角度一致
+                critic_state_parts.extend([1.0, 1.0, 0.0, 1.0, 0.0])
                 continue
 
             # --- 以下代码只对激活导弹执行 ---
@@ -547,68 +540,159 @@ class AirCombatEnv(gym.Env):
             Ry_rel = missile.pos[1] - self.aircraft.pos[1]
             o_theta_L_rel_rad = np.arcsin(np.clip(Ry_rel / (R_rel + 1e-6), -1.0, 1.0))
 
-            # --- 归一化 (与单导弹版逻辑完全一致) ---
-            # # 1. 距离模糊化与归一化
-            # quantized_distance_km = int(R_rel / 1000.0)
-            # max_quantized_dist = 10.0
-            # o_dis_norm = 2 * (quantized_distance_km / max_quantized_dist) - 1.0
+            # --- 归一化参数 ---
+            max_obs_dist = 10000.0
 
-            # --- <<< 核心修改：模糊距离逻辑 >>> ---
-            # 1. 生成随机模糊参数 (单位: 米)
-            d_mohu = np.random.randint(500, 1000)  # 总的不确定范围
-            d_min_offset = np.random.randint(100, 400)  # 向下偏差量
-            d_max_offset = d_mohu - d_min_offset  # 向上偏差量
+            # ----------------------------------------------------
+            # A. 组装 Actor 视角的专属特征 (模糊距离)
+            # ----------------------------------------------------
+            d_mohu = np.random.randint(500, 1000)
+            d_min_offset = np.random.randint(100, 400)
+            d_max_offset = d_mohu - d_min_offset
 
-            # 2. 计算模糊后的物理距离区间
             o_dis_min_val = max(0.0, R_rel - d_min_offset)
             o_dis_max_val = R_rel + d_max_offset
 
-            # 3. 归一化到 [-1, 1] (参考最大距离 10000 米)
-            max_obs_dist = 10000.0
             o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
             o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
 
-            # 2. 方位角 beta 使用 sin/cos
+            # ----------------------------------------------------
+            # B. 组装 Critic 视角的专属特征 (精确距离 + 精确速度)
+            # ----------------------------------------------------
+            precise_dis_norm = 2 * (R_rel / max_obs_dist) - 1.0
+            # 假设导弹速度主要在 [400, 1200] 之间，进行 [-1, 1] 归一化
+            precise_vel_norm = 2 * ((missile.velocity - 400) / 500) - 1.0
+
+            # ----------------------------------------------------
+            # C. 共享的角度特征
+            # ----------------------------------------------------
             o_beta_sin = np.sin(o_beta_rad)
             o_beta_cos = np.cos(o_beta_rad)
-
-            # 3. 相对俯仰角 theta_L 使用线性归一化 [-1, 1]
             o_theta_L_rel_norm = o_theta_L_rel_rad / (np.pi / 2)
-            # 添加 5 个特征
-            obs_parts.extend([o_dis_min_norm, o_dis_max_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
-            # obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
 
-        # --- 2. 获取飞机自身状态 (与单导弹版逻辑完全一致) ---
-        aircraft_pitch_rad = self.aircraft.state_vector[4]  # 俯仰角 theta
-        aircraft_bank_rad = self.aircraft.state_vector[6]  # 滚转角 phi
+            # 分别存入两套特征池
+            actor_obs_parts.extend([o_dis_min_norm, o_dis_max_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
+            critic_state_parts.extend([precise_dis_norm, precise_vel_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
 
-        # 1. 速度归一化 (使用物理边界)
+        # --- 2. 获取飞机自身状态 (完全保留原逻辑) ---
+        aircraft_pitch_rad = self.aircraft.state_vector[4]
+        aircraft_bank_rad = self.aircraft.state_vector[6]
+
         o_av_norm = 2 * ((self.aircraft.velocity - 150) / 250) - 1
-
-        # 2. 高度归一化 (使用物理边界)
         o_h_norm = 2 * ((self.aircraft.pos[1] - 500) / 11500) - 1
-
-        # 3. 飞机俯仰角归一化
         o_ae_norm = aircraft_pitch_rad / (np.pi / 2)
-
-        # 4. 滚转角使用 sin/cos 表示
         o_am_sin = np.sin(aircraft_bank_rad)
         o_am_cos = np.cos(aircraft_bank_rad)
-
-        # 5. 剩余诱饵弹数量归一化
         o_ir_norm = 2 * (self.o_ir / self.N_infrared) - 1.0
 
-        # # 6. 滚转速率归一化
-        # o_q_norm = self.aircraft.roll_rate_rad_s / (4.0 * np.pi / 3.0)
+        aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm]
 
-        # aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm, o_q_norm]
+        # --- 3. 拼接并返回两个观测 ---
+        actor_observation = np.array(actor_obs_parts + aircraft_obs, dtype=np.float32)
+        critic_state = np.array(critic_state_parts + aircraft_obs, dtype=np.float32)
 
-        # 列表中去掉了 o_q_norm
-        aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm]  # <--- 修改这里
+        return actor_observation, critic_state
 
-        # --- 3. 拼接成最终的观测向量 ---
-        observation = np.array(obs_parts + aircraft_obs)
-        return observation.astype(np.float32)
+    # def _get_observation(self) -> np.ndarray:
+    #     """ <<< 核心修改: 统一归一化至[-1, 1]，并使用与单导弹版相同的模糊距离和物理边界 >>>
+    #     组装观测向量。为每个导弹（无论是否激活）生成观测值。
+    #     - 激活导弹: 使用精确的相对几何关系并进行归一化。
+    #     - 非激活导弹: 提供一个标准的“无威胁”观测值，其归一化值也落在[-1, 1]区间。
+    #     """
+    #     """
+    #             <<< 核心修改: 统一归一化至[-1, 1]，增加距离模糊化 >>>
+    #             组装观测向量。为每个导弹生成 5 个观测值 + 飞机 7 个观测值。
+    #             """
+    #     obs_parts = []
+    #
+    #     # --- 1. 遍历每个导弹，计算其相对观测值 ---
+    #     for missile in self.missiles:
+    #         if missile.terminated or self.t_now < missile.launch_time:
+    #             # # --- 非激活导弹的观测值 (统一到 [-1, 1] 区间) ---
+    #             # o_dis_norm = 1.0  # 距离最远 -> 1.0
+    #             # o_beta_sin, o_beta_cos = 0.0, 1.0  # beta=0度 (正前方)
+    #             # o_theta_L_rel_norm = 0.0  # 相对俯仰角为0 (水平) -> 0.0
+    #             #
+    #             # obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
+    #             # continue
+    #
+    #             # --- 非激活导弹的观测值 (统一到 [-1, 1] 区间) ---
+    #             # 距离最远 -> min=1.0, max=1.0
+    #             # beta=0度 -> sin=0.0, cos=1.0
+    #             # theta_L=0 -> 0.0
+    #             obs_parts.extend([1.0, 1.0, 0.0, 1.0, 0.0])
+    #             continue
+    #
+    #         # --- 以下代码只对激活导弹执行 ---
+    #         R_vec = self.aircraft.pos - missile.pos
+    #         R_rel = np.linalg.norm(R_vec)
+    #
+    #         o_beta_rad = self._compute_relative_beta2(self.aircraft.state_vector, missile.state_vector)
+    #         Ry_rel = missile.pos[1] - self.aircraft.pos[1]
+    #         o_theta_L_rel_rad = np.arcsin(np.clip(Ry_rel / (R_rel + 1e-6), -1.0, 1.0))
+    #
+    #         # --- 归一化 (与单导弹版逻辑完全一致) ---
+    #         # # 1. 距离模糊化与归一化
+    #         # quantized_distance_km = int(R_rel / 1000.0)
+    #         # max_quantized_dist = 10.0
+    #         # o_dis_norm = 2 * (quantized_distance_km / max_quantized_dist) - 1.0
+    #
+    #         # --- <<< 核心修改：模糊距离逻辑 >>> ---
+    #         # 1. 生成随机模糊参数 (单位: 米)
+    #         d_mohu = np.random.randint(500, 1000)  # 总的不确定范围
+    #         d_min_offset = np.random.randint(100, 400)  # 向下偏差量
+    #         d_max_offset = d_mohu - d_min_offset  # 向上偏差量
+    #
+    #         # 2. 计算模糊后的物理距离区间
+    #         o_dis_min_val = max(0.0, R_rel - d_min_offset)
+    #         o_dis_max_val = R_rel + d_max_offset
+    #
+    #         # 3. 归一化到 [-1, 1] (参考最大距离 10000 米)
+    #         max_obs_dist = 10000.0
+    #         o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
+    #         o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
+    #
+    #         # 2. 方位角 beta 使用 sin/cos
+    #         o_beta_sin = np.sin(o_beta_rad)
+    #         o_beta_cos = np.cos(o_beta_rad)
+    #
+    #         # 3. 相对俯仰角 theta_L 使用线性归一化 [-1, 1]
+    #         o_theta_L_rel_norm = o_theta_L_rel_rad / (np.pi / 2)
+    #         # 添加 5 个特征
+    #         obs_parts.extend([o_dis_min_norm, o_dis_max_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
+    #         # obs_parts.extend([o_dis_norm, o_beta_sin, o_beta_cos, o_theta_L_rel_norm])
+    #
+    #     # --- 2. 获取飞机自身状态 (与单导弹版逻辑完全一致) ---
+    #     aircraft_pitch_rad = self.aircraft.state_vector[4]  # 俯仰角 theta
+    #     aircraft_bank_rad = self.aircraft.state_vector[6]  # 滚转角 phi
+    #
+    #     # 1. 速度归一化 (使用物理边界)
+    #     o_av_norm = 2 * ((self.aircraft.velocity - 150) / 250) - 1
+    #
+    #     # 2. 高度归一化 (使用物理边界)
+    #     o_h_norm = 2 * ((self.aircraft.pos[1] - 500) / 11500) - 1
+    #
+    #     # 3. 飞机俯仰角归一化
+    #     o_ae_norm = aircraft_pitch_rad / (np.pi / 2)
+    #
+    #     # 4. 滚转角使用 sin/cos 表示
+    #     o_am_sin = np.sin(aircraft_bank_rad)
+    #     o_am_cos = np.cos(aircraft_bank_rad)
+    #
+    #     # 5. 剩余诱饵弹数量归一化
+    #     o_ir_norm = 2 * (self.o_ir / self.N_infrared) - 1.0
+    #
+    #     # # 6. 滚转速率归一化
+    #     # o_q_norm = self.aircraft.roll_rate_rad_s / (4.0 * np.pi / 3.0)
+    #
+    #     # aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm, o_q_norm]
+    #
+    #     # 列表中去掉了 o_q_norm
+    #     aircraft_obs = [o_av_norm, o_h_norm, o_ae_norm, o_am_sin, o_am_cos, o_ir_norm]  # <--- 修改这里
+    #
+    #     # --- 3. 拼接成最终的观测向量 ---
+    #     observation = np.array(obs_parts + aircraft_obs)
+    #     return observation.astype(np.float32)
 
     # def _get_observation(self) -> np.ndarray:
     #     """ <<< 多导弹更改 (V3 - sin/cos 角度表示法) >>> """

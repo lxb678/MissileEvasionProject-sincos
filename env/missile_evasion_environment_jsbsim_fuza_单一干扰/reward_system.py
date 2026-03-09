@@ -18,8 +18,8 @@ class RewardCalculator:
         # --- 在这里集中定义所有奖励相关的超参数 ---
 
         # [稀疏奖励参数]
-        self.W = 20 #50  # 成功奖励基准
-        self.U = -20 #-50  # 失败固定惩罚
+        self.W = 6 #5 #10#20  # 成功奖励基准
+        self.U = -10#-20  # 失败固定惩罚
 
         # [高度惩罚参数]
         self.SAFE_ALTITUDE_M = 3000.0 #1000.0
@@ -99,16 +99,66 @@ class RewardCalculator:
             # <<< 新增：重置历史状态变量 >>>
             self.prev_separation_velocity = None
 
-    # --- (中文) 稀疏奖励接口 ---
+    # # --- (中文) 稀疏奖励接口 ---
+    # def get_sparse_reward(self, miss_distance: float, R_kill: float) -> float:
+    #     """
+    #     计算最终的事件奖励。
+    #     这个方法精确地复制了您原来的 compute_sparse_reward_1 逻辑。
+    #     """
+    #     if miss_distance > R_kill:
+    #         return self.W
+    #     else:
+    #         return self.U
+
     def get_sparse_reward(self, miss_distance: float, R_kill: float) -> float:
         """
-        计算最终的事件奖励。
-        这个方法精确地复制了您原来的 compute_sparse_reward_1 逻辑。
+        (连续改进版) 根据最终脱靶量计算回合结束时的稀疏奖励。
+        提供平滑的梯度，指引智能体从“惨死”走向“险胜”，再走向“大胜”。
         """
-        if miss_distance > R_kill:
-            return self.W
-        else:
+        # 防止异常值
+        if miss_distance is None:
             return self.U
+
+        if miss_distance > R_kill:
+            # ==========================================
+            # 1. 成功逃逸区 (Miss)
+            # ==========================================
+            # 基础成功奖励 (例如 +20)
+            base_reward = self.W
+
+            # 额外安全裕度奖励：脱靶量越大，奖励越多，但有严格上限
+            # 使用 1 - exp(-x) 函数，确保奖励不会因为脱靶量达到几公里而爆炸
+            extra_margin = miss_distance - R_kill
+
+            # 假设 MAX_BONUS = 20.0，脱靶量比 R_kill 多出 200 米时，拿到约 63% 的额外奖励
+            max_bonus = 4.0
+            safety_bonus = max_bonus * (1.0 - math.exp(-extra_margin / 100.0))
+
+            # 最终奖励范围：[W, W + max_bonus) -> 例如[20, 40)
+            # print("成功奖励", base_reward + safety_bonus)
+            return base_reward + safety_bonus
+
+        else:
+            # ==========================================
+            # 2. 被击落区 (Hit)
+            # ==========================================
+            # 基础失败惩罚 (例如 -50)
+            base_penalty = self.U
+
+            # # 挽回分数：鼓励“差一点点就躲开”的行为
+            # # 脱靶量越接近 R_kill，惩罚越轻
+            # # 假设 MAX_RECOVERY = 30.0
+            # max_recovery = 30.0
+            #
+            # # 线性映射：
+            # # miss = 0m -> recovery = 0 -> 最终 -50
+            # # miss = R_kill(12m) -> recovery = 30 -> 最终 -20
+            # saving_grace = max_recovery * (miss_distance / R_kill)
+
+            # print("失败惩罚", base_penalty) #+ saving_grace)
+
+            # 最终惩罚范围：[U, U + max_recovery] -> 例如[-50, -20]
+            return base_penalty #+ saving_grace
 
     # --- (中文) 密集奖励接口 ---
     def calculate_dense_reward(self, aircraft: Aircraft, missile: Missile,
@@ -129,10 +179,10 @@ class RewardCalculator:
         # reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #高度惩罚阶跃
         # <<< 核心修正 >>> ---
         # 将提取出的 flare_trigger_action 传递给资源惩罚函数
-        reward_resource = 0.2 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
+        reward_resource = 2.0 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
         # reward_roll_penalty = 0.5 * self._penalty_for_roll_rate_magnitude(aircraft)
         # reward_speed_penalty = 0.5 * self._penalty_for_dropping_below_speed_floor(aircraft)  #1.0速度惩罚还可以再大点感觉，或者加一个速度奖励
-        reward_survivaltime = 0.2  # 每步存活奖励
+        reward_survivaltime = 0.5 #0.4 #0.2 #0.5 #0.2  # 每步存活奖励
         # reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
         # reward_dive = self._reward_for_tactical_dive_smooth(aircraft, missile)
         # reward_coordinated_turn = self._reward_for_coordinated_turn(aircraft, 0.2)
@@ -1032,16 +1082,43 @@ class RewardCalculator:
 
         return Pv + PH + P_over
 
+    # def _compute_resource_penalty(self, release_flare_action, remaining_flares, total_flares):
+    #     """干扰资源使用过量惩罚函数"""
+    #     if release_flare_action > 0.5:
+    #         # (中文) 您原始代码中的 alphaR 和 k1
+    #         alphaR = 2.0
+    #         k1 = 3.0
+    #         fraction_remaining = remaining_flares / total_flares
+    #         penalty = -alphaR * (1 + k1 * (1 - fraction_remaining))
+    #         return penalty
+    #     return 0.0
+
     def _compute_resource_penalty(self, release_flare_action, remaining_flares, total_flares):
-        """干扰资源使用过量惩罚函数"""
-        if release_flare_action > 0.5:
-            # (中文) 您原始代码中的 alphaR 和 k1
-            alphaR = 2.0
-            k1 = 3.0
-            fraction_remaining = remaining_flares / total_flares
-            penalty = -alphaR * (1 + k1 * (1 - fraction_remaining))
-            return penalty
-        return 0.0
+        """
+        线性资源惩罚函数 (Linear Penalty)
+        范围: 0.0 (满弹) -> -1.0 (空弹)
+
+        逻辑:
+        惩罚力度均匀增加。
+        每发射一枚，惩罚增加的幅度是固定的 (1 / total_flares)。
+        """
+        # 1. 动作阈值判断
+        if release_flare_action <= 0.5:
+            return 0.0
+
+        # 2. 安全处理
+        if total_flares <= 0:
+            return -1.0
+
+        # 3. 计算使用比例
+        # fraction_used = 1.0 - (剩余 / 总数)
+        # 满弹时为 0.0，空弹时为 1.0
+        fraction_used = 1.0 - (remaining_flares / total_flares)
+
+        # 4. 线性计算 (直接取负)
+        penalty = -fraction_used
+
+        return penalty
 
     def _reward_for_aspect_angle(self, aircraft: Aircraft, missile: Missile):
         """(组件A - v5版，增加了对垂直机动的抑制)"""

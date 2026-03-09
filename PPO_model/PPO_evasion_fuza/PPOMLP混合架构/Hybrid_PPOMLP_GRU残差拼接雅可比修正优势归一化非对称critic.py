@@ -9,7 +9,7 @@ from torch.distributions import Normal
 # 导入配置文件，其中包含各种超参数
 from Interference_code.PPO_model.PPO_evasion_fuza.ConfigGRU import *
 # 导入支持 GRU 的经验回放池
-from Interference_code.PPO_model.PPO_evasion_fuza.BufferGRU import *
+from Interference_code.PPO_model.PPO_evasion_fuza.BufferGRU非对称critic import *
 from torch.optim import lr_scheduler
 import numpy as np
 import os
@@ -1783,7 +1783,7 @@ class PPO_continuous(object):
         critic_hidden = torch.zeros((1, batch_size, self.Critic.rnn_hidden_size), device=CRITIC_PARA.device)
         return actor_hidden, critic_hidden
 
-    def store_experience(self, state, action, probs, value, reward, done, actor_hidden=None, critic_hidden=None):
+    def store_experience(self, state, global_state, action, probs, value, reward, done, actor_hidden=None, critic_hidden=None):
         """将单步经验存储到 Buffer 中。"""
         # 检查 log_prob 是否包含无效值（NaN 或 Inf）
         if not np.all(np.isfinite(probs)):
@@ -1791,9 +1791,9 @@ class PPO_continuous(object):
         # 如果使用 RNN，必须提供隐藏状态
         if self.use_rnn and (actor_hidden is None or critic_hidden is None):
             raise ValueError("使用 RNN 模型时必须存储隐藏状态！")
-        self.buffer.store_transition(state, value, action, probs, reward, done, actor_hidden, critic_hidden)
+        self.buffer.store_transition(state, global_state, value, action, probs, reward, done, actor_hidden, critic_hidden)
 
-    def choose_action(self, state, actor_hidden, critic_hidden, deterministic=False):
+    def choose_action(self, state, global_state, actor_hidden, critic_hidden, deterministic=False):
         """
         根据当前状态选择动作。
         :param deterministic: 如果为 True，则选择最可能的动作（用于评估），否则进行随机采样（用于训练）。
@@ -1801,15 +1801,19 @@ class PPO_continuous(object):
                  log probability, state value, and new hidden states.
         """
         state_tensor = torch.as_tensor(state, dtype=torch.float32, device=ACTOR_PARA.device)
+        global_state_tensor = torch.as_tensor(global_state, dtype=torch.float32, device=CRITIC_PARA.device)  # <<< 新增
         # 检查输入是否是批处理数据
         is_batch = state_tensor.dim() > 1
         if not is_batch:
             state_tensor = state_tensor.unsqueeze(0)
+            global_state_tensor = global_state_tensor.unsqueeze(0)  # <<< 新增
 
         with torch.no_grad():# 在此块中不计算梯度
             if self.use_rnn:
                 # GRU 模型需要传入隐藏状态
-                value, new_critic_hidden = self.Critic(state_tensor, critic_hidden)
+                # value, new_critic_hidden = self.Critic(state_tensor, critic_hidden)
+                # <<< 核心修改：Critic 吃上帝视角，Actor 吃模糊观测 >>>
+                value, new_critic_hidden = self.Critic(global_state_tensor, critic_hidden)
                 dists, new_actor_hidden = self.Actor(state_tensor, actor_hidden)
             else:
                 # MLP 模型不需要隐藏状态
@@ -1936,7 +1940,7 @@ class PPO_continuous(object):
 
         # 1. 数据准备
         # 注意：这里我们获取了所有数据，此时它们都是 Numpy 数组
-        states, values, actions, old_probs, rewards, dones, _, __ = self.buffer.get_all_data()
+        states, global_states, values, actions, old_probs, rewards, dones, _, __ = self.buffer.get_all_data()
 
         # 计算 GAE 优势
         advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones)
@@ -1985,10 +1989,11 @@ class PPO_continuous(object):
                 # 3. 批次数据提取
                 if self.use_rnn:
                     # [GRU模式] 解包数据 (注意：return_ 和 advantage 已经是处理过的了)
-                    state, action_batch, old_prob, advantage, return_, initial_actor_h, initial_critic_h = batch_data
+                    state, global_state, action_batch, old_prob, advantage, return_, initial_actor_h, initial_critic_h = batch_data
 
                     # 转 Tensor
                     state = check(state).to(**ACTOR_PARA.tpdv)
+                    global_state = check(global_state).to(**CRITIC_PARA.tpdv)
                     action_batch = check(action_batch).to(**ACTOR_PARA.tpdv)
                     old_prob = check(old_prob).to(**ACTOR_PARA.tpdv)  # RNN下通常不需要 view(-1)
                     advantage = check(advantage).to(**ACTOR_PARA.tpdv)
@@ -2000,6 +2005,7 @@ class PPO_continuous(object):
                     batch_indices = batch_data
 
                     state = check(states[batch_indices]).to(**ACTOR_PARA.tpdv)
+                    global_state = check(global_states[batch_indices]).to(**CRITIC_PARA.tpdv)  # <<< 增加切片
                     action_batch = check(actions[batch_indices]).to(**ACTOR_PARA.tpdv)
                     old_prob = check(old_probs[batch_indices]).to(**ACTOR_PARA.tpdv).view(-1)
 
@@ -2207,7 +2213,8 @@ class PPO_continuous(object):
 
                 # 5. Critic 更新
                 if self.use_rnn:
-                    new_value, _ = self.Critic(state, initial_critic_h)
+                    # new_value, _ = self.Critic(state, initial_critic_h)
+                    new_value, _ = self.Critic(global_state, initial_critic_h)  # <<< 修改这里
                     # # =================== [💥 核心修改点：提取最后一步] ===================
                     # # 确保 new_value 和 return_ 都是 (B, 1)
                     # new_value = new_value[:, -1, :]
