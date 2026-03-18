@@ -73,7 +73,7 @@ def plot_attention_weights(weights_history, episode_num):
 
 # <<<--- Tacview 可视化开关 ---<<<
 TACVIEW_ENABLED_DURING_TESTING = True
-env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TESTING)
+env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TESTING,dt=0.02)
 set_seed(env)
 
 # <<< 核心修改 >>>: 确保此路径指向您训练好的【Attention+MLP】模型

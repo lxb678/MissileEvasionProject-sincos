@@ -62,7 +62,7 @@ ACTION_RANGES = {
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
 RNN_HIDDEN_SIZE = 128 #64 #128 #64  #128 #64 #128 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH =  5 #15 #12 #15 #12 #20 #15 #10 #5  #10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
+SEQUENCE_LENGTH =  5 #8 #2 #5 #15 #12 #15 #12 #20 #15 #10 #5  #10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
 
 
 class Actor_GRU(Module):
@@ -94,7 +94,7 @@ class Actor_GRU(Module):
         # self.log_std_max = np.log(self.target_std_max)
 
         self.target_std_min = 0.10 #0.20 #0.10 #0.05  # 保证底噪
-        self.target_std_max = 0.60 #0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
+        self.target_std_max = 0.70 #0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
         self.target_init_std = 0.60 #0.75  # 0.85 #0.65 #0.75  # 初始值设为中间态，不要设为 max
 
         # 转换为 Log 空间边界
@@ -106,7 +106,7 @@ class Actor_GRU(Module):
         # =====================================================================
         # 1. 共享 MLP (Pre-GRU) - 严格使用配置的前2层
         # =====================================================================
-        split_point = 1 #2  # 在第2层切分
+        split_point = 2  # 在第2层切分
         pre_gru_dims = ACTOR_PARA.model_layer_dim[:split_point]
 
         self.pre_gru_mlp = Sequential()
@@ -322,7 +322,7 @@ class Actor_GRU(Module):
 
         # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
         # 只要不让它跑到 10 这种离谱的值就行
-        mu = torch.clamp(mu, -2.0, 2.0)
+        mu = torch.clamp(mu, -3.0, 3.0)
         # # =====================================================
         # # 1. 连续动作均值 mu: 使用 Tanh 替代 Clamp 防止梯度死亡
         # # =====================================================
@@ -433,7 +433,7 @@ class Critic_GRU(Module):
         # =====================================================================
         # 1. 共享 MLP (Pre-GRU)
         # =====================================================================
-        split_point = 1 #2
+        split_point = 2
         pre_gru_dims = CRITIC_PARA.model_layer_dim[:split_point]
 
         self.pre_gru_mlp = Sequential()
@@ -1829,10 +1829,10 @@ class PPO_continuous(object):
             # 2. 计算雅可比修正项 (稳定公式)
             # 公式: 2 * (log 2 - u - softplus(-2u))
             # 注意: u 是 pre-tanh 的值
-            correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
+            # correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
 
             # 3. 得到最终动作 a = tanh(u) 的 log_prob
-            log_prob_cont = log_prob_u - correction
+            log_prob_cont = log_prob_u #- correction
             # ================= [修改结束] =================
 
             # log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
@@ -2029,9 +2029,9 @@ class PPO_continuous(object):
 
                 # --- A. 连续动作 Log Prob (带雅可比修正) ---
                 log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
-                correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(
-                    dim=-1)
-                new_log_prob_cont = log_prob_u_buffer - correction_buffer
+                # correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(
+                #     dim=-1)
+                new_log_prob_cont = log_prob_u_buffer #- correction_buffer
 
                 # --- B. 离散动作 Log Prob (Ratio 一致性修复) ---
                 # 1. 提取 Buffer 中记录的真实开火情况 (用于 Mask LogProb)
@@ -2069,6 +2069,7 @@ class PPO_continuous(object):
 
                 # D.1 连续动作熵 (带雅可比修正的重采样)
                 entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
+                # entropy_base = new_dists['continuous'].entropy().mean(dim=-1)  # 动作维度求平均
                 u_curr_sample = new_dists['continuous'].rsample()
                 correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
                 entropy_cont = entropy_base + correction_curr
@@ -2077,6 +2078,20 @@ class PPO_continuous(object):
                 # D.2 Trigger 熵
                 entropy_trigger = new_dists['trigger'].entropy()
                 mean_entropy_trigger = entropy_trigger.mean()
+
+                # # ==========================================================
+                # # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
+                # # ==========================================================
+                #
+                # # 1. 计算所有子动作的原始熵 (Raw)
+                # entropy_sub_actions_raw = sum(
+                #     dist.entropy() for key, dist in new_dists.items()
+                #     if key not in ['continuous', 'trigger']
+                # )
+                #
+                # # 2. 直接求平均！不要乘 actual_triggers！
+                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
+                # mean_entropy_sub = entropy_sub_actions_raw.mean()
 
                 # ==========================================================
                 # D.3 🌟 灵魂掩码 (Entropy) 🌟：子动作条件均值熵
@@ -2089,14 +2104,21 @@ class PPO_continuous(object):
                     dist.entropy() for key, dist in new_dists.items()
                     if key not in ['continuous', 'trigger']
                 )
+                # # 1. 计算所有子动作的熵 (Raw) 并按动作数量求平均 -> Shape: [Batch, Seq]
+                # sub_action_keys = [key for key in new_dists.items() if key[0] not in ['continuous', 'trigger']]
+                # num_sub_actions = len(sub_action_keys)  # 当前为 3 (salvo_size, num_groups, inter_interval)
+                #
+                # entropy_sub_actions_raw = sum(
+                #     dist.entropy() for key, dist in sub_action_keys
+                # ) / num_sub_actions
 
-                # 2. 使用 Buffer 中的真实触发记录作为掩码 -> Shape: [Batch, Seq]
-                # (不需要再从 new_dists['trigger'].probs 里去算阈值了)
-                mask_trigger = actual_triggers  # 0.0 或 1.0
-
-                # 3. 统计有效的触发次数 (整个 Batch * Sequence 中发射的总次数)
-                num_triggered = mask_trigger.sum()
-
+                # # 2. 使用 Buffer 中的真实触发记录作为掩码 -> Shape: [Batch, Seq]
+                # # (不需要再从 new_dists['trigger'].probs 里去算阈值了)
+                # mask_trigger = actual_triggers  # 0.0 或 1.0
+                #
+                # # 3. 统计有效的触发次数 (整个 Batch * Sequence 中发射的总次数)
+                # num_triggered = mask_trigger.sum()
+                #
                 # # 4. 计算条件均值熵
                 # if num_triggered > 0:
                 #     # 只计算那些【历史上确实发射了】的样本的子动作熵
@@ -2115,9 +2137,9 @@ class PPO_continuous(object):
                 # COEF_CONT = 1.0   # 连续动作主导
                 # COEF_TRIG = 10.0  # 鼓励 Trigger 探索
                 # COEF_SUB  = 0.5   # 子动作熵
-                COEF_CONT = AGENTPARA.entropy * 1.0
-                COEF_TRIG = AGENTPARA.entropy * 1.0
-                COEF_SUB = AGENTPARA.entropy * 1.0
+                # COEF_CONT = AGENTPARA.entropy * 1.0
+                # COEF_TRIG = AGENTPARA.entropy * 1.0
+                # COEF_SUB = AGENTPARA.entropy * 1.0
 
                 # total_entropy_bonus = (COEF_CONT * mean_entropy_cont) + \
                 #                       (COEF_TRIG * mean_entropy_trigger) + \
@@ -2197,7 +2219,7 @@ class PPO_continuous(object):
                 surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage_squeezed
 
                 # Loss = -Policy_Loss - Entropy_Bonus
-                actor_loss = -torch.min(surr1, surr2).mean() - AGENTPARA.entropy * total_entropy_bonus
+                actor_loss = -torch.min(surr1, surr2).mean() - (AGENTPARA.con_entropy * mean_entropy_cont + AGENTPARA.dis_entropy * (1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub))#AGENTPARA.entropy * (mean_entropy_cont + 1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub)#AGENTPARA.entropy * total_entropy_bonus
 
                 # 更新 Actor
                 self.Actor.optim.zero_grad()

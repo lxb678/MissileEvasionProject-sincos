@@ -29,7 +29,7 @@ class AirCombatEnv(gym.Env):
     (Gymnasium兼容版) 强化学习的空战环境主类。
     """
 
-    def __init__(self, tacview_enabled=False, dt=0.02):
+    def __init__(self, tacview_enabled=False, dt=0.05):
         # <<< GYMNASIUM CHANGE >>> 必须调用父类的 __init__
         super().__init__()
         # <<< GYMNASIUM CHANGE >>> 定义动作空间和观测空间
@@ -102,7 +102,7 @@ class AirCombatEnv(gym.Env):
         # --- 仿真参数 ---
         # self.dt = 0.1  # 这是外部决策步长
         self.t_end = 60.0
-        self.R_kill = 15.0 #12.0
+        self.R_kill = 12.0
 
         # --- (中文) 新增：补全缺失的内部循环参数 ---
         # 这些参数决定了在 step 方法内部的物理仿真是如何运行的
@@ -113,7 +113,7 @@ class AirCombatEnv(gym.Env):
 
         # (中文) 从您的主脚本中看到您还引用了 dt_dec，这里也为您补上
         # 它似乎与 self.dt 含义相同，代表决策步长
-        self.dt_dec = 0.5 #0.4 #0.2
+        self.dt_dec = 0.4 #0.3 #0.2
 
         self.D_max = 30000.0  # 导引头最大搜索范围 (m)
         self.Angle_IR_rad = np.deg2rad(90)  # 导引头最大视场角度 (弧度)
@@ -138,8 +138,10 @@ class AirCombatEnv(gym.Env):
         self.done = False
         self.success = False
         self.miss_distance = None
-        self.o_ir = 24 #30  # 初始诱饵弹数量
-        self.N_infrared = 24 #30
+        self.o_ir = 16 #30  # 初始诱饵弹数量
+        self.N_infrared = 16 #30
+        self.intra_interval = 0.05 #0.04  # 0.04   #弹间隔
+        self.checkdis = 50 # 100m 是一个安全的启动阈值
 
         # 用于存储历史状态，以计算变化率 (如速度变化、距离变化)
         self.prev_aircraft_state = None
@@ -218,8 +220,8 @@ class AirCombatEnv(gym.Env):
         # aircraft_pitch = 0
 
         # 6.
-        aircraft_vel = np.random.uniform(300, 400)
-        # aircraft_vel = 175
+        aircraft_vel = np.random.uniform(300, 350)
+        # aircraft_vel = 350
         # 7.
         missile_vel = np.random.uniform(800, 900)
 
@@ -307,12 +309,12 @@ class AirCombatEnv(gym.Env):
         discrete_cmds_indices = action["discrete_actions"]
 
         throttle_cmd, elevator_cmd, aileron_cmd, rudder_cmd = continuous_cmds
-        # throttle_cmd = 2.0
+        # throttle_cmd = 1.0
 
         trigger_cmd_idx = discrete_cmds_indices[0]
         salvo_size_idx = discrete_cmds_indices[1]
         # intra_interval_idx = discrete_cmds_indices[2]
-        intra_interval = 0.04   #弹间隔
+        intra_interval = self.intra_interval #0.05 #0.04   #弹间隔
         num_groups_idx = discrete_cmds_indices[2]
         inter_interval_idx = discrete_cmds_indices[3]
 
@@ -393,7 +395,7 @@ class AirCombatEnv(gym.Env):
         # <<< 逻辑修正：现在只更新诱饵弹状态，并根据 schedule 创建新的 >>>
         # FlareManager 的 update 方法内部会检查 self.schedule 列表，
         # 如果当前时间 t 匹配了计划中的某个时间点，它会自动创建新的 Flare 实例。
-        self.flare_manager.update(self.t_now, dt, self.aircraft)  # 注意：这里传入的是 t 时刻的 aircraft 对象
+        # self.flare_manager.update(self.t_now, dt, self.aircraft)  # 注意：这里传入的是 t 时刻的 aircraft 对象
 
         # c) 导引头：根据【当前】的飞机和导弹状态，计算导引目标
         target_pos_equiv = self._calculate_equivalent_target()
@@ -426,10 +428,14 @@ class AirCombatEnv(gym.Env):
         # missile_state_next = self.missile._missile_dynamics(self.missile.state_vector, dt, theta_L_dot, phi_L_dot)
 
         # --- 3. 更新时间并记录历史 ---
+        # self.t_now += dt
+        # self.tacview_global_time += dt
+        # a) 飞机：直接调用 update，它内部会运行 JSBSim
+        #todo: 环境代码中飞机导弹诱饵弹更新顺序不对
+        self.flare_manager.update(self.t_now, dt, self.aircraft)
+        self.aircraft.update(aircraft_action, dt=dt)  # <<< 核心修改：把当前环境决定的物理步长传给飞机)  # JSBSim的dt在初始化时已设置
         self.t_now += dt
         self.tacview_global_time += dt
-        # a) 飞机：直接调用 update，它内部会运行 JSBSim
-        self.aircraft.update(aircraft_action, dt=dt)  # <<< 核心修改：把当前环境决定的物理步长传给飞机)  # JSBSim的dt在初始化时已设置
         self.aircraft_history.append(self.aircraft.state_vector.copy())
         self.missile_history.append(missile_state_next.copy())
         self.time_history.append(self.t_now)
@@ -772,7 +778,7 @@ class AirCombatEnv(gym.Env):
         R_rel_prev = np.linalg.norm(T1 - M1)
 
         # 效率优化：如果两端点距离都还很远，可以安全地跳过复杂的插值计算
-        if min(R_rel_prev, R_rel_now) > 20:  # 100m 是一个安全的启动阈值
+        if min(R_rel_prev, R_rel_now) > self.checkdis:  # 100m 是一个安全的启动阈值
             return
 
         # --- 4. 求解区间内的真实最小距离 (逻辑与V5完全相同) ---
@@ -1017,21 +1023,52 @@ class AirCombatEnv(gym.Env):
         # # 如果实际距离超过10km，o_dis_norm 将会大于 1.0
         # o_dis_norm = 2 * (quantized_distance_km / max_quantized_dist) - 1.0
 
-        # <<< 修改开始：实现模糊距离区间 + [-1, 1] 归一化 >>>
+        # # <<< 修改开始：实现模糊距离区间 + [-1, 1] 归一化 >>>
+        #
+        # # 1. 生成随机模糊参数 (单位: 米)
+        # d_mohu = np.random.randint(500, 1000)  # 总的不确定范围
+        # d_min_offset = np.random.randint(100, 400)  # 向下偏差量
+        # d_max_offset = d_mohu - d_min_offset  # 向上偏差量
+        #
+        # # 2. 计算模糊后的物理距离区间
+        # # 使用 max(0, ...) 防止距离变成负数
+        # o_dis_min_val = max(0.0, R_rel - d_min_offset)
+        # o_dis_max_val = R_rel + d_max_offset
+        #
+        # # 3. 归一化到 [-1, 1]
+        # # 设定参考最大距离为 10000 米。
+        # # 当距离=0时，值为-1；当距离=10000时，值为1；距离>10000时，值>1 (允许超调)
+        # max_obs_dist = 10000.0
+        #
+        # o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
+        # o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
+        #
+        # # <<< 修改结束 >>>
 
-        # 1. 生成随机模糊参数 (单位: 米)
-        d_mohu = np.random.randint(500, 1000)  # 总的不确定范围
-        d_min_offset = np.random.randint(100, 400)  # 向下偏差量
-        d_max_offset = d_mohu - d_min_offset  # 向上偏差量
+        # <<< 修改开始：实现基于比例的模糊距离区间 + [-1, 1] 归一化 >>>
 
-        # 2. 计算模糊后的物理距离区间
-        # 使用 max(0, ...) 防止距离变成负数
-        o_dis_min_val = max(0.0, R_rel - d_min_offset)
-        o_dis_max_val = R_rel + d_max_offset
+        # 1. 设定传感器误差参数
+        BASE_NOISE_M = 500.0  # 基础测距噪声 (模拟近距离时的最小固有误差)
+        ERROR_RATIO = 0.20  # 比例误差率 (25%)，模拟 MAWS 根据强度测距的不确定性
 
-        # 3. 归一化到 [-1, 1]
-        # 设定参考最大距离为 10000 米。
-        # 当距离=0时，值为-1；当距离=10000时，值为1；距离>10000时，值>1 (允许超调)
+        # 2. 计算动态的上下界偏差
+        # 距离越远，绝对误差越大；距离越近，绝对误差趋近于基础噪声
+        max_offset = BASE_NOISE_M + R_rel * ERROR_RATIO
+
+        # 为了让网络感受到一个波动的“区间”，我们在最大允许误差内随机生成当前的观测边界
+        # 随机生成向下和向上的波动比例 (0.5 到 1.0 之间，确保总是存在明显的模糊区间)
+        # rand_lower_factor = np.random.uniform(0.5, 1.0)
+        rand_upper_factor = np.random.uniform(0.5, 1.0)
+        rand_lower_factor = 1 - rand_upper_factor
+
+        actual_min_offset = max_offset * rand_lower_factor
+        actual_max_offset = max_offset * rand_upper_factor
+
+        # 3. 计算模糊后的物理距离区间 (防御性编程：距离不能小于0)
+        o_dis_min_val = max(0.0, R_rel - actual_min_offset)
+        o_dis_max_val = R_rel + actual_max_offset
+
+        # 4. 归一化到 [-1, 1]
         max_obs_dist = 10000.0
 
         o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
@@ -1277,6 +1314,8 @@ class AirCombatEnv(gym.Env):
         else:
             range_rate = (current_R_rel - self.prev_R_rel) / dt
 
+        # <<< 核心修复：计算完毕后必须立即更新 prev_R_rel，防止子步长产生累积除法异常 >>>
+        self.prev_R_rel = current_R_rel
         # 检查导弹锁定状态 (需要一个独立的 check_seeker_lock 函数)
         # 为了自洽，我们暂时在这里实现一个简化的版本
         lock_aircraft, _, _, _, _ = self._check_seeker_lock(
@@ -1325,12 +1364,12 @@ class AirCombatEnv(gym.Env):
             self.lost_and_separating_duration = 0.0
 
         # c) 检查是否触发成功
-        if self.escape_timer >= 2.0:#1.0:  # 使用您代码中的 ESCAPE_DURATION_REQ
+        if self.escape_timer >= 1.0: #2.0:#1.0:  # 使用您代码中的 ESCAPE_DURATION_REQ
             # print(f">>> 成功逃逸(物理)！(导弹更慢且距离拉大已持续 {self.escape_timer:.1f}s)，仿真提前终止!")
             self.done, self.success = True, True
             return
 
-        elif self.lost_and_separating_duration >= 2.0:#1.0:
+        elif self.lost_and_separating_duration >= 1.0: #2.0:#1.0:
             # print(f">>> 成功逃逸(信息)！(持续丢失目标且距离拉大已持续 {self.lost_and_separating_duration:.1f}s)，仿真提前终止!")
             self.done, self.success = True, True
             return

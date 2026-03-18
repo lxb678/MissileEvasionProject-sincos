@@ -21,9 +21,9 @@ CONTINUOUS_DIM = 0
 # <<< 保持 >>> 离散动作空间定义
 DISCRETE_DIMS = {
     'flare_trigger': 1,  # 是否投放: 1个logit -> Bernoulli
-    'salvo_size': 3,  # 数量
+    'salvo_size': 4,  # 数量
     'num_groups': 3,  # 组数
-    'inter_interval': 3,  # 组间隔
+    'inter_interval': 5,  # 组间隔
 }
 
 # 计算离散部分总共需要的网络输出数量
@@ -34,9 +34,9 @@ TOTAL_ACTION_DIM_BUFFER = len(DISCRETE_DIMS)  # 4
 
 # <<< 保持 >>> 离散动作映射表
 DISCRETE_ACTION_MAP = {
-    'salvo_size': [2, 3, 4],
+    'salvo_size': [1, 2, 3,4],
     'num_groups': [2, 3, 4],
-    'inter_interval': [0.2, 0.4, 0.6]
+    'inter_interval': [0.2, 0.4, 0.6,0.8,1.0]
 }
 
 
@@ -386,18 +386,100 @@ class PPO_discrete(object):
         """
         torch.autograd.set_detect_anomaly(True)
         states, values, actions, old_probs, rewards, dones = self.buffer.sample()
+        # advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones)
+        #
+        # # 维度对齐与归一化
+        # if advantages.ndim == 1: advantages = advantages.reshape(-1, 1)
+        # if values.ndim == 1: values = values.reshape(-1, 1)
+        #
+        # returns_np = advantages + values
+        # adv_mean = np.mean(advantages)
+        # adv_std = np.std(advantages)
+        # advantages = (advantages - adv_mean) / (adv_std + 1e-8)
         advantages = self.cal_gae(states, values, actions, old_probs, rewards, dones)
 
-        # 维度对齐与归一化
-        if advantages.ndim == 1: advantages = advantages.reshape(-1, 1)
-        if values.ndim == 1: values = values.reshape(-1, 1)
+        # 维度对齐
+        if advantages.ndim == 1:
+            advantages = advantages.reshape(-1, 1)
+        if values.ndim == 1:
+            values = values.reshape(-1, 1)
 
-        returns_np = advantages + values
-        adv_mean = np.mean(advantages)
-        adv_std = np.std(advantages)
-        advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+        # ===== 1. 先保存“标准化前”的 advantage =====
+        raw_advantages = advantages.copy()
 
-        train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'ratio': [], 'mean_entropy_trigger':[], 'mean_entropy_sub': []}
+        returns_np = raw_advantages + values
+
+        # ===== 2. 统计标准化前 =====
+        raw_adv_mean = np.mean(raw_advantages)
+        raw_adv_std = np.std(raw_advantages)
+        raw_adv_max = np.max(raw_advantages)
+        raw_adv_min = np.min(raw_advantages)
+        raw_adv_p90 = np.percentile(raw_advantages, 90)
+        raw_adv_p95 = np.percentile(raw_advantages, 95)
+        raw_adv_p99 = np.percentile(raw_advantages, 99)
+
+        print("\n========== Advantage Stats (Before Normalization) ==========")
+        print(f"mean={raw_adv_mean:.6f}, std={raw_adv_std:.6f}, "
+              f"min={raw_adv_min:.6f}, max={raw_adv_max:.6f}")
+        print(f"p90={raw_adv_p90:.6f}, p95={raw_adv_p95:.6f}, p99={raw_adv_p99:.6f}")
+
+        # ===== 3. 标准化 =====
+        advantages = (raw_advantages - raw_adv_mean) / (raw_adv_std + 1e-8)
+        # # # 使用 Tanh 进行平滑的软挤压 (例如把界限软控制在 10.0 附近)
+        # # # scale = 10.0
+        # # # advantages = scale * np.tanh(advantages / scale)
+        # # advantages = 5.0 * np.tanh(advantages / 5.0)
+        # # ===== 3.1 🌟 非对称软截断 (Asymmetric Soft Squashing) 🌟 =====
+        # scale_pos = 10.0  # 正向惊喜的软上限 (极其宽松)
+        # scale_neg = 5.0  # 负向惊吓的软下限 (相对收紧)
+        #
+        # # 使用 np.where 条件判断，对正负优势分别进行不同尺度的 Tanh 挤压
+        # advantages = np.where(
+        #     advantages > 0,
+        #     scale_pos * np.tanh(advantages / scale_pos),  # 正数：放宽上限的软挤压
+        #     scale_neg * np.tanh(advantages / scale_neg)  # 负数：收紧下限的软挤压
+        # )
+
+        # ===== 4. 统计标准化后 =====
+        norm_adv_mean = np.mean(advantages)
+        norm_adv_std = np.std(advantages)
+        norm_adv_max = np.max(advantages)
+        norm_adv_min = np.min(advantages)
+
+        ratio_gt_1 = np.mean(np.abs(advantages) > 1.0)
+        ratio_gt_2 = np.mean(np.abs(advantages) > 2.0)
+        ratio_gt_3 = np.mean(np.abs(advantages) > 3.0)
+
+        print("========== Advantage Stats (After Normalization) ==========")
+        print(f"mean={norm_adv_mean:.6f}, std={norm_adv_std:.6f}, "
+              f"min={norm_adv_min:.6f}, max={norm_adv_max:.6f}")
+        print(f"|A|>1: {ratio_gt_1:.2%}, |A|>2: {ratio_gt_2:.2%}, |A|>3: {ratio_gt_3:.2%}")
+
+        # ===== 5. 看几个样本 =====
+        print("Raw advantage sample:", raw_advantages[:10].reshape(-1))
+        print("Norm advantage sample:", advantages[:10].reshape(-1))
+
+        train_info = {
+            'critic_loss': [],
+            'actor_loss': [],
+            'dist_entropy': [],
+            'ratio': [],
+            'mean_entropy_trigger': [],
+            'mean_entropy_sub': [],
+            'raw_adv_mean': raw_adv_mean,
+            'raw_adv_std': raw_adv_std,
+            'raw_adv_min': raw_adv_min,
+            'raw_adv_max': raw_adv_max,
+            'norm_adv_mean': norm_adv_mean,
+            'norm_adv_std': norm_adv_std,
+            'norm_adv_min': norm_adv_min,
+            'norm_adv_max': norm_adv_max,
+            'norm_adv_abs_gt_1': ratio_gt_1,
+            'norm_adv_abs_gt_2': ratio_gt_2,
+            'norm_adv_abs_gt_3': ratio_gt_3,
+        }
+
+        # train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'ratio': [], 'mean_entropy_trigger':[], 'mean_entropy_sub': []}
 
         for _ in range(self.ppo_epoch):
             for batch in self.buffer.generate_batches():

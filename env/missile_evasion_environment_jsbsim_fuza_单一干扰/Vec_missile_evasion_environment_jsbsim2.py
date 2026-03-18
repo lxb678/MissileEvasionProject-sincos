@@ -33,7 +33,7 @@ class AirCombatEnv(gym.Env):
     - PID Controller: 负责飞机机动控制 (连续动作)，执行预设的规避策略。
     """
 
-    def __init__(self, tacview_enabled=False, dt=0.02):
+    def __init__(self, tacview_enabled=False, dt=0.05):
         super().__init__()
 
         # --- 1. 定义动作空间 (仅保留离散动作) ---
@@ -69,12 +69,12 @@ class AirCombatEnv(gym.Env):
         self.dt_small = dt #0.02 #dt  # 小步长
         self.dt_flare = dt  # 投放时的步长
         self.R_switch = 400  # 切换精细步长的距离阈值
-        self.dt_dec = 0.5 #0.4 #0.2  # 决策间隔 (RL动作更新频率)
+        self.dt_dec = 0.4 #0.5 #0.4 #0.2  # 决策间隔 (RL动作更新频率)
         self.physical_dt = dt  # 物理仿真基准步长
 
         # --- 4. 导引头与环境参数 ---
         self.t_end = 60.0
-        self.R_kill = 15.0 #12.0
+        self.R_kill = 12.0
         self.D_max = 30000.0
         self.Angle_IR_rad = np.deg2rad(90)
         self.omega_max_rad_s = np.deg2rad(90.0)
@@ -109,9 +109,11 @@ class AirCombatEnv(gym.Env):
         self.done = False
         self.success = False
         self.miss_distance = None
-        self.o_ir = 30
-        self.N_infrared = 30
+        self.o_ir = 24
+        self.N_infrared = 24
         self.episode_count = 0
+        self.intra_interval = 0.05  # 0.04   #弹间隔
+        self.checkdis = 50  # 100m 是一个安全的启动阈值
 
         # 历史记录
         self.aircraft_history = []
@@ -194,7 +196,7 @@ class AirCombatEnv(gym.Env):
 
         # 飞机初始状态
         aircraft_pitch = np.deg2rad(np.random.uniform(-30, 30))  # 初始平飞或微俯仰
-        aircraft_vel = np.random.uniform(300, 400)
+        aircraft_vel = np.random.uniform(250, 350)
         self.target_speed = aircraft_vel
 
         # 飞机初始航向：为了增加难度，可以设为迎头或随机
@@ -266,7 +268,7 @@ class AirCombatEnv(gym.Env):
         release_flare_program = (trigger_cmd_idx == 1)
         if release_flare_program:
             # 假设 intra_interval 固定为 0.04s (与 PPO 定义一致)
-            intra_interval = 0.04 #0.05 #0.04
+            intra_interval = self.intra_interval#0.05 #0.04
             self._execute_flare_program(salvo_size_idx, intra_interval, num_groups_idx, inter_interval_idx)
 
         # --- 3. 准备物理循环 ---
@@ -619,7 +621,7 @@ class AirCombatEnv(gym.Env):
         执行一步物理更新
         """
         # --- 1. 更新诱饵弹 ---
-        self.flare_manager.update(self.t_now, dt, self.aircraft)
+        # self.flare_manager.update(self.t_now, dt, self.aircraft)
 
         # --- 2. 计算导引头目标 ---
         target_pos_equiv = self._calculate_equivalent_target()
@@ -648,11 +650,16 @@ class AirCombatEnv(gym.Env):
         # missile_state_next = self.missile._missile_dynamics(self.missile.state_vector, dt, theta_L_dot, phi_L_dot)
 
         # --- 4. 更新时间与历史 ---
-        self.t_now += dt
-        self.tacview_global_time += dt
+        # self.t_now += dt
+        # self.tacview_global_time += dt
+
+        self.flare_manager.update(self.t_now, dt, self.aircraft)
 
         # 飞机更新 (JSBSim)
         self.aircraft.update(aircraft_action)
+
+        self.t_now += dt
+        self.tacview_global_time += dt
 
         self.aircraft_history.append(self.aircraft.state_vector.copy())
         self.missile_history.append(missile_state_next.copy())
@@ -866,7 +873,7 @@ class AirCombatEnv(gym.Env):
 
         # 2. 区间插值判定
         R_rel_prev = np.linalg.norm(T1 - M1)
-        if min(R_rel_prev, R_rel_now) > 20: return
+        if min(R_rel_prev, R_rel_now) > self.checkdis: return
 
         A = T1 - M1
         B = (T2 - T1) - (M2 - M1)
@@ -926,20 +933,50 @@ class AirCombatEnv(gym.Env):
         Ry_rel = self.missile.pos[1] - self.aircraft.pos[1]
         o_theta_L_rel_rad = np.arcsin(np.clip(Ry_rel / (R_rel + 1e-6), -1.0, 1.0))
 
-        # <<< 模糊距离逻辑 >>>
-        # 1. 生成随机模糊参数
-        d_mohu = np.random.randint(500, 1000)
-        d_min_offset = np.random.randint(100, 400)
-        d_max_offset = d_mohu - d_min_offset
+        # # <<< 模糊距离逻辑 >>>
+        # # 1. 生成随机模糊参数
+        # d_mohu = np.random.randint(500, 1000)
+        # d_min_offset = np.random.randint(100, 400)
+        # d_max_offset = d_mohu - d_min_offset
+        #
+        # # 2. 计算区间
+        # o_dis_min_val = max(0.0, R_rel - d_min_offset)
+        # o_dis_max_val = R_rel + d_max_offset
+        #
+        # # 3. 归一化 (参考最大距离 10000m)
+        # max_obs_dist = 10000.0
+        # o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
+        # o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
 
-        # 2. 计算区间
-        o_dis_min_val = max(0.0, R_rel - d_min_offset)
-        o_dis_max_val = R_rel + d_max_offset
+        # <<< 修改开始：实现基于比例的模糊距离区间 + [-1, 1] 归一化 >>>
 
-        # 3. 归一化 (参考最大距离 10000m)
+        # 1. 设定传感器误差参数
+        BASE_NOISE_M = 200.0  # 基础测距噪声 (模拟近距离时的最小固有误差)
+        ERROR_RATIO = 0.25  # 比例误差率 (25%)，模拟 MAWS 根据强度测距的不确定性
+
+        # 2. 计算动态的上下界偏差
+        # 距离越远，绝对误差越大；距离越近，绝对误差趋近于基础噪声
+        max_offset = BASE_NOISE_M + R_rel * ERROR_RATIO
+
+        # 为了让网络感受到一个波动的“区间”，我们在最大允许误差内随机生成当前的观测边界
+        # 随机生成向下和向上的波动比例 (0.5 到 1.0 之间，确保总是存在明显的模糊区间)
+        rand_lower_factor = np.random.uniform(0.5, 1.0)
+        rand_upper_factor = np.random.uniform(0.5, 1.0)
+
+        actual_min_offset = max_offset * rand_lower_factor
+        actual_max_offset = max_offset * rand_upper_factor
+
+        # 3. 计算模糊后的物理距离区间 (防御性编程：距离不能小于0)
+        o_dis_min_val = max(0.0, R_rel - actual_min_offset)
+        o_dis_max_val = R_rel + actual_max_offset
+
+        # 4. 归一化到 [-1, 1]
         max_obs_dist = 10000.0
+
         o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
         o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
+
+        # <<< 修改结束 >>>
 
         missile_obs = [
             o_dis_min_norm,
@@ -988,6 +1025,9 @@ class AirCombatEnv(gym.Env):
         current_R_rel = np.linalg.norm(self.aircraft.pos - self.missile.pos)
         range_rate = (current_R_rel - self.prev_R_rel) / dt if self.prev_R_rel else 0.0
 
+        # <<< 核心修复：计算完毕后必须立刻覆盖，防止子步长产生累积除法异常 >>>
+        self.prev_R_rel = current_R_rel
+
         # 检查锁定
         lock_aircraft, _, _, _, _ = self._check_seeker_lock(
             self.missile.state_vector, self.aircraft.state_vector,
@@ -1013,7 +1053,7 @@ class AirCombatEnv(gym.Env):
         else:
             self.lost_and_separating_duration = 0.0
 
-        if self.escape_timer >= 2.0 or self.lost_and_separating_duration >= 2.0:
+        if self.escape_timer >= 1.0 or self.lost_and_separating_duration >= 1.0:
             self.done, self.success = True, True
             return
 

@@ -18,13 +18,13 @@ class RewardCalculator:
 
     def __init__(self):
         # --- 所有超参数保持不变 ---
-        self.W = 6 #5 #10 #20
-        self.U = -10 #-20
+        self.W = 8 #5 #6 #5 #10 #20
+        self.U = -10 #-10 #-20
 
         # <<< 新增 >>>: 单枚导弹成功规避的补偿奖励
         # 即使任务失败，每躲过一枚导弹，惩罚减少 5.0
         # 逻辑: 2枚导弹，全中=-20，躲过1枚=-10，全躲过=SUCCESS(+20)
-        self.PARTIAL_EVASION_BONUS = 5.0
+        self.PARTIAL_EVASION_BONUS = 2.0 #5.0
 
         # self.SAFE_ALTITUDE_M = 3000.0
         # --- 所有超参数 ---
@@ -71,6 +71,8 @@ class RewardCalculator:
         # --- [修改这里] ---
         # [修改] 能量保持奖励相关的状态变量
         self.prev_energy = None  # <<< 改为记录上一时刻的能量
+        self.survival_steps = 0
+        self.prev_speed = None
 
     def reset(self):
         """为新回合重置状态变量。"""
@@ -80,6 +82,8 @@ class RewardCalculator:
         # ---[修改这里] ---
         # [修改] 重置能量记录
         self.prev_energy = None  # <<< 回合开始时重置为None
+        self.survival_steps = 0
+        self.prev_speed = None
 
     # <<< 新增 >>>: 用于在外部更新 alpha 的接口
     def set_attention_blending_alpha(self, alpha: float):
@@ -153,12 +157,12 @@ class RewardCalculator:
 
             total_safety_bonus = 0.0
             # 动态分配满分奖励：假如有2枚导弹，满分额外奖励20分，则每枚贡献10分
-            max_bonus_per_missile = 4.0 / len(missiles)
+            max_bonus_per_missile = 2.0 / len(missiles)
 
             for dist in closest_distances:
                 extra_margin = max(0.0, dist - R_kill)
                 # 每枚导弹的安全裕度奖励 (指数衰减，防止无限刷分)
-                bonus = max_bonus_per_missile * (1.0 - math.exp(-extra_margin / 100.0))
+                bonus = max_bonus_per_missile * (1.0 - math.exp(-extra_margin / 200.0))
                 total_safety_bonus += bonus
 
             # print("成功奖励: ", base_reward + total_safety_bonus)
@@ -338,7 +342,7 @@ class RewardCalculator:
                                           flare_trigger_action: float) -> float:
         """计算针对单个导弹的所有相关奖励项的总和。"""
         # reward_posture = 1.0 * self._compute_missile_posture_reward_blend(aircraft, missile)  #去掉看效果
-        # reward_closing_velocity = 0.5 * self._reward_for_closing_velocity_change(aircraft, missile, dt=0.2)
+        # reward_closing_velocity = 0.5 * self._reward_for_closing_velocity_change(aircraft, missile, dt=0.5)
         # reward_ata_rate = 1.0 * self._reward_for_los_rate(aircraft, missile, dt=0.2)
         # reward_flare_timing = 1.0 * self._compute_flare_timing_reward(flare_trigger_action, aircraft, missile) #去掉看效果
         # <<< 新增：计算纯尾后姿态奖励 (权重 0.5) >>>
@@ -347,28 +351,39 @@ class RewardCalculator:
         reward_los_rate = 1.0 * self._reward_for_los_rate(aircraft, missile, dt=0.2)
         # 高G机动奖励可以与机动有效性（ATA Rate）相乘
         reward_high_g = 1.0 * self._reward_for_high_g_maneuver(aircraft)
-        final_high_g_reward = 1.0 * reward_high_g * reward_los_rate
+        # final_high_g_reward = 1.0 * reward_high_g * reward_los_rate
+        # 1. 视线角速率奖励独立结算（它是规避的核心）
+        w_los_rate = 0.5
+        final_los_rate_reward = w_los_rate * reward_los_rate
+
+        # 2. 高G奖励作为“有效规避”的额外加成
+        # 只有当 LOS Rate 达到一定水平（说明机动方向是对的），拉高G才有意义。
+        # 如果 LOS Rate 极低（比如正迎头或正尾追），拉再高的G也是白费能量，不给加成。
+        w_high_g_bonus = 0.5
+        final_high_g_reward = w_high_g_bonus * (reward_high_g * reward_los_rate)
 
         # # <<< 新增：调用分离加速度奖励 >>>
         # reward_separation_accel = 0.5 * self._reward_for_separation_acceleration(aircraft, missile)
 
-        return final_high_g_reward #+ reward_posture #+ reward_los_rate
+        return final_high_g_reward + final_los_rate_reward #+ reward_closing_velocity#+ reward_posture #+ reward_los_rate
 
     def _calculate_general_rewards(self, aircraft: Aircraft, flare_trigger_action: float,
                                    remaining_flares: int, total_flares: int,
                                    missile_related_reward: float, primary_threat: Optional[Missile]) -> float:
         """计算与特定导弹无关的通用奖励/惩罚。"""
         reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #0.5
-        reward_resource = 1.0 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares)
+        reward_resource = 2.0 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares)
         reward_roll_penalty = 0.5 * self._penalty_for_roll_rate_magnitude(aircraft) #0.5
         # reward_coordinated_turn = 0.5 * self._reward_for_coordinated_turn(aircraft, 0.2)  # 降低权重
         reward_punish_push_down = 0.5 * self._reward_for_punish_push_down(aircraft)
         # reward_speed = 0.5 * self._reward_for_maintaining_speed(aircraft)
-        reward_survivaltime = 0.5 #0.4 #0.2 #0.5 #0.2  # 每步存活奖励
+        reward_survivaltime = 0.5 #0.2 #0.5 #0.2  # 每步存活奖励
+        # reward_survivaltime = 1.0 * self._reward_for_scaling_survival()
         # <<< 新增：能量保持奖励 >>>
         # 权重建议：0.5。
         # 如果飞机能量掉得太快（例如做完机动就失速坠毁），可以将权重提高到 1.0
-        reward_energy_maintain = 10.0 * self._reward_for_energy_rate_simple(aircraft)
+        # reward_energy_maintain = 20.0 * self._reward_for_energy_rate_simple(aircraft)
+        # reward_speed_maintain = 20.0 * self._reward_for_speed_rate_simple(aircraft)
 
         return (
                 missile_related_reward +
@@ -378,9 +393,57 @@ class RewardCalculator:
                 # reward_coordinated_turn +
                 reward_punish_push_down +
                 # reward_speed +
-                reward_survivaltime +
-                reward_energy_maintain  # <--- 加入总和
+                reward_survivaltime
+                # reward_energy_maintain  # <--- 加入总和
+            # + reward_speed_maintain
         )
+
+    def _reward_for_speed_rate_simple(self, aircraft: Aircraft) -> float:
+        """
+        速度变化率奖励：奖励加速，惩罚减速。
+        (已修复震荡刷分漏洞，采用固定基准分母保证对称性)
+        """
+        current_speed = aircraft.velocity
+
+        # 1. 初始状态记录 (需要你在 __init__ 和 reset 里加上 self.prev_speed = None)
+        if getattr(self, "prev_speed", None) is None:
+            self.prev_speed = current_speed
+            return 0.0
+
+        # 2. 计算速度的绝对差值
+        delta_speed = current_speed - self.prev_speed
+
+        # # 3. 核心修复：除以固定常数！
+        # # 使用 340.0 (约1马赫) 作为固定缩放基准。
+        # # 这样一来，掉速 10m/s 惩罚 -10/340，提速 10m/s 奖励 +10/340，完美抵消，无法刷分。
+        # REFERENCE_SPEED = 340.0
+        #
+        # reward = delta_speed / REFERENCE_SPEED
+        # 3. 核心逻辑：只惩罚掉速
+        REFERENCE_SPEED = 340.0
+        if delta_speed >= 0:
+            reward = 0.1 / 20.0   # 加速不额外给分，防止 AI 变成“直线火箭”
+        else:
+            reward = delta_speed / REFERENCE_SPEED  # 减速严厉扣分
+
+        # 4. 更新记录以备下一步使用
+        self.prev_speed = current_speed
+
+        return reward
+
+    def _reward_for_scaling_survival(self) -> float:
+        """
+        时间递增存活奖励。
+        存活时间越长，每一步获得的分数越高。鼓励智能体在导弹最危险的末端拦截期坚持下去。
+        """
+        self.survival_steps += 1
+
+        # 基础分 1.0，每多活一步增加一个小分值（例如 0.005）
+        # 假设一回合 200 步，最后一步的存活奖励将是 1.0 + 1.0 = 2.0
+        scaling_factor = 0.01
+        current_reward = 0.5 + (self.survival_steps * scaling_factor)
+
+        return current_reward
 
     def _reward_for_energy_rate_simple(self, aircraft: Aircraft) -> float:
         """
@@ -559,7 +622,7 @@ class RewardCalculator:
         cos_ata = np.dot(r_vec, missile_v_vec) / (r_norm * norm_missile_v)
 
         if cos_ata < 0:
-            return 1.0  # 安全状态，威胁解除
+            return 0.0  # 安全状态，威胁解除 0.5
 
         # --- 3. 解析法核心计算 ---
         # 公式: Omega = |r x v_rel| / r^2
@@ -577,7 +640,7 @@ class RewardCalculator:
         TARGET_LOS_RATE = 0.2
 
         # 线性映射
-        normalized_reward = los_rate #/ TARGET_LOS_RATE
+        normalized_reward = 2.0 * los_rate #/ TARGET_LOS_RATE
 
         # 截断到 [0, 1]
         reward = np.clip(normalized_reward, 0.0, 1.0)
@@ -1271,14 +1334,14 @@ class RewardCalculator:
         cos_ata = np.dot(relative_pos_vec, missile_v_vec) / (distance * norm_missile_v)
         if cos_ata < 0:
             missile_hist['prev_closing_velocity'] = None
-            return 1.0
+            return 0.0 #1.0
         closing_velocity_current = -np.dot(relative_vel_vec, relative_pos_vec) / (distance + 1e-6)
         reward = 0.0
         prev_vel = missile_hist['prev_closing_velocity']
         if prev_vel is not None:
             delta_V_close = closing_velocity_current - prev_vel
             reward_base = -delta_V_close
-            SENSITIVITY = 0.1
+            SENSITIVITY = 0.01
             reward = np.tanh(reward_base * SENSITIVITY)
         missile_hist['prev_closing_velocity'] = closing_velocity_current
         return max(0.0, reward)

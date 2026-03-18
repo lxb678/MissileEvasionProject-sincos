@@ -102,7 +102,7 @@ class AirCombatEnv(gym.Env):
         # --- 仿真参数 ---
         # self.dt = 0.1  # 这是外部决策步长
         self.t_end = 60.0
-        self.R_kill = 15.0 #12.0
+        self.R_kill = 12.0
 
         # --- (中文) 新增：补全缺失的内部循环参数 ---
         # 这些参数决定了在 step 方法内部的物理仿真是如何运行的
@@ -1375,12 +1375,12 @@ class AirCombatEnv(gym.Env):
             self.lost_and_separating_duration = 0.0
 
         # c) 检查是否触发成功
-        if self.escape_timer >= 2.0:#1.0:  # 使用您代码中的 ESCAPE_DURATION_REQ
+        if self.escape_timer >= 1.0:#1.0:  # 使用您代码中的 ESCAPE_DURATION_REQ
             # print(f">>> 成功逃逸(物理)！(导弹更慢且距离拉大已持续 {self.escape_timer:.1f}s)，仿真提前终止!")
             self.done, self.success = True, True
             return
 
-        elif self.lost_and_separating_duration >= 2.0:#1.0:
+        elif self.lost_and_separating_duration >= 1.0:#1.0:
             # print(f">>> 成功逃逸(信息)！(持续丢失目标且距离拉大已持续 {self.lost_and_separating_duration:.1f}s)，仿真提前终止!")
             self.done, self.success = True, True
             return

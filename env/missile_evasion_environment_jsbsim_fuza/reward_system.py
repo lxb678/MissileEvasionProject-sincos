@@ -18,8 +18,8 @@ class RewardCalculator:
         # --- 在这里集中定义所有奖励相关的超参数 ---
 
         # [稀疏奖励参数]
-        self.W = 6 #5 #10 #20 #50  # 成功奖励基准
-        self.U = -10 #-20  # 失败固定惩罚
+        self.W = 8 #6 #5 #10 #20 #50  # 成功奖励基准
+        self.U = -10#-8 #-10 #-20  # 失败固定惩罚
 
         # [高度惩罚参数]
         self.SAFE_ALTITUDE_M = 3000.0
@@ -82,6 +82,8 @@ class RewardCalculator:
         # [新增] 能量保持奖励相关的状态变量
         self.initial_specific_energy = None  # 用于存储回合初始的比能量
         self.prev_energy = None  # <<< 新增：记录上一时刻的能量
+        self.survival_steps = 0
+        self.prev_speed = None
 
     def reset(self):
             """为新回合重置状态变量。"""
@@ -104,6 +106,11 @@ class RewardCalculator:
             # [新增] 重置初始能量记录
             self.initial_specific_energy = None
             self.prev_energy = None  # <<< 新增：回合开始时重置
+
+            self.survival_steps = 0
+
+            self.prev_speed = None
+
 
 
 
@@ -139,8 +146,8 @@ class RewardCalculator:
             extra_margin = miss_distance - R_kill
 
             # 假设 MAX_BONUS = 20.0，脱靶量比 R_kill 多出 100 米时，拿到约 63% 的额外奖励
-            max_bonus = 4.0
-            safety_bonus = max_bonus * (1.0 - math.exp(-extra_margin / 100.0))
+            max_bonus = 2.0 #3.0 #4.0
+            safety_bonus = max_bonus * (1.0 - math.exp(-extra_margin / 200.0))
 
             # 最终奖励范围：[W, W + max_bonus) -> 例如[20, 40)
             # print("成功奖励",base_reward + safety_bonus)
@@ -188,10 +195,12 @@ class RewardCalculator:
         reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #高度惩罚阶跃
         # <<< 核心修正 >>> ---
         # 将提取出的 flare_trigger_action 传递给资源惩罚函数
-        reward_resource = 1.0 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
+        reward_resource = 2.0 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
         reward_roll_penalty = 0.5 * self._penalty_for_roll_rate_magnitude(aircraft)  #1.14修改，原来是0.5  1.15号，感觉0.1好像不太行
         # reward_speed_penalty = 0.5 * self._penalty_for_dropping_below_speed_floor(aircraft)  #1.0速度惩罚还可以再大点感觉，或者加一个速度奖励
         reward_survivaltime = 0.5 #0.4 #0.2 #0.5 #0.2  # 每步存活奖励
+        # 调用纯存活奖励
+        # reward_survivaltime = 1.0 * self._reward_for_scaling_survival()
         # reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
         # reward_dive = self._reward_for_tactical_dive_smooth(aircraft, missile)
         # reward_coordinated_turn = 0.5 * self._reward_for_coordinated_turn(aircraft, 0.2)
@@ -205,6 +214,8 @@ class RewardCalculator:
         # # 使用新的 tau 加速度奖励
         # reward_tau_accel = self._reward_for_tau_acceleration(aircraft, missile)
 
+
+
         # [新] 使用您指定的 ATA Rate 奖励
         w_ata_rate = 1.0 #1.0 # [新] 为 ATA Rate 设置一个高权重
         # reward_ata_rate = w_ata_rate * self._reward_for_los_rate(aircraft, missile, 0.2)
@@ -215,7 +226,7 @@ class RewardCalculator:
         # reward_taa_rate = w_taa_rate * self._reward_for_taa_rate(aircraft, missile, 0.2)
 
         # #接近速度奖励
-        # reward_closing_velocity = 0.5 * self._reward_for_closing_velocity_change(aircraft, missile, dt = 0.2)
+        # reward_closing_velocity = 0.5 * self._reward_for_closing_velocity_change(aircraft, missile, dt = 0.5)
 
         # <<< 新增：调用干扰弹时机奖励函数 >>>
         # 将新奖励的权重也在这里设置，例如 1.0
@@ -225,16 +236,27 @@ class RewardCalculator:
         # 在这里设置新奖励的权重，例如 0.5
         reward_high_g = 1.0 * self._reward_for_high_g_maneuver(aircraft)
 
-        # 在主函数 calculate_dense_reward 中
-        # reward_ata_rate = self._reward_for_ata_rate(...) # 假设范围是 [0, 1]
-        # reward_high_g_base = self._reward_for_high_g_maneuver(...) # 假设范围是 [0, 1]
-        # 最终奖励 = 基础G力奖励 * 机动有效性
-        final_high_g_reward = 1.0 * reward_high_g * reward_los_rate  #1.8号修改，原来是0.5
+        # 1. 视线角速率奖励独立结算（它是规避的核心）
+        w_los_rate = 0.5
+        final_los_rate_reward = w_los_rate * reward_los_rate
+
+        # 2. 高G奖励作为“有效规避”的额外加成
+        # 只有当 LOS Rate 达到一定水平（说明机动方向是对的），拉高G才有意义。
+        # 如果 LOS Rate 极低（比如正迎头或正尾追），拉再高的G也是白费能量，不给加成。
+        w_high_g_bonus = 0.5
+        final_high_g_reward = w_high_g_bonus * (reward_high_g * reward_los_rate)
+
+        # # 在主函数 calculate_dense_reward 中
+        # # reward_ata_rate = self._reward_for_ata_rate(...) # 假设范围是 [0, 1]
+        # # reward_high_g_base = self._reward_for_high_g_maneuver(...) # 假设范围是 [0, 1]
+        # # 最终奖励 = 基础G力奖励 * 机动有效性
+        # final_high_g_reward = 1.0 * reward_high_g * reward_los_rate  #1.8号修改，原来是0.5
 
         # <<< 新增：能量保持奖励 >>>
         # 建议权重：0.2 到 0.5。
         # 不需要太高，因为生存才是第一位的。它主要用于区分"也是躲开了，但是能量耗尽"和"完美躲开且能量充沛"这两种情况。
-        reward_energy_maintain = 10.0 * self._reward_for_energy_rate_simple(aircraft)
+        # reward_energy_maintain = 20.0 * self._reward_for_energy_rate_simple(aircraft)
+        # reward_speed_maintain = 20.0 * self._reward_for_speed_rate_simple(aircraft)
 
 
         # # <<< 新增 >>> 调用新的分离速度奖励函数，权重可以设高一些，因为它代表了核心生存策略
@@ -254,6 +276,7 @@ class RewardCalculator:
                 reward_altitude +
                 reward_resource +
                 reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的   #去掉看效果   还是很有必要的
+                final_los_rate_reward +
                 # reward_speed_penalty  # reward_for_optimal_speed基准是负的   #速度暂时不需要了
                 + reward_survivaltime
                 # + reward_los
@@ -271,17 +294,19 @@ class RewardCalculator:
                 # + reward_flare_timing  #去掉看效果
                 # + reward_high_g  # <<< 新增：将高G奖励加入总和 >>>
                 + final_high_g_reward
-           + reward_energy_maintain
+            # + reward_speed_maintain
+           # + reward_energy_maintain
         )
         # print(
         #     # f"reward_posture: {reward_posture:.2f}",
         #      #f"reward_head_on_penalty: {reward_head_on_penalty:.2f}",
-        #     f"reward_energy_maintain: {reward_energy_maintain:.3f} "
+        #     # f"reward_energy_maintain: {reward_energy_maintain:.3f} "
+        #     # f"reward_speed_maintain: {reward_speed_maintain:.3f} "
         #       f"reward_altitude: {reward_altitude:.2f}",
         #       f"reward_resource: {reward_resource:.2f}",
         #       f"reward_roll_penalty: {reward_roll_penalty:.2f}",
         #       # f"reward_speed_penalty: {reward_speed_penalty:.2f}",
-        #       #   f"reward_survivaltime: {reward_survivaltime:.2f}",
+        #         f"reward_survivaltime: {reward_survivaltime:.2f}",
         #       #   f"reward_los: {reward_los:.2f}",
         #       #   f"reward_dive: {reward_dive:.2f}",
         #       #   f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
@@ -298,10 +323,57 @@ class RewardCalculator:
         #     f"reward_high_g: {reward_high_g:.2f}",
         #     # f"reward_speed: {reward_speed:.2f}",
         #     f"final_high_g_reward: {final_high_g_reward:.2f}",
+        #      f"final_los_rate_reward: {final_los_rate_reward:.2f}",
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
 
+    def _reward_for_speed_rate_simple(self, aircraft: Aircraft) -> float:
+        """
+        速度变化率奖励：奖励加速，惩罚减速。
+        (已修复震荡刷分漏洞，采用固定基准分母保证对称性)
+        """
+        current_speed = aircraft.velocity
+
+        # 1. 初始状态记录 (需要你在 __init__ 和 reset 里加上 self.prev_speed = None)
+        if getattr(self, "prev_speed", None) is None:
+            self.prev_speed = current_speed
+            return 0.0
+
+        # 2. 计算速度的绝对差值
+        delta_speed = current_speed - self.prev_speed
+
+        # 3. 核心修复：除以固定常数！
+        # 使用 340.0 (约1马赫) 作为固定缩放基准。
+        # 这样一来，掉速 10m/s 惩罚 -10/340，提速 10m/s 奖励 +10/340，完美抵消，无法刷分。
+        # REFERENCE_SPEED = 340.0
+
+        # reward = delta_speed / REFERENCE_SPEED
+        # 3. 核心逻辑：只惩罚掉速
+        REFERENCE_SPEED = 340.0
+        if delta_speed >= 0:
+            reward = 0.1 / 20.0  # 加速不额外给分，防止 AI 变成“直线火箭”
+        else:
+            reward = delta_speed / REFERENCE_SPEED  # 减速严厉扣分
+
+        # 4. 更新记录以备下一步使用
+        self.prev_speed = current_speed
+
+        return reward
+
+    def _reward_for_scaling_survival(self) -> float:
+        """
+        时间递增存活奖励。
+        存活时间越长，每一步获得的分数越高。鼓励智能体在导弹最危险的末端拦截期坚持下去。
+        """
+        self.survival_steps += 1
+
+        # 基础分 1.0，每多活一步增加一个小分值（例如 0.005）
+        # 假设一回合 200 步，最后一步的存活奖励将是 1.0 + 1.0 = 2.0
+        scaling_factor = 0.01
+        current_reward = 0.5 + (self.survival_steps * scaling_factor)
+
+        return current_reward
     def _reward_for_energy_rate_simple(self, aircraft: Aircraft) -> float:
         """
         极简版能量奖励：(当前能量 - 上一时刻能量) / 上一时刻能量
@@ -458,7 +530,7 @@ class RewardCalculator:
         cos_ata = np.dot(r_vec, missile_v_vec) / (r_norm * norm_missile_v)
 
         if cos_ata < 0:
-            return 1.0  # 安全状态，威胁解除
+            return 0.0  # 安全状态，威胁解除 0.5
 
         # --- 3. 解析法核心计算 ---
         # 公式: Omega = |r x v_rel| / r^2
@@ -475,7 +547,7 @@ class RewardCalculator:
         TARGET_LOS_RATE = 0.2
 
         # 线性映射
-        normalized_reward = los_rate #/ TARGET_LOS_RATE
+        normalized_reward = 2.0 * los_rate #/ TARGET_LOS_RATE
 
         # 截断到 [0, 1]
         # reward = los_rate #np.clip(normalized_reward, 0.0, 1.0)
@@ -1864,12 +1936,14 @@ class RewardCalculator:
         cos_ata = np.dot(relative_pos_vec, missile_v_vec) / (distance * norm_missile_v)
         if cos_ata < 0:  # 飞机在导弹后半球，威胁解除
             self.prev_closing_velocity = None  # 重置历史
-            return 1.0  # <<< MODIFIED >>> 给予最大奖励
-            # return 0.0  # 威胁解除时，不计算此奖励
+            # return 1.0  # <<< MODIFIED >>> 给予最大奖励
+            return 0.0  # 威胁解除时，不计算此奖励
 
         # --- 3. 计算接近速度 ---
         # 避免在距离为0时除零
         closing_velocity_current = -np.dot(relative_vel_vec, relative_pos_vec) / (distance + 1e-6)
+
+        # print(closing_velocity_current)
 
         # --- 4. 计算奖励 ---
         reward = 0.0
@@ -1885,7 +1959,7 @@ class RewardCalculator:
             #    SENSITIVITY决定了多大的速度变化能让奖励饱和。
             #    例如，SENSITIVITY=0.1 意味着 +/- 10 m/s 的速度变化就能让奖励接近 +/- 1.0
             #    这个值需要根据您的环境进行调整。
-            SENSITIVITY = 0.1
+            SENSITIVITY = 0.01
             reward = np.tanh(reward_base * SENSITIVITY)
 
         # --- 5. 更新历史状态以备下一步使用 ---

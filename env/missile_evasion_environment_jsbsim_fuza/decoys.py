@@ -13,8 +13,8 @@ class Flare:
     """
 
     def __init__(self, position: np.ndarray, velocity: np.ndarray, release_time: float,
-                 m0=0.5, m_dot=0.01, rho=1.225, c=0.5, s=0.005,
-                 I_max=20000, t1=0.5, t2=4.0, t3=5.0):   #原来是10000，0.01,3.5
+                 m0=0.5, m_dot=0.1, rho=1.225, c=0.5, s=0.005,
+                 I_max= 5000, t1=0.5, t2=3.5, t3=5.0):   #原来是10000，0.01,3.5            s=0.005  I_max=20000 t2=4.0  c=0.5
         """
         初始化单个诱饵弹。
         """
@@ -52,10 +52,30 @@ class Flare:
         if v_mag < 1e-6:  # 避免除零
             return
 
+        # ==========================================
+        # 核心修正：使用国际标准大气(ISA)模型计算动态空气密度
+        # ==========================================
+        H = self.pos[1]  # Y轴是高度
+        # print(H)
+        Temper = 15.0
+        # 标准温度递减率: 0.0065度/米 (即每100米降0.65度)
+        T_H = 273.15 + Temper - 0.0065 * H
+
+        # 计算气压比 (44330m 是对流层等效极限高度)
+        if H < 44330:
+            P_H = (1 - H / 44330.0) ** 5.256
+        else:
+            P_H = 0.0
+
+        # 根据理想气体状态方程计算当前高度密度
+        # 1.2922 是 0摄氏度、标准大气压下的空气密度
+        current_rho = 1.2922 * P_H * (273.15 / max(T_H, 0.01))
+        # ==========================================
+
         # (中文) 您的代码中，m_t, f, a 的计算依赖于固定的rho，这里保持一致
         # 更真实的模型会让 rho 随高度变化
         m_t = max(self.m0 - self.m_dot * t_rel, 0.01)
-        f_drag = 0.5 * self.rho * v_mag ** 2 * self.c * self.s
+        f_drag = 0.5 * current_rho * v_mag ** 2 * self.c * self.s
         a_drag_vec = - (f_drag / m_t) * (self.vel / v_mag)
 
         total_accel = a_drag_vec + self.g_vec
@@ -87,7 +107,7 @@ class FlareManager:
     管理所有诱饵弹的投放计划、创建和更新。
     """
 
-    def __init__(self, flare_per_group=1, interval=0.1, release_speed=50):  #原来是50
+    def __init__(self, flare_per_group=1, interval=0.1, release_speed=40):  #原来是50
         self.flare_per_group = flare_per_group
         self.interval = interval
         self.release_speed = release_speed
@@ -170,28 +190,80 @@ class FlareManager:
             # 获取飞机当前状态 (只在需要释放时获取一次)
             aircraft_pos = aircraft.pos
             aircraft_vel_vec = aircraft.get_velocity_vector()
-            phi, theta, psi = aircraft.attitude_rad  # 确保顺序正确: roll, pitch, yaw
+            # phi, theta, psi = aircraft.attitude_rad  # 确保顺序正确: roll, pitch, yaw
+            # 【核心修正】：必须与 Aircraft.attitude_rad 的返回值 (theta, psi, phi) 一致！
+            theta, psi, phi = aircraft.attitude_rad
 
             # --- 计算释放方向 ---
-            # 机体坐标系下的“后下方”方向向量 (x前, y上, z右)
-            # v_b = np.array([-1.0, -1.0, 0.0])
-            v_b = np.array([0.0, -1.0, 0.0])
-            v_b /= np.linalg.norm(v_b)
+            # 【核心修正2】：在 JSBSim 标准的 FRD (前、右、下) 机体坐标系中
+            # 垂直机体向下 (即机腹方向) 是 Z 轴正方向！
+            v_b = np.array([0.0, 0.0, 1.0])
 
-            # (中文) 使用更标准的 ZYX 欧拉角旋转顺序 (Yaw-Pitch-Roll)
-            # 这通常比分别应用旋转矩阵更稳健
             cr, sr = np.cos(phi), np.sin(phi)
             cp, sp = np.cos(theta), np.sin(theta)
             cy, sy = np.cos(psi), np.sin(psi)
 
-            # 从机体到世界的旋转矩阵 R_b_to_n
+            # 【核心修正3】：将 FRD 机体坐标系直接映射到你环境的 NUE (北-天-东) 世界坐标系
+            # 行 1 = 北 (North)
+            # 行 2 = 天 (Up)
+            # 行 3 = 东 (East)
             R_b_to_n = np.array([
                 [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
-                [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
-                [-sp, sr * cp, cr * cp]
+                [sp, -sr * cp, -cr * cp],
+                [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy]
             ])
 
             release_dir_inertial = R_b_to_n @ v_b
+
+            # # --- 计算释放方向 ---
+            # # 机体坐标系下的“后下方”方向向量 (x前, y上, z右)
+            # # v_b = np.array([-1.0, -1.0, 0.0])
+            # v_b = np.array([0.0, -1.0, 0.0])
+            # v_b /= np.linalg.norm(v_b)
+            #
+            # # (中文) 使用更标准的 ZYX 欧拉角旋转顺序 (Yaw-Pitch-Roll)
+            # # 这通常比分别应用旋转矩阵更稳健
+            # cr, sr = np.cos(phi), np.sin(phi)
+            # cp, sp = np.cos(theta), np.sin(theta)
+            # cy, sy = np.cos(psi), np.sin(psi)
+            #
+            # # 从机体到世界的旋转矩阵 R_b_to_n
+            # R_b_to_n = np.array([
+            #     [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
+            #     [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
+            #     [-sp, sr * cp, cr * cp]
+            # ])
+            # # [核心修正]: 适用于 NUE (North-Up-East) 坐标系的从机体到世界的旋转矩阵
+            # # 因为世界坐标系 Y 是天，X 是北，Z 是东
+            # R_b_to_n = np.array([
+            #     [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],  # 对应世界 X (North)
+            #     [sp, cr * cp, -sr * cp],  # 对应世界 Y (Up)
+            #     [-cp * sy, -sr * sp * sy - cr * cy, -cr * sp * sy + sr * cy]  # 对应世界 Z (East)
+            # ])
+
+            # release_dir_inertial = R_b_to_n @ v_b
+
+            # # --- 计算释放方向 ---
+            # # 在 JSBSim 标准的 FRD (前、右、下) 机体坐标系中
+            # # 垂直机体向下 (即机腹方向) 是 Z 轴正方向
+            # v_b = np.array([0.0, 0.0, 1.0])
+            # # v_b /= np.linalg.norm(v_b) # 已经是单位向量，可省略
+            #
+            # cr, sr = np.cos(phi), np.sin(phi)
+            # cp, sp = np.cos(theta), np.sin(theta)
+            # cy, sy = np.cos(psi), np.sin(psi)
+            #
+            # # [终极修正]: 将 FRD 机体坐标系 直接映射到 NUE (北-天-东) 世界坐标系
+            # # 行 1 = 北 (North) = 原 NED 的 X
+            # # 行 2 = 天 (Up)    = 原 NED 的 -Z
+            # # 行 3 = 东 (East)  = 原 NED 的 Y
+            # R_b_to_n = np.array([
+            #     [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
+            #     [sp, -sr * cp, -cr * cp],
+            #     [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy]
+            # ])
+            #
+            # release_dir_inertial = R_b_to_n @ v_b
 
             # 合成诱饵弹初始速度
             v_rel = self.release_speed * release_dir_inertial

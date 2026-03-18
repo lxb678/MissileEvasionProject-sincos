@@ -31,7 +31,7 @@ class AirCombatEnv(gym.Env):
     此版本处理两个可能非同步来袭的导弹。
     """
 
-    def __init__(self, tacview_enabled=False, dt=0.02, num_missiles=2):
+    def __init__(self, tacview_enabled=False, dt=0.05, num_missiles=2):
         super().__init__()
 
         # <<< 多导弹更改 >>> 场景中的导弹数量
@@ -103,12 +103,12 @@ class AirCombatEnv(gym.Env):
 
         # --- 仿真参数 ---
         self.t_end = 60.0
-        self.R_kill = 15.0 #12.0
+        self.R_kill = 12.0
         self.dt_normal = dt
         self.dt_small = dt #0.02 #dt
         self.dt_flare = dt
         self.R_switch = 400
-        self.dt_dec = 0.5 #0.4 #0.2
+        self.dt_dec = 0.4 #0.3 #0.2
         self.D_max = 30000.0
         self.Angle_IR_rad = np.deg2rad(90)
         self.omega_max_rad_s = np.deg2rad(90.0)#12.0 #np.deg2rad(100.0) #12.0
@@ -135,9 +135,11 @@ class AirCombatEnv(gym.Env):
         # <<< 多导弹更改 >>> 将单个脱靶量替换为列表
         self.miss_distances = []
 
-        self.o_ir = 24 #30
-        self.N_infrared = 24 #30
+        self.o_ir = 16 #30
+        self.N_infrared = 16 #30
         self.prev_aircraft_state = None
+        self.intra_interval = 0.05 #0.04  # 0.04   #弹间隔
+        self.checkdis = 50  # 100m 是一个安全的启动阈值
 
         # <<< 多导弹更改 >>> 替换为列表
         self.prev_missile_states = []
@@ -201,7 +203,7 @@ class AirCombatEnv(gym.Env):
         y_t = np.random.uniform(4000, 8000)
         aircraft_pitch = np.deg2rad(np.random.uniform(-30, 30))
         # aircraft_pitch = 0
-        aircraft_vel = np.random.uniform(300, 400)
+        aircraft_vel = np.random.uniform(300, 350)
         initial_aircraft_state = np.array([0, y_t, 0, aircraft_vel, aircraft_pitch, 0, 0, 0.0])
         self.aircraft.reset(initial_state=initial_aircraft_state)
 
@@ -268,7 +270,7 @@ class AirCombatEnv(gym.Env):
             missile.id = i
             # 第一个导弹立即发射，后续导弹延迟发射
             # missile.launch_time = 0.0 if i == 0 else np.random.uniform(2.0, 8.0)
-            missile.launch_time = 0.0 if i == 0 else np.random.uniform(0.0, 10.0)
+            missile.launch_time = 0.0 if i == 0 else np.random.uniform(0.0, 8.0)
             missile.start_step_index = -1  # <<< 新增：记录开始的时间步
             missile.terminated = False  # 标志位，表示该导弹是否已命中或被规避
 
@@ -314,7 +316,8 @@ class AirCombatEnv(gym.Env):
         discrete_cmds_indices = action["discrete_actions"]
         throttle_cmd, elevator_cmd, aileron_cmd, rudder_cmd = continuous_cmds
         trigger_cmd_idx, salvo_size_idx, num_groups_idx, inter_interval_idx = discrete_cmds_indices
-        intra_interval = 0.04 #0.05 #0.04
+
+        intra_interval = self.intra_interval #0.04   #弹间隔
 
         release_flare_program = (trigger_cmd_idx == 1)
         if release_flare_program:
@@ -408,8 +411,8 @@ class AirCombatEnv(gym.Env):
     def run_one_step(self, dt, aircraft_action):
         """ <<< 多导弹更改 (V2 - 独立导引头版) >>> """
         # --- 1. 更新诱饵弹和飞机 (只需一次) ---
-        self.flare_manager.update(self.t_now, dt, self.aircraft)
-        self.aircraft.update(aircraft_action)
+        # self.flare_manager.update(self.t_now, dt, self.aircraft)
+        # self.aircraft.update(aircraft_action)
 
         # --- 2. <<< 核心修改：移除全局的目标计算 >>> ---
         # target_pos_equiv = self._calculate_equivalent_target() # <--- 删除这一行
@@ -479,6 +482,9 @@ class AirCombatEnv(gym.Env):
             # # 追加导弹历史（每个导弹每个全局步一条）
             # self.missile_histories[i].append(missile.state_vector.copy())
 
+        # 3. 导弹决策完成后，再将诱饵弹和飞机状态推进到 t+dt
+        self.flare_manager.update(self.t_now, dt, self.aircraft)
+        self.aircraft.update(aircraft_action)
         # ---- 把计数器的自增移到这里（每调用一次 run_one_step 增 1） ----
         self.time_step_counter += 1
 
@@ -553,20 +559,51 @@ class AirCombatEnv(gym.Env):
             # max_quantized_dist = 10.0
             # o_dis_norm = 2 * (quantized_distance_km / max_quantized_dist) - 1.0
 
-            # --- <<< 核心修改：模糊距离逻辑 >>> ---
-            # 1. 生成随机模糊参数 (单位: 米)
-            d_mohu = np.random.randint(500, 1000)  # 总的不确定范围
-            d_min_offset = np.random.randint(100, 400)  # 向下偏差量
-            d_max_offset = d_mohu - d_min_offset  # 向上偏差量
+            # # --- <<< 核心修改：模糊距离逻辑 >>> ---
+            # # 1. 生成随机模糊参数 (单位: 米)
+            # d_mohu = np.random.randint(500, 1000)  # 总的不确定范围
+            # d_min_offset = np.random.randint(100, 400)  # 向下偏差量
+            # d_max_offset = d_mohu - d_min_offset  # 向上偏差量
+            #
+            # # 2. 计算模糊后的物理距离区间
+            # o_dis_min_val = max(0.0, R_rel - d_min_offset)
+            # o_dis_max_val = R_rel + d_max_offset
+            #
+            # # 3. 归一化到 [-1, 1] (参考最大距离 10000 米)
+            # max_obs_dist = 10000.0
+            # o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
+            # o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
 
-            # 2. 计算模糊后的物理距离区间
-            o_dis_min_val = max(0.0, R_rel - d_min_offset)
-            o_dis_max_val = R_rel + d_max_offset
+            # <<< 修改开始：实现基于比例的模糊距离区间 + [-1, 1] 归一化 >>>
 
-            # 3. 归一化到 [-1, 1] (参考最大距离 10000 米)
+            # 1. 设定传感器误差参数
+            BASE_NOISE_M = 500.0  # 基础测距噪声 (模拟近距离时的最小固有误差)
+            ERROR_RATIO = 0.20  # 比例误差率 (25%)，模拟 MAWS 根据强度测距的不确定性
+
+            # 2. 计算动态的上下界偏差
+            # 距离越远，绝对误差越大；距离越近，绝对误差趋近于基础噪声
+            max_offset = BASE_NOISE_M + R_rel * ERROR_RATIO
+
+            # 为了让网络感受到一个波动的“区间”，我们在最大允许误差内随机生成当前的观测边界
+            # 随机生成向下和向上的波动比例 (0.5 到 1.0 之间，确保总是存在明显的模糊区间)
+            # rand_lower_factor = np.random.uniform(0.5, 1.0)
+            rand_upper_factor = np.random.uniform(0.5, 1.0)
+            rand_lower_factor = 1 - rand_upper_factor
+
+            actual_min_offset = max_offset * rand_lower_factor
+            actual_max_offset = max_offset * rand_upper_factor
+
+            # 3. 计算模糊后的物理距离区间 (防御性编程：距离不能小于0)
+            o_dis_min_val = max(0.0, R_rel - actual_min_offset)
+            o_dis_max_val = R_rel + actual_max_offset
+
+            # 4. 归一化到 [-1, 1]
             max_obs_dist = 10000.0
+
             o_dis_min_norm = 2 * (o_dis_min_val / max_obs_dist) - 1.0
             o_dis_max_norm = 2 * (o_dis_max_val / max_obs_dist) - 1.0
+
+            # <<< 修改结束 >>>
 
             # 2. 方位角 beta 使用 sin/cos
             o_beta_sin = np.sin(o_beta_rad)
@@ -1019,7 +1056,7 @@ class AirCombatEnv(gym.Env):
         else:
             # 效率优化：如果两端点距离都还很远，可以安全地跳过复杂的插值计算
             R_rel_prev = np.linalg.norm(T1 - M1)
-            if min(R_rel_prev, R_rel_now) > 20:  # 100m 是一个安全的启动阈值
+            if min(R_rel_prev, R_rel_now) > self.checkdis:  # 100m 是一个安全的启动阈值
                 return
             A = T1 - M1
             B = (T2 - T1) - (M2 - M1)
@@ -1106,7 +1143,9 @@ class AirCombatEnv(gym.Env):
             aircraft_velocity = self.aircraft.velocity
             missile_velocity = missile.velocity
             current_R_rel = np.linalg.norm(self.aircraft.pos - missile.pos)
+            # <<< 核心修复：计算完毕后更新 prev_R_rels，否则会在子步长中产生错误的累积放大 >>>
             range_rate = (current_R_rel - self.prev_R_rels[i]) / dt if dt > 1e-6 else 0.0
+            self.prev_R_rels[i] = current_R_rel  # <--- 必须加这一行！
 
             # --- b) 更新“物理逃逸”计时器 (missile.escape_timer) ---
             cond_missile_slower = missile_velocity < aircraft_velocity
@@ -1130,8 +1169,8 @@ class AirCombatEnv(gym.Env):
 
             # --- d) 检查该导弹是否被成功规避 ---
             # 定义持续时间要求 (可以从 __init__ 中作为参数传入)
-            ESCAPE_DURATION_REQ = 2.0 #3.0 #2.0#1.0
-            LOST_DURATION_REQ = 2.0 #3.0 2.0#1.0
+            ESCAPE_DURATION_REQ = 1.0 #2.0 #3.0 #2.0#1.0
+            LOST_DURATION_REQ = 1.0 #2.0 #3.0 2.0#1.0
 
             if missile.escape_timer >= ESCAPE_DURATION_REQ:
                 # print(f">>> 导弹 {i + 1} 被成功规避 (物理逃逸)! (持续 {missile.escape_timer:.1f}s)")

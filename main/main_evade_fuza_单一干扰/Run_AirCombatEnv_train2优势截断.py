@@ -48,7 +48,7 @@ def pack_action_into_dict(discrete_indices: np.ndarray) -> dict:
 
 # --- 初始化 ---
 # Tensorboard 设置
-writer_log_dir = f'../../log/log_evade_fuza_单一干扰/PPO_Discrete_{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}'
+writer_log_dir = f'../../log/log_evade_fuza_单一干扰/PPO_Discrete_优势软截断{time.strftime("%Y-%m-%d_%H-%M-%S")}_seed{AGENTPARA.RANDOM_SEED}'
 writer = SummaryWriter(log_dir=writer_log_dir)
 print(f"Tensorboard 日志将保存在: {writer_log_dir}")
 

@@ -83,8 +83,10 @@ writer = SummaryWriter(log_dir=writer_log_dir)
 print(f"Tensorboard 日志将保存在: {writer_log_dir}")
 
 # ------------------- 环境和智能体初始化 -------------------
-env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING)
+env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING,dt=0.05)
 set_seed(env)
+eval_env = AirCombatEnv(tacview_enabled=False, dt = 0.05) # <<< 新增：专属的评估环境，步长设为0.02
+set_seed(eval_env) # <<< 新增：为评估环境也设置初始种子
 
 model_load_path = None
 if LOAD_ABLE:
@@ -99,9 +101,13 @@ global_step = 0
 success_num = 0
 MAX_EXE_NUM = 20000 #15000 #20000
 MAX_STEP = 10000
-UPDATE_CYCLE = 10
+UPDATE_CYCLE = 25
 
 eval_reward_buffer = []
+eval_success_buffer =[]  # <<< 新增：用于存储评估回合的胜负记录
+# <<< 新增：用于存储过去 100 次评估结果的 Buffer
+eval_reward_buffer_50 = []
+eval_success_buffer_50 = []
 eval_counter = 0  # 计数器，专门用来控制测试的种子
 
 for i_episode in range(MAX_EXE_NUM):
@@ -199,7 +205,12 @@ for i_episode in range(MAX_EXE_NUM):
         print(f"--- [Episode {i_episode + 1}] 开始评估 ---")
         agent.prep_eval_rl()
 
+        NUM_EVAL_EPISODES = 1 #2 #5  # <<< 修改这里：每次测试跑 5 个回合（或者你想设置的数字）
+
         with torch.no_grad():
+
+            eval_rewards_this_test = []
+            eval_successes_this_test = []
             # eval_obs, _ = env.reset(seed=AGENTPARA.RANDOM_SEED)
             # =========================================================
             # <<< 核心修改开始 >>> 设置互不重复的测试种子
@@ -208,67 +219,128 @@ for i_episode in range(MAX_EXE_NUM):
             # 定义一个巨大的偏移量，比如 100,000 (确保大于你的 MAX_EXE_NUM)
             TEST_SEED_OFFSET = 100000 #MAX_EXE_NUM
 
-            # [测试种子] = 基础种子 + 偏移量 + 当前回合数
-            # 例如：1000 + 100000 + 10 = 101010
-            # 下一次测试是：1000 + 100000 + 20 = 101020
-            # 结果：永远不重复，且跟训练集完全隔离
-            current_test_seed = AGENTPARA.RANDOM_SEED + TEST_SEED_OFFSET + i_episode
+            # -----------------------------------------------------
+            # 1. 执行一次包含 N 个回合的测试
+            # -----------------------------------------------------
+            for eval_idx in range(NUM_EVAL_EPISODES):
 
-            # 显式传入计算好的种子
-            eval_obs, _ = env.reset(seed=current_test_seed)
+                # [测试种子] = 基础种子 + 偏移量 + 当前回合数
+                # 例如：1000 + 100000 + 10 = 101010
+                # 下一次测试是：1000 + 100000 + 20 = 101020
+                # 结果：永远不重复，且跟训练集完全隔离
+                # current_test_seed = AGENTPARA.RANDOM_SEED + TEST_SEED_OFFSET + i_episode
+                current_test_seed = AGENTPARA.RANDOM_SEED + TEST_SEED_OFFSET + i_episode * NUM_EVAL_EPISODES + eval_idx
 
-            print(f"    (使用测试种子: {current_test_seed})")  # 打印出来方便检查
+                # 显式传入计算好的种子
+                eval_obs, _ = eval_env.reset(seed=current_test_seed)
 
-            # =========================================================
-            # <<< 核心修改结束 >>>
-            # =========================================================
-            # <<< GRU/RNN 修改 >>>: 评估循环也需要管理隐藏状态
-            if USE_RNN_MODEL:
-                eval_actor_hidden, eval_critic_hidden = agent.get_initial_hidden_states()
-            else:
-                eval_actor_hidden, eval_critic_hidden = None, None
+                print(f"    (使用测试种子: {current_test_seed})")  # 打印出来方便检查
 
-            eval_reward_sum = 0
-            for _ in range(MAX_STEP):
-                # a. 获取动作和新的隐藏状态
-                eval_action_flat, _, _, _, \
-                    new_eval_actor_hidden, new_eval_critic_hidden = agent.choose_action(eval_obs, eval_actor_hidden,
-                                                                                        eval_critic_hidden,
-                                                                                        deterministic=True)
-
-                # b. 打包动作
-                eval_action_dict = pack_action_into_dict(eval_action_flat)
-
-                # c. 与环境交互
-                eval_obs, eval_reward, eval_terminated, eval_truncated, _ = env.step(eval_action_dict)
-                eval_done = eval_terminated or eval_truncated
-
-                eval_reward_sum += eval_reward
-
-                # <<< GRU/RNN 修改 >>>: 更新评估循环的隐藏状态
+                # =========================================================
+                # <<< 核心修改结束 >>>
+                # =========================================================
+                # <<< GRU/RNN 修改 >>>: 评估循环也需要管理隐藏状态
                 if USE_RNN_MODEL:
-                    eval_actor_hidden = new_eval_actor_hidden
-                    eval_critic_hidden = new_eval_critic_hidden
+                    eval_actor_hidden, eval_critic_hidden = agent.get_initial_hidden_states()
+                else:
+                    eval_actor_hidden, eval_critic_hidden = None, None
 
-                if eval_done:
-                    break
+                # eval_reward_sum = 0
+                # eval_success = False  # <<< 新增：初始化当前评估回合的胜负状态为 False
+                eval_reward_sum_single = 0
+                eval_success_single = False
 
-            print(f"评估回合奖励: {eval_reward_sum:.2f}")
-            writer.add_scalar('Eval/Reward_Sum', eval_reward_sum, global_step)
+                for _ in range(MAX_STEP):
+                    # a. 获取动作和新的隐藏状态
+                    eval_action_flat, _, _, _, \
+                        new_eval_actor_hidden, new_eval_critic_hidden = agent.choose_action(eval_obs, eval_actor_hidden,
+                                                                                            eval_critic_hidden,
+                                                                                            deterministic=True)
 
-            eval_reward_buffer.append(eval_reward_sum)  # 存入列表
-            # --- 核心修改：判断是否攒够了 10 个 ---
-            if len(eval_reward_buffer) >= 10:
-                mean_reward = np.mean(eval_reward_buffer)
-                print(f"\n{'#' * 40}")
-                print(f"### 统计报告: 过去10次测试平均奖励: {mean_reward:.2f} ###")
-                print(f"{'#' * 40}\n")
+                    # b. 打包动作
+                    eval_action_dict = pack_action_into_dict(eval_action_flat)
 
-                # 记录到 Tensorboard，使用的是'Eval/Mean_10_Buffer'
-                writer.add_scalar('Eval/Mean_10_Buffer', mean_reward, global_step)
+                    # c. 与环境交互
+                    eval_obs, eval_reward, eval_terminated, eval_truncated, eval_info = eval_env.step(eval_action_dict)
+                    eval_done = eval_terminated or eval_truncated
 
-                # 清空缓存，准备下一轮积累
-                eval_reward_buffer = []
+                    # eval_reward_sum += eval_reward
+                    eval_reward_sum_single += eval_reward
+
+                    # <<< 新增：如果在评估步中出现了成功标志，则记录为成功
+                    if "success" in eval_info and eval_info['success']:
+                        # eval_success = True
+                        eval_success_single = True
+
+                    # <<< GRU/RNN 修改 >>>: 更新评估循环的隐藏状态
+                    if USE_RNN_MODEL:
+                        eval_actor_hidden = new_eval_actor_hidden
+                        eval_critic_hidden = new_eval_critic_hidden
+
+                    if eval_done:
+                        break
+                eval_rewards_this_test.append(eval_reward_sum_single)
+                eval_successes_this_test.append(1.0 if eval_success_single else 0.0)
+
+            # print(f"评估回合奖励: {eval_reward_sum:.2f} | 是否胜利: {'是' if eval_success else '否'}")
+            # writer.add_scalar('Eval/Reward_Sum', eval_reward_sum, global_step)
+            # writer.add_scalar('Eval/Success_Single', int(eval_success), global_step)  # 可选：记录单次胜负(0或1)
+            # 将奖励和胜负情况存入 buffer
+            # eval_reward_buffer.append(eval_reward_sum)
+            # eval_success_buffer.append(1.0 if eval_success else 0.0)  # <<< 新增：胜利存1.0，失败存0.0
+            # 计算【这一次测试（包含 N 个回合）】的平均结果
+            mean_reward_this_test = np.mean(eval_rewards_this_test)
+            mean_success_this_test = np.mean(eval_successes_this_test)
+
+            print(f"    评估结束 | 本次测试({NUM_EVAL_EPISODES}局) 平均奖励: {mean_reward_this_test:.2f} | 平均胜率: {mean_success_this_test * 100:.2f}%")
+            # 记录【这一次测试】的平均结果 (保留你原代码的命名)
+            writer.add_scalar('Eval/Reward_Sum', mean_reward_this_test, global_step)
+            writer.add_scalar('Eval/Success_Single', mean_success_this_test, global_step)
+            # # -----------------------------------------------------
+            # # 2. 将本次测试结果存入 Buffer，用于计算 10 次测试的长线平均
+            # # -----------------------------------------------------
+            # eval_reward_buffer.append(mean_reward_this_test)
+            # eval_success_buffer.append(mean_success_this_test)
+            # # # <<< 新增：同时将数据存入 100 次的缓存中
+            # # eval_reward_buffer_50.append(mean_reward_this_test)
+            # # eval_success_buffer_50.append(mean_success_this_test)
+            #
+            # # --- 核心修改：判断是否攒够了 10 个 ---
+            # if len(eval_reward_buffer) >= 5:
+            #     mean_reward = np.mean(eval_reward_buffer)
+            #     mean_success_rate = np.mean(eval_success_buffer)  # <<< 新增：计算过去10次测试的胜率
+            #     print(f"\n{'#' * 40}")
+            #     print(f"### 统计报告: 过去5次测试平均奖励: {mean_reward:.2f} ###")
+            #     print(f"### 统计报告: 过去5次测试平均胜率: {mean_success_rate * 100:.2f}% ###")
+            #     print(f"{'#' * 40}\n")
+            #
+            #     # 记录到 Tensorboard，使用的是'Eval/Mean_10_Buffer'
+            #     writer.add_scalar('Eval/Mean_5_Buffer', mean_reward, global_step)
+            #     writer.add_scalar('Eval/Mean_5_Success_Rate', mean_success_rate, global_step)  # <<< 新增：将测试胜率写入Tensorboard
+            #
+            #     # 清空缓存，准备下一轮积累
+            #     eval_reward_buffer = []
+            #     eval_success_buffer = []  # <<< 新增：清空胜负记录缓存
+
+            # # =========================================================
+            # # <<< 新增：100 次测试的统计逻辑
+            # # =========================================================
+            # if len(eval_reward_buffer_50) >= 20:
+            #     mean_50_reward = np.mean(eval_reward_buffer_50)
+            #     mean_50_success_rate = np.mean(eval_success_buffer_50)
+            #
+            #     print(f"\n{'=' * 40}")
+            #     print(f"=== 统计报告: 过去50次测试阶段 平均奖励: {mean_50_reward:.2f} ===")
+            #     print(f"=== 统计报告: 过去50次测试阶段 平均胜率: {mean_50_success_rate * 100:.2f}% ===")
+            #     print(f"{'=' * 40}\n")
+            #
+            #     # 记录到 Tensorboard，方便观察大趋势
+            #     writer.add_scalar('Eval/Mean_20_Buffer', mean_50_reward, global_step)
+            #     writer.add_scalar('Eval/Mean_20_Success_Rate', mean_50_success_rate, global_step)
+            #
+            #     # 清空缓存
+            #     eval_reward_buffer_50 = []
+            #     eval_success_buffer_50 = []
 
         print("--- 评估结束 ---\n")
 

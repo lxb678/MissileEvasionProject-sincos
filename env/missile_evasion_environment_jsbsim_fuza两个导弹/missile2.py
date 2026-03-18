@@ -25,11 +25,14 @@ class Missile:
         self.mass = 85.0 #60.0  # (kg) 导弹质量
         self.diameter = 0.127  # (m) 导弹直径
         self.max_g_load = 50.0  # 导弹最大过载
+        # --- 状态相关的可用过载模型参数 ---
+        self.min_g_load_factor = 0.20  # 低动压时至少保留的机动能力比例
+        self.q_ref = 0.5 * 0.9096 * 850.0 ** 2  # 参考动压，对应高速低空接近满过载 (5000米的密度） 0.9096
 
         # --- <<< 新增 >>> 最优导引律(OGL) 参数 ---
         self.K1 = 8.0  # 纵向增益
         self.K2 = 8.0  # 侧向增益
-        self.lambda1_ = 0.1  # 能量/脱靶量 权重系数
+        self.lambda1_ = 0.1 #4.0 #0.1 #1.0 #0.5 #0.1 #2.0 #0.1 2.0  # 能量/脱靶量 权重系数
 
         # --- 导引头/引信参数 ---
         self.seeker_max_range = 30000.0  # 导引头最大搜索范围 (m)
@@ -40,6 +43,13 @@ class Missile:
         # --- 历史状态记录 (用于计算导引律所需的微分量) ---
         self.prev_theta_L = None
         self.prev_phi_L = None
+
+    def _calculate_available_g_load(self, V: float, rho: float) -> float:
+        """根据当前速度和空气密度估算导弹此刻可实现的最大过载。"""
+        q = max(0.0, 0.5 * rho * V ** 2)
+        q_ratio = q / max(self.q_ref, 1e-9)
+        g_factor = np.clip(q_ratio, self.min_g_load_factor, 1.0)
+        return self.max_g_load * g_factor
 
     def update_OGL(self,
                    dt: float,
@@ -195,6 +205,9 @@ class Missile:
 
         # nz：侧向过载
         nz = (self.K2 * (t_go ** 3) * effective_V * phi_L_dot) / (denom + 1e-9)
+
+        # ny = self.N * abs(real_Rdot) * theta_L_dot / self.g + np.cos(theta)
+        # nz = self.N * abs(real_Rdot) * phi_L_dot / self.g
 
         # -----------------------------
         # 9) 交给统一的动力学积分（内部包含过载限幅、气动阻力等）
@@ -421,14 +434,6 @@ class Missile:
         (结合了 AIM-9X 的气动模型)
         """
         V, theta, psi_c, x_pos, y_pos, z_pos = state
-
-        # --- 过载限幅 ---
-        n_total_cmd = np.sqrt(ny ** 2 + nz ** 2)
-        if n_total_cmd > self.max_g_load:
-            scale = self.max_g_load / n_total_cmd
-            ny *= scale
-            nz *= scale
-
         # --- 气动阻力计算 (AIM-9X 模型) ---
         H = y_pos
         Temper = 15.0
@@ -440,6 +445,17 @@ class Missile:
             P_H = 0
         rho = 1.293 * P_H * (273 / (T_H + 0.01))
         Ma = V / 340.0
+        # --- 过载限幅 ---
+        n_total_cmd = np.sqrt(ny ** 2 + nz ** 2)
+        available_g_load = self._calculate_available_g_load(V, rho)
+        n_limit = min(self.max_g_load, available_g_load)
+        # n_limit = self.max_g_load
+        if n_total_cmd > n_limit:
+            scale = n_limit / n_total_cmd
+            ny *= scale
+            nz *= scale
+
+
 
         # # 阻力系数函数 (内嵌)
         # def get_Cx_AIM9X(m):

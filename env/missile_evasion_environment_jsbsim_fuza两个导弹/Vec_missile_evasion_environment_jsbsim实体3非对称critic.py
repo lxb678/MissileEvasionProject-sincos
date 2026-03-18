@@ -103,7 +103,7 @@ class AirCombatEnv(gym.Env):
 
         # --- 仿真参数 ---
         self.t_end = 60.0
-        self.R_kill = 15.0 #12.0
+        self.R_kill = 12.0
         self.dt_normal = dt
         self.dt_small = dt #0.02 #dt
         self.dt_flare = dt
@@ -1214,8 +1214,8 @@ class AirCombatEnv(gym.Env):
 
             # --- d) 检查该导弹是否被成功规避 ---
             # 定义持续时间要求 (可以从 __init__ 中作为参数传入)
-            ESCAPE_DURATION_REQ = 2.0 #3.0 #2.0#1.0
-            LOST_DURATION_REQ = 2.0 #3.0 2.0#1.0
+            ESCAPE_DURATION_REQ = 1.0 #2.0 #3.0 #2.0#1.0
+            LOST_DURATION_REQ = 1.0 #2.0 #3.0 2.0#1.0
 
             if missile.escape_timer >= ESCAPE_DURATION_REQ:
                 # print(f">>> 导弹 {i + 1} 被成功规避 (物理逃逸)! (持续 {missile.escape_timer:.1f}s)")

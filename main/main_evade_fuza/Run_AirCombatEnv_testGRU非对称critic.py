@@ -62,7 +62,7 @@ def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
 
 # <<<--- Tacview 可视化开关 ---<<<
 TACVIEW_ENABLED_DURING_TRAINING = True
-env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING,dt = 0.02)
+env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING,dt = 0.05)
 set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型

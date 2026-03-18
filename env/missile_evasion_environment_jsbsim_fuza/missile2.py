@@ -25,6 +25,9 @@ class Missile:
         self.mass = 85.0 #60.0  # (kg) 导弹质量
         self.diameter = 0.127  # (m) 导弹直径
         self.max_g_load = 50.0  # 导弹最大过载
+        # --- 状态相关的可用过载模型参数 ---
+        self.min_g_load_factor = 0.20  # 低动压时至少保留的机动能力比例
+        self.q_ref = 0.5 * 0.9096 * 850.0 ** 2  # 参考动压，对应高速低空接近满过载 (3000米的密度）0.7366   0.9096
 
         # --- <<< 新增 >>> 最优导引律(OGL) 参数 ---
         self.K1 = 8.0  # 纵向增益
@@ -40,6 +43,13 @@ class Missile:
         # --- 历史状态记录 (用于计算导引律所需的微分量) ---
         self.prev_theta_L = None
         self.prev_phi_L = None
+
+    def _calculate_available_g_load(self, V: float, rho: float) -> float:
+        """根据当前速度和空气密度估算导弹此刻可实现的最大过载。"""
+        q = max(0.0, 0.5 * rho * V ** 2)
+        q_ratio = q / max(self.q_ref, 1e-9)
+        g_factor = np.clip(q_ratio, self.min_g_load_factor, 1.0)
+        return self.max_g_load * g_factor
 
     def update_OGL(self,
                    dt: float,
@@ -173,6 +183,8 @@ class Missile:
 
         # 防止 t_go 过小导致 (3*lambda1 + t_go^3) 数值不稳定
         t_go = max(0.5, float(t_go))
+        # t_go = -R_phys / (real_Rdot - 1e-9)
+
 
         # -----------------------------
         # 8) OGL 计算过载指令 ny, nz
@@ -189,6 +201,7 @@ class Missile:
 
         # effective_V：保证低接近率/大离轴时仍有足够“转弯增益”
         effective_V = max(abs(real_Rdot), 0.5 * missile_speed)
+        # effective_V = abs(real_Rdot)
 
         # ny：纵向过载（含重力补偿 +cos(theta)）
         ny = (self.K1 * (t_go ** 3) * effective_V * theta_L_dot) / (denom + 1e-9) + np.cos(theta)
@@ -422,13 +435,6 @@ class Missile:
         """
         V, theta, psi_c, x_pos, y_pos, z_pos = state
 
-        # --- 过载限幅 ---
-        n_total_cmd = np.sqrt(ny ** 2 + nz ** 2)
-        if n_total_cmd > self.max_g_load:
-            scale = self.max_g_load / n_total_cmd
-            ny *= scale
-            nz *= scale
-
         # --- 气动阻力计算 (AIM-9X 模型) ---
         H = y_pos
         Temper = 15.0
@@ -440,6 +446,22 @@ class Missile:
             P_H = 0
         rho = 1.293 * P_H * (273 / (T_H + 0.01))
         Ma = V / 340.0
+
+        # --- 过载限幅 ---
+        n_total_cmd = np.sqrt(ny ** 2 + nz ** 2)
+        available_g_load = self._calculate_available_g_load(V, rho)
+        n_limit = min(self.max_g_load, available_g_load)
+        # n_limit = self.max_g_load
+        # print("n_limit", n_limit)
+        # 记录实际拉出的过载大小 (用于后续计算诱导阻力)
+        n_actual = n_total_cmd
+        if n_total_cmd > n_limit:
+            scale = n_limit / n_total_cmd
+            ny *= scale
+            nz *= scale
+            n_actual = n_limit  # 如果超限，实际过载就是极限值
+
+
 
         # # 阻力系数函数 (内嵌)
         # def get_Cx_AIM9X(m):
@@ -478,10 +500,41 @@ class Missile:
                         0.7373 * M +
                         1.3699)
 
+        # # 获取零升阻力系数 (您原有的基础阻力)
+        # Cx_0 = get_Cx_AIM9X(Ma)
+        #
+        # S = np.pi * (self.diameter ** 2) / 4
+        # q = 0.5 * rho * V ** 2
+
+        # # --- <<< 新增：诱导阻力计算 >>> ---
+        # if q > 1e-3:  # 防止低速/高空时除以趋近于0的动压导致崩溃
+        #     # 1. 反推当前机动理论上需要的升力系数 CL
+        #     CL_theoretical = (n_actual * self.mass * self.g) / (q * S)
+        #
+        #     # 2. 【核心修正】：加入物理极限 (失速限制)
+        #     # 导弹即使使出浑身解数（拉到最大攻角），CL 也有上限，通常不超过 1.8 到 2.0
+        #     max_CL = 1.5
+        #     CL_actual = min(CL_theoretical, max_CL)
+        #
+        #     # 3. 计算诱导阻力系数 CDi
+        #     # 使用截断后的真实升力系数来算阻力
+        #     K_induced = 0.10
+        #     C_Di = K_induced * (CL_actual ** 2)
+        # else:
+        #     C_Di = 0.0
+        #
+        # # 3. 总阻力系数 = 零升阻力 + 诱导阻力
+        # Cx_total = Cx_0 + C_Di
+        # print("Cx_total,Cx_0,C_Di", Cx_total, Cx_0, C_Di)
+        #
+        # # 4. 计算最终的气动阻力
+        # F_drag = Cx_total * q * S
+        # -----------------------------------
+
         Cx = get_Cx_AIM9X(Ma)
         S = np.pi * (self.diameter ** 2) / 4
         q = 0.5 * rho * V ** 2
-        F_drag = Cx * q * S
+        F_drag = Cx * q * S #+ ((ny * self.g)** 2 + (nz * self.g)** 2) / V ** 2
 
         # --- 动力学方程 ---
         # v_dot = (推力 - 阻力 - 重力沿速度方向分量) / m
@@ -662,6 +715,7 @@ class Missile:
         nz = self.N * V * phi_L_dot / self.g
 
         n_total_cmd = np.sqrt(ny ** 2 + nz ** 2)
+        print("测试输出过载")
         if n_total_cmd > self.max_g_load:
             scale = self.max_g_load / n_total_cmd
             ny *= scale

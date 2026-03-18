@@ -56,7 +56,7 @@ AIRCRAFT_FEAT_DIM = 6  # <--- 修改这里：去掉 q，维度变为 6
 FULL_OBS_DIM = (NUM_MISSILES * MISSILE_FEAT_DIM) + AIRCRAFT_FEAT_DIM
 
 # <<< 修改结束 >>>
-ENTITY_EMBED_DIM = 64 #32 #64
+ENTITY_EMBED_DIM = 64 #128 #32 #64
 ATTN_NUM_HEADS = 2 #4 #2 #4 #4
 
 assert ENTITY_EMBED_DIM % ATTN_NUM_HEADS == 0, "ENTITY_EMBED_DIM must be divisible by ATTN_NUM_HEADS"
@@ -90,7 +90,7 @@ class Actor_CrossAttentionMLP(Module):
         # self.target_init_std = 0.95 #0.6
 
         self.target_std_min = 0.10 #0.20 #0.10 #0.20 #0.05  # 保证底噪
-        self.target_std_max = 0.60 #0.80 #0.80  # 降低上限，避免完全随机
+        self.target_std_max = 0.70 #0.80 #0.80  # 降低上限，避免完全随机
         self.target_init_std = 0.60 #0.75 #0.75  # 初始值设为中间态，不要设为 max
 
         # 转换为 Log 空间边界
@@ -123,8 +123,9 @@ class Actor_CrossAttentionMLP(Module):
         self.missile_encoder = Sequential(
             Linear(MISSILE_FEAT_DIM, ENTITY_EMBED_DIM),
             # LeakyReLU(),
-            # nn.LayerNorm(encoder_mid_dim), # 推荐加上 LN，有助于特征标准化
+            # # nn.LayerNorm(encoder_mid_dim), # 推荐加上 LN，有助于特征标准化
             # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+            # nn.LayerNorm(ENTITY_EMBED_DIM)
             # 这里最后不需要再加激活函数，因为后面马上进 Attention 的 Dot Product
             # 让特征保持线性空间分布对 Attention 计算更有利
         )
@@ -132,6 +133,8 @@ class Actor_CrossAttentionMLP(Module):
         self.aircraft_encoder = Sequential(
             Linear(AIRCRAFT_FEAT_DIM, ENTITY_EMBED_DIM),
             # LeakyReLU(),
+            # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+            # nn.LayerNorm(ENTITY_EMBED_DIM)
             # nn.LayerNorm(encoder_mid_dim),
             # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
         )
@@ -161,7 +164,7 @@ class Actor_CrossAttentionMLP(Module):
         # 新的输入 = aircraft_context (Embed) + missile1_embed (Embed) + missile2_embed (Embed)
         mlp_input_dim = ENTITY_EMBED_DIM * 2   #* (1 + NUM_MISSILES)  # 64 * 4 = 256
 
-        split_point = 1 #2
+        split_point = 2
         mlp_dims = ACTOR_PARA.model_layer_dim
         base_dims = mlp_dims[:split_point]
         tower_dims = mlp_dims[split_point:]
@@ -466,7 +469,7 @@ class Actor_CrossAttentionMLP(Module):
 
         # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
         # 只要不让它跑到 10 这种离谱的值就行
-        mu = torch.clamp(mu, -2.0, 2.0)
+        mu = torch.clamp(mu, -3.0, 3.0)
 
         all_disc_logits = self.discrete_head(discrete_features)
 
@@ -612,6 +615,8 @@ class Critic_CrossAttentionMLP(Module):
         self.missile_encoder = Sequential(
             Linear(MISSILE_FEAT_DIM, ENTITY_EMBED_DIM),
             # LeakyReLU(),
+            # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+            # nn.LayerNorm(ENTITY_EMBED_DIM)
             # nn.LayerNorm(encoder_mid_dim), # 推荐加上 LN，有助于特征标准化
             # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
             # 这里最后不需要再加激活函数，因为后面马上进 Attention 的 Dot Product
@@ -621,6 +626,8 @@ class Critic_CrossAttentionMLP(Module):
         self.aircraft_encoder = Sequential(
             Linear(AIRCRAFT_FEAT_DIM, ENTITY_EMBED_DIM),
             # LeakyReLU(),
+            # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
+            # nn.LayerNorm(ENTITY_EMBED_DIM)
             # nn.LayerNorm(encoder_mid_dim),
             # Linear(ENTITY_EMBED_DIM, ENTITY_EMBED_DIM),
         )
@@ -923,7 +930,7 @@ class PPO_continuous(object):
         self.gae_lambda = AGENTPARA.lamda
         self.ppo_epoch = AGENTPARA.ppo_epoch
         self.training_start_time = time.strftime("PPO_EntityCrossATT_MLP_%Y-%m-%d_%H-%M-%S")
-        self.base_save_dir = "../../../../save/save_evade_fuza两个导弹"
+        self.base_save_dir = "../../../save/save_evade_fuza两个导弹"
         win_rate_subdir = "胜率模型"
         self.run_save_dir = os.path.join(self.base_save_dir, self.training_start_time)
         self.win_rate_dir = os.path.join(self.run_save_dir, win_rate_subdir)
@@ -1011,10 +1018,10 @@ class PPO_continuous(object):
             # 2. 计算雅可比修正项 (稳定公式)
             # 公式: 2 * (log 2 - u - softplus(-2u))
             # 注意: u 是 pre-tanh 的值
-            correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
+            # correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
 
             # 3. 得到最终动作 a = tanh(u) 的 log_prob
-            log_prob_cont = log_prob_u - correction
+            log_prob_cont = log_prob_u #- correction
             # ================= [修改结束] =================
 
             # log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
@@ -1206,8 +1213,8 @@ class PPO_continuous(object):
 
                 # --- A. 连续动作 Log Prob (保持不变) ---
                 log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
-                correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
-                new_log_prob_cont = log_prob_u_buffer - correction_buffer
+                # correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
+                new_log_prob_cont = log_prob_u_buffer #- correction_buffer
 
                 # --- B. 离散动作 Log Prob (Ratio 一致性修复) ---
                 # 1. 提取 Buffer 中的真实开火情况
@@ -1235,6 +1242,7 @@ class PPO_continuous(object):
 
                 # 1. 连续动作熵 (保持不变)
                 entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
+                # entropy_base = new_dists['continuous'].entropy().mean(dim=-1)  # 动作维度求平均
                 u_curr_sample = new_dists['continuous'].rsample()
                 correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
                 entropy_cont = entropy_base + correction_curr
@@ -1242,13 +1250,34 @@ class PPO_continuous(object):
                 # 2. Trigger 熵 (无条件)
                 entropy_trigger = new_dists['trigger'].entropy()  # .mean() 在后面算
 
+                # # ==========================================================
+                # # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
+                # # ==========================================================
+                #
+                # # 1. 计算所有子动作的原始熵 (Raw)
+                # entropy_sub_actions_raw = sum(
+                #     dist.entropy() for key, dist in new_dists.items()
+                #     if key not in ['continuous', 'trigger']
+                # )
+                #
+                # # 2. 直接求平均！不要乘 actual_triggers！
+                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
+                # mean_entropy_sub = entropy_sub_actions_raw.mean()
+
                 # 3. 子动作熵 (原始)
                 entropy_sub_raw = (
                         new_dists['salvo_size'].entropy() +
                         new_dists['num_groups'].entropy() +
                         new_dists['inter_interval'].entropy()
                 )
-
+                # # 1. 计算所有子动作的熵 (Raw) 并按动作数量求平均 -> Shape: [Batch, Seq]
+                # sub_action_keys = [key for key in new_dists.items() if key[0] not in ['continuous', 'trigger']]
+                # num_sub_actions = len(sub_action_keys)  # 当前为 3 (salvo_size, num_groups, inter_interval)
+                #
+                # entropy_sub_raw = sum(
+                #     dist.entropy() for key, dist in sub_action_keys
+                # ) / num_sub_actions
+                #
                 # # 4. 🌟 灵魂掩码 (Entropy) 🌟：条件均值熵
                 # # 只有实际开火的样本，才奖励子动作的多样性
                 # num_triggered = actual_triggers.sum()
@@ -1264,8 +1293,10 @@ class PPO_continuous(object):
                 mean_entropy_sub = (entropy_sub_raw * actual_triggers).mean()
 
                 # 5. 总熵计算
-                # 连续动作取平均 + Trigger平均 + 子动作条件平均
-                total_entropy = entropy_cont.mean() + entropy_trigger.mean() + mean_entropy_sub #* 0.1
+                # 连续动作取平均 + Trigger平均 + 子动作条件平均\
+                mean_entropy_cont = entropy_cont.mean()
+                mean_entropy_trigger = entropy_trigger.mean()
+                total_entropy = mean_entropy_cont + mean_entropy_trigger + mean_entropy_sub #* 0.1
 
                 # ================= [修改结束] =================
 
@@ -1323,7 +1354,7 @@ class PPO_continuous(object):
 
                 surr1 = ratio * advantage_squeezed
                 surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage_squeezed
-                actor_loss = -torch.min(surr1, surr2).mean() - AGENTPARA.entropy * total_entropy
+                actor_loss = -torch.min(surr1, surr2).mean() - (AGENTPARA.con_entropy * mean_entropy_cont + AGENTPARA.dis_entropy * (1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub))#AGENTPARA.entropy * (mean_entropy_cont + 1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub) #AGENTPARA.entropy * total_entropy
 
                 # 更新 Actor
                 self.Actor.optim.zero_grad()

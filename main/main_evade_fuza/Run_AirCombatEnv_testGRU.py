@@ -52,12 +52,12 @@ def pack_action_into_dict(flat_action_np: np.ndarray) -> dict:
 
 # <<<--- Tacview 可视化开关 ---<<<
 TACVIEW_ENABLED_DURING_TRAINING = True
-env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING,dt = 0.02)
+env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TRAINING,dt = 0.025)
 set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型
 # model_path = r"D:\code\规避导弹项目sincos\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPOGRU_2026-03-09_11-10-42"  # 示例路径
+model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPOGRU_2026-03-18_15-36-24"  # 示例路径
 print(f"正在加载GRU模型: {model_path}")
 
 # <<< GRU 修改 >>>: 初始化Agent时，必须传入 use_rnn=True
@@ -96,7 +96,7 @@ for i_episode in range(episodes):
 
             # 2. 将扁平数组打包成字典 (这部分不变)
             action_dict_eval = pack_action_into_dict(action_eval_flat)
-            # print(f"Step {step + 1}, Action: {action_dict_eval}")
+            print(f"Step {step + 1}, Action: {action_dict_eval}")
 
             # 3. 将打包好的字典传递给环境
             observation_eval, reward_eval, terminated, truncated, info = env.step(action_dict_eval)

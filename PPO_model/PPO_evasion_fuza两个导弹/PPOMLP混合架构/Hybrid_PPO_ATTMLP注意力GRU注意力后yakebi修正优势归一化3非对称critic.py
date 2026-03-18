@@ -75,7 +75,7 @@ class Actor_PostAttentionGRU(Module):
         # self.target_init_std = 0.95
 
         self.target_std_min = 0.10 #0.20 #0.10 #0.20 #0.05  # 保证底噪
-        self.target_std_max = 0.60 #0.80 #0.90 #0.70 #0.80  # 降低上限，避免完全随机
+        self.target_std_max = 0.70 #0.80 #0.90 #0.70 #0.80  # 降低上限，避免完全随机
         self.target_init_std = 0.60 #0.75 #0.85 #0.65 #0.75  # 初始值设为中间态，不要设为 max
 
         # 转换为 Log 空间边界
@@ -218,6 +218,17 @@ class Actor_PostAttentionGRU(Module):
 
         self.mu_head = Linear(continuous_tower_output_dim, CONTINUOUS_DIM)
         self.discrete_head = Linear(discrete_tower_output_dim, TOTAL_DISCRETE_LOGITS)
+
+        # # =================================================================
+        # # <<< 新增 1：辅助表征预测头 (Belief Head) >>>
+        # # 将 GRU 的隐藏状态(128维) 映射到 上帝视角状态的维度 (CRITIC_PARA.input_dim)
+        # # 注意：这里我们使用 GRU 的隐藏维度 self.rnn_hidden_dim 作为输入
+        # self.aux_head = Linear(self.rnn_hidden_dim, CRITIC_PARA.input_dim)
+        # # =================================================================
+        # <<< 你的神来之笔：修改后 >>>
+        # 只预测 4 维：[导弹1距离, 导弹1速度, 导弹2距离, 导弹2速度]
+        self.aux_head = Linear(self.rnn_hidden_dim, 4)
+        # =================================================================
 
         # 初始化为 -0.5 左右 (std ≈ 0.6)，比 1.0 稳健，又比 0.1 有探索性
         init_log_std = np.log(self.target_init_std)
@@ -391,6 +402,16 @@ class Actor_PostAttentionGRU(Module):
 
         gru_out, next_h = self.global_gru(base_seq, h_prev)
 
+        # =================================================================
+        # <<< 新增 2：生成对上帝视角真实状态的预测 >>>
+        # 注意：这里我们对 gru_out (形状 [B, T, rnn_hidden_dim]) 进行预测
+        aux_preds = self.aux_head(gru_out)
+
+        # 如果是单步推理，需要去掉 seq_len 维度 (类似其他塔楼特征的处理)
+        if seq_len == 1:
+            aux_preds = aux_preds.squeeze(1)
+        # =================================================================
+
         # 可选：像你现在一样做 skip-concat（推荐）
         post_gru_seq = torch.cat([base_seq, gru_out], dim=-1)  # [B, T, base_output_dim + H]
         # post_gru_seq = base_seq + gru_out
@@ -440,7 +461,7 @@ class Actor_PostAttentionGRU(Module):
 
         # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
         # 只要不让它跑到 10 这种离谱的值就行
-        mu = torch.clamp(mu, -2.0, 2.0)
+        mu = torch.clamp(mu, -3.0, 3.0)
 
         all_disc_logits = self.discrete_head(discrete_features)
 
@@ -524,7 +545,7 @@ class Actor_PostAttentionGRU(Module):
         if seq_len == 1:
             attention_to_missiles = attention_to_missiles.squeeze(1)
 
-        return distributions, attention_to_missiles, next_h
+        return distributions, attention_to_missiles, next_h, aux_preds
 
 
 # ==============================================================================
@@ -941,7 +962,7 @@ class PPO_continuous(object):
 
         with torch.no_grad():
             value, self.critic_rnn_state = self.Critic(global_state_tensor, self.critic_rnn_state)
-            dists, attention_weights, self.actor_rnn_state = self.Actor(state_tensor, self.actor_rnn_state)
+            dists, attention_weights, self.actor_rnn_state,_ = self.Actor(state_tensor, self.actor_rnn_state)
 
             attention_weights_for_reward = attention_weights
 
@@ -955,10 +976,10 @@ class PPO_continuous(object):
             # 2. 计算雅可比修正项 (稳定公式)
             # 公式: 2 * (log 2 - u - softplus(-2u))
             # 注意: u 是 pre-tanh 的值
-            correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
+            # correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
 
             # 3. 得到最终动作 a = tanh(u) 的 log_prob
-            log_prob_cont = log_prob_u - correction
+            log_prob_cont = log_prob_u #- correction
             # ================= [修改结束] =================
             # log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
 
@@ -1289,7 +1310,7 @@ class PPO_continuous(object):
         # =======================================================================
 
         train_info = {'critic_loss': [], 'actor_loss': [], 'dist_entropy': [], 'entropy_cont': [], 'adv_targ': [],
-                      'ratio': [],'mean_entropy_trigger': [], 'mean_entropy_sub': []}
+                      'ratio': [],'mean_entropy_trigger': [], 'mean_entropy_sub': [], 'aux_loss':[]}
 
         # 3. PPO 更新循环
         for _ in range(self.ppo_epoch):
@@ -1329,7 +1350,7 @@ class PPO_continuous(object):
                     rnn_h_c = torch.FloatTensor(b_h_c).to(**CRITIC_PARA.tpdv)
 
                     # 前向传播
-                    new_dists, _, _ = self.Actor(state, rnn_h_a)
+                    new_dists, _, _, aux_preds = self.Actor(state, rnn_h_a)
                     new_value, _ = self.Critic(global_state, rnn_h_c)
 
                     # 维度调整
@@ -1369,23 +1390,23 @@ class PPO_continuous(object):
                 log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
 
                 # 2. 计算雅可比修正项
-                correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
+                # correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
 
                 # 3. 得到最终 Log Prob (用于 Ratio)
-                new_log_prob_cont = log_prob_u_buffer - correction_buffer
+                new_log_prob_cont = log_prob_u_buffer #- correction_buffer
 
                 # --- B. 熵计算 (使用重采样技巧) ---
                 # 1. 基础高斯熵
                 entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
 
                 # 2. 重采样当前策略动作
-                u_curr_sample = new_dists['continuous'].rsample()
+                # u_curr_sample = new_dists['continuous'].rsample()
 
                 # 3. 计算修正期望
-                correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
+                # correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
 
                 # 4. 得到最终熵
-                entropy_cont = entropy_base + correction_curr
+                entropy_cont = entropy_base #+ correction_curr
 
                 # ================= [修改开始：Ratio 一致性 + 条件熵] =================
 
@@ -1478,6 +1499,48 @@ class PPO_continuous(object):
                 surr1 = ratio * advantage_squeezed
                 surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage_squeezed
                 actor_loss = -torch.min(surr1, surr2).mean() - AGENTPARA.entropy * total_entropy
+
+                # ==========================================================
+                # <<< 新增 4：计算辅助表征 Loss (MSE) 并融合 >>>
+                # ==========================================================
+                if self.use_rnn and aux_preds is not None:
+                    # # 1. 因为 aux_preds 的形状可能是 [Batch, Seq, Dim] 或 [Batch*Seq, Dim]
+                    # # 而 global_state (传入的形状) 在 GRU 模式下是 [Batch, Seq, Dim]
+                    # # 为了安全，我们把它们都展平为 [N, Dim] 再算 MSE
+                    # aux_preds_flat = aux_preds.view(-1, CRITIC_PARA.input_dim)
+                    # global_state_flat = global_state.view(-1, CRITIC_PARA.input_dim)
+                    #
+                    # # 2. 计算 MSE 误差
+                    # aux_loss = F.mse_loss(aux_preds_flat, global_state_flat)
+                    #
+                    # # 3. 融合总 Loss。AUX_COEF 推荐 0.5。
+                    # AUX_COEF = 0.5
+                    # actor_loss = actor_loss + AUX_COEF * aux_loss
+
+                    # 1. 从 global_state 中精准切片提取我们需要预测的那 4 个核心特征！
+                    # 索引 0, 1 是导弹1的精准距离和速度
+                    # 索引 5, 6 是导弹2的精准距离和速度
+                    # 使用 ... 可以完美兼容 GRU的(B, Seq, 16) 和 MLP的(B, 16)
+                    target_aux = global_state[..., [0, 1, 5, 6]]
+
+                    # 2. 展平对齐维度
+                    aux_preds_flat = aux_preds.view(-1, 4)
+                    target_aux_flat = target_aux.view(-1, 4)
+
+                    # 3. 计算“纯粹的” MSE 误差
+                    aux_loss = F.mse_loss(aux_preds_flat, target_aux_flat)
+
+                    # 4. 融合总 Loss
+                    AUX_COEF = 0.5
+                    actor_loss = actor_loss + AUX_COEF * aux_loss
+
+                    # 记录
+                    train_info['aux_loss'].append(aux_loss.item())
+                else:
+                    # 兼容非 RNN 模式或异常情况
+                    actor_loss_total = actor_loss
+                    train_info['aux_loss'].append(0.0)
+                # ==========================================================
 
                 # 更新 Actor
                 self.Actor.optim.zero_grad()

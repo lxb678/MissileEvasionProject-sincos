@@ -18,8 +18,8 @@ class RewardCalculator:
         # --- 在这里集中定义所有奖励相关的超参数 ---
 
         # [稀疏奖励参数]
-        self.W = 6 #5 #10#20  # 成功奖励基准
-        self.U = -10#-20  # 失败固定惩罚
+        self.W = 4 #6 #5 #10#20  # 成功奖励基准
+        self.U = -6 #-10#-20  # 失败固定惩罚
 
         # [高度惩罚参数]
         self.SAFE_ALTITUDE_M = 3000.0 #1000.0
@@ -131,7 +131,7 @@ class RewardCalculator:
             extra_margin = miss_distance - R_kill
 
             # 假设 MAX_BONUS = 20.0，脱靶量比 R_kill 多出 200 米时，拿到约 63% 的额外奖励
-            max_bonus = 4.0
+            max_bonus = 2.0 #4.0
             safety_bonus = max_bonus * (1.0 - math.exp(-extra_margin / 100.0))
 
             # 最终奖励范围：[W, W + max_bonus) -> 例如[20, 40)

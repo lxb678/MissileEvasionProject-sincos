@@ -103,7 +103,7 @@ class Actor(Module):
         # self.log_std_max = 2.0
 
         self.target_std_min = 0.10 #0.20 #0.10 #0.05  # 保证底噪
-        self.target_std_max = 0.60 #0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
+        self.target_std_max = 0.70 #0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
         self.target_init_std = 0.60 #0.50 #0.75  # 0.85 #0.65 #0.75  # 初始值设为中间态，不要设为 max
 
         # 转换为 Log 空间边界
@@ -115,7 +115,7 @@ class Actor(Module):
         # 1. 为每个部分定义层的维度
         #    !! 重要：请根据你的 Config.py 来调整这里的切片 !!
         #    假设 model_layer_dim = [256, 256，256]，我们在第2层后拆分
-        split_point = 1 #2  # 在第2层后拆分
+        split_point = 2  # 在第2层后拆分
         base_dims = ACTOR_PARA.model_layer_dim[:split_point]  # 例如: [256，256]
         # tower_dims = ACTOR_PARA.model_layer_dim[split_point:]  # 例如: [256]
         continuous_tower_dims = ACTOR_PARA.model_layer_dim[split_point:] #[256]  # 连续动作塔楼的维度
@@ -241,7 +241,7 @@ class Actor(Module):
 
         # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
         # 只要不让它跑到 10 这种离谱的值就行
-        mu = torch.clamp(mu, -2.0, 2.0)
+        mu = torch.clamp(mu, -3.0, 3.0)
 
         # # =====================================================
         # # 1. 连续动作均值 mu: 使用 Tanh 替代 Clamp 防止梯度死亡
@@ -682,10 +682,10 @@ class PPO_continuous(object):
             # 2. 计算雅可比修正项 (稳定公式)
             # 公式: 2 * (log 2 - u - softplus(-2u))
             # 注意: u 是 pre-tanh 的值
-            correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
+            # correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
 
             # 3. 得到最终动作 a = tanh(u) 的 log_prob
-            log_prob_cont = log_prob_u - correction
+            log_prob_cont = log_prob_u #- correction
             # ================= [修改结束] =================
 
             # log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
@@ -1000,10 +1000,10 @@ class PPO_continuous(object):
                 log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
 
                 # 1.2 计算旧动作的雅可比修正项
-                correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
+                #correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(dim=-1)
 
                 # 1.3 得到最终用于 Ratio 计算的 Log Prob
-                new_log_prob_cont = log_prob_u_buffer - correction_buffer
+                new_log_prob_cont = log_prob_u_buffer #- correction_buffer
 
                 # ==========================================================
                 # 💥 核心修改 1：层次化动作 Log Prob 掩码
@@ -1036,6 +1036,7 @@ class PPO_continuous(object):
                 # ==========================================================
                 # 1. 连续动作熵 (不变)
                 entropy_base = new_dists['continuous'].entropy().sum(dim=-1)
+                # entropy_base = new_dists['continuous'].entropy().mean(dim=-1)  # 动作维度求平均
                 u_curr_sample = new_dists['continuous'].rsample()
                 correction_curr = 2.0 * (np.log(2.0) - u_curr_sample - F.softplus(-2.0 * u_curr_sample)).sum(dim=-1)
                 entropy_cont = entropy_base + correction_curr
@@ -1045,13 +1046,35 @@ class PPO_continuous(object):
                 entropy_trigger = new_dists['trigger'].entropy()
                 mean_entropy_trigger = entropy_trigger.mean()
 
+                # # ==========================================================
+                # # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
+                # # ==========================================================
+                #
+                # # 1. 计算所有子动作的原始熵 (Raw)
+                # entropy_sub_actions_raw = sum(
+                #     dist.entropy() for key, dist in new_dists.items()
+                #     if key not in ['continuous', 'trigger']
+                # )
+                #
+                # # 2. 直接求平均！不要乘 actual_triggers！
+                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
+                # mean_entropy_sub = entropy_sub_actions_raw.mean()
+
                 # 3. 🌟 灵魂掩码：子动作熵 🌟
                 entropy_sub_actions_raw = sum(
                     dist.entropy() for key, dist in new_dists.items()
                     if key not in ['continuous', 'trigger']
                 )
-                num_triggered = actual_triggers.sum()
+                # # 1. 计算所有子动作的熵 (Raw) 并按动作数量求平均 -> Shape: [Batch, Seq]
+                # sub_action_keys = [key for key in new_dists.items() if key[0] not in ['continuous', 'trigger']]
+                # num_sub_actions = len(sub_action_keys)  # 当前为 3 (salvo_size, num_groups, inter_interval)
+                #
+                # entropy_sub_actions_raw = sum(
+                #     dist.entropy() for key, dist in sub_action_keys
+                # ) / num_sub_actions
 
+                # num_triggered = actual_triggers.sum()
+                #
                 # if num_triggered > 0:
                 #     # 只有真实开火的样本，才把它的子动作熵提取出来算平均
                 #     valid_sub_entropy = entropy_sub_actions_raw * actual_triggers
@@ -1066,9 +1089,9 @@ class PPO_continuous(object):
                 mean_entropy_sub = (entropy_sub_actions_raw * actual_triggers).mean()
 
                 # 分配合适的熵奖励系数
-                COEF_CONT = AGENTPARA.entropy * 1.0  # 恢复连续动作的主导地位
-                COEF_TRIG = AGENTPARA.entropy * 1.0  # 适当调大触发器系数，鼓励它多尝试发射
-                COEF_SUB = AGENTPARA.entropy * 1.0  # 大幅降低子动作系数 (它现在熵值很高，不需要那么大权重)
+                # COEF_CONT = AGENTPARA.entropy * 1.0  # 恢复连续动作的主导地位
+                # COEF_TRIG = AGENTPARA.entropy * 1.0  # 适当调大触发器系数，鼓励它多尝试发射
+                # COEF_SUB = AGENTPARA.entropy * 1.0  # 大幅降低子动作系数 (它现在熵值很高，不需要那么大权重)
 
                 # 计算总的熵 Bonus
                 # total_entropy_bonus = (COEF_CONT * mean_entropy_cont) + \
@@ -1187,7 +1210,7 @@ class PPO_continuous(object):
                 ratio = torch.exp(torch.clamp(log_ratio, -20.0, 20.0))
                 surr1 = ratio * advantage.squeeze(-1)
                 surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage.squeeze(-1)
-                actor_loss = -torch.min(surr1, surr2).mean() - AGENTPARA.entropy * total_entropy_bonus #AGENTPARA.entropy * total_entropy
+                actor_loss = -torch.min(surr1, surr2).mean() - (AGENTPARA.con_entropy * mean_entropy_cont + AGENTPARA.dis_entropy * (1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub))#AGENTPARA.entropy * (mean_entropy_cont + 1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub)#AGENTPARA.entropy * total_entropy_bonus #AGENTPARA.entropy * total_entropy
 
                 # 6. Actor梯度更新, 使用 scaler
                 self.Actor.optim.zero_grad()

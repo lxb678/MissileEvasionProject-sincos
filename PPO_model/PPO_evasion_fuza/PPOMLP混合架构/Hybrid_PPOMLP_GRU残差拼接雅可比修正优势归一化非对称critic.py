@@ -94,8 +94,8 @@ class Actor_GRU(Module):
         # self.log_std_max = np.log(self.target_std_max)
 
         self.target_std_min = 0.10 #0.20 #0.10 #0.05  # 保证底噪
-        self.target_std_max = 0.60 #0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
-        self.target_init_std = 0.60 #0.75  # 0.85 #0.65 #0.75  # 初始值设为中间态，不要设为 max
+        self.target_std_max = 0.70 #0.80  # 0.90 #0.70 #0.80  # 降低上限，避免完全随机
+        self.target_init_std = 0.50 #0.75  # 0.85 #0.65 #0.75  # 初始值设为中间态，不要设为 max
 
         # 转换为 Log 空间边界
         self.log_std_min = np.log(self.target_std_min)  # ln(0.05) ≈ -2.99
@@ -322,7 +322,7 @@ class Actor_GRU(Module):
 
         # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
         # 只要不让它跑到 10 这种离谱的值就行
-        mu = torch.clamp(mu, -2.0, 2.0)
+        mu = torch.clamp(mu, -3.0, 3.0)
         # # =====================================================
         # # 1. 连续动作均值 mu: 使用 Tanh 替代 Clamp 防止梯度死亡
         # # =====================================================
@@ -1833,10 +1833,10 @@ class PPO_continuous(object):
             # 2. 计算雅可比修正项 (稳定公式)
             # 公式: 2 * (log 2 - u - softplus(-2u))
             # 注意: u 是 pre-tanh 的值
-            correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
+            # correction = 2.0 * (np.log(2.0) - u - F.softplus(-2.0 * u)).sum(dim=-1)
 
             # 3. 得到最终动作 a = tanh(u) 的 log_prob
-            log_prob_cont = log_prob_u - correction
+            log_prob_cont = log_prob_u #- correction
             # ================= [修改结束] =================
 
             # log_prob_cont = continuous_base_dist.log_prob(u).sum(dim=-1)
@@ -2035,9 +2035,9 @@ class PPO_continuous(object):
 
                 # --- A. 连续动作 Log Prob (带雅可比修正) ---
                 log_prob_u_buffer = new_dists['continuous'].log_prob(u_from_buffer).sum(dim=-1)
-                correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(
-                    dim=-1)
-                new_log_prob_cont = log_prob_u_buffer - correction_buffer
+                # correction_buffer = 2.0 * (np.log(2.0) - u_from_buffer - F.softplus(-2.0 * u_from_buffer)).sum(
+                #     dim=-1)
+                new_log_prob_cont = log_prob_u_buffer #- correction_buffer
 
                 # --- B. 离散动作 Log Prob (Ratio 一致性修复) ---
                 # 1. 提取 Buffer 中记录的真实开火情况 (用于 Mask LogProb)

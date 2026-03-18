@@ -66,14 +66,14 @@ def pack_action_into_dict(discrete_indices: np.ndarray) -> dict:
 if __name__ == "__main__":
     # 1. 初始化环境
     # dt=0.02 保证物理仿真精度，与训练时一致
-    env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TEST, dt=0.05)
+    env = AirCombatEnv(tacview_enabled=TACVIEW_ENABLED_DURING_TEST, dt=0.02)
     set_seed(env)
 
     # 2. 指定模型路径
     # 请修改为您实际保存模型的文件夹路径
     # 例如: r"D:\code\规避导弹项目\save\save_evade_fuza\PPO_2025-xx-xx_xx-xx-xx\胜率模型"
     # 或者如果不使用胜率模型，则指向上一级目录
-    model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza_单一干扰\PPO_2026-03-03_17-33-44"
+    model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza_单一干扰\PPO_2026-03-13_17-40-31"
 
     if not os.path.exists(model_path):
         print(f"[警告] 模型路径不存在: {model_path}")
