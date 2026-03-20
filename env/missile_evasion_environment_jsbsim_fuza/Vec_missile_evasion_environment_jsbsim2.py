@@ -113,7 +113,7 @@ class AirCombatEnv(gym.Env):
 
         # (中文) 从您的主脚本中看到您还引用了 dt_dec，这里也为您补上
         # 它似乎与 self.dt 含义相同，代表决策步长
-        self.dt_dec = 0.4 #0.3 #0.2
+        self.dt_dec = 0.4 #0.2 #0.4 #0.3 #0.2
 
         self.D_max = 30000.0  # 导引头最大搜索范围 (m)
         self.Angle_IR_rad = np.deg2rad(90)  # 导引头最大视场角度 (弧度)

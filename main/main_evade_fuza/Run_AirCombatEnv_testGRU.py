@@ -57,7 +57,7 @@ set_seed(env)
 
 # <<< GRU 修改 >>>: 确保此路径指向您训练好的GRU模型
 # model_path = r"D:\code\规避导弹项目sincos\Interference_code\test\test_evade_fuza"
-model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPOGRU_2026-03-18_15-36-24"  # 示例路径
+model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza\PPOGRU_2026-03-19_21-20-14"  # 示例路径
 print(f"正在加载GRU模型: {model_path}")
 
 # <<< GRU 修改 >>>: 初始化Agent时，必须传入 use_rnn=True

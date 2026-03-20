@@ -62,7 +62,7 @@ ACTION_RANGES = {
 # <<< GRU/RNN 修改 >>>: 新增 RNN 配置
 # 这些参数最好也移到 Config.py 中
 RNN_HIDDEN_SIZE = 128 #64 #128 #64  #128 #64 #128 #64 #9 #9 #32 #9  # GRU 层的隐藏单元数量
-SEQUENCE_LENGTH =  5 #8 #2 #5 #15 #12 #15 #12 #20 #15 #10 #5  #10 #5 #5 #5 #10 #5 #5 #10  # 训练时从经验池中采样的连续轨迹片段的长度
+SEQUENCE_LENGTH =  5 #10 #5 #8 #2 #5 #15   # 训练时从经验池中采样的连续轨迹片段的长度
 
 
 class Actor_GRU(Module):
@@ -322,7 +322,7 @@ class Actor_GRU(Module):
 
         # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
         # 只要不让它跑到 10 这种离谱的值就行
-        mu = torch.clamp(mu, -3.0, 3.0)
+        mu = torch.clamp(mu, -2.0, 2.0)
         # # =====================================================
         # # 1. 连续动作均值 mu: 使用 Tanh 替代 Clamp 防止梯度死亡
         # # =====================================================
@@ -2079,19 +2079,19 @@ class PPO_continuous(object):
                 entropy_trigger = new_dists['trigger'].entropy()
                 mean_entropy_trigger = entropy_trigger.mean()
 
-                # # ==========================================================
-                # # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
-                # # ==========================================================
-                #
-                # # 1. 计算所有子动作的原始熵 (Raw)
-                # entropy_sub_actions_raw = sum(
-                #     dist.entropy() for key, dist in new_dists.items()
-                #     if key not in ['continuous', 'trigger']
-                # )
-                #
-                # # 2. 直接求平均！不要乘 actual_triggers！
-                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
-                # mean_entropy_sub = entropy_sub_actions_raw.mean()
+                # ==========================================================
+                # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
+                # ==========================================================
+
+                # 1. 计算所有子动作的原始熵 (Raw)
+                entropy_sub_actions_raw = sum(
+                    dist.entropy() for key, dist in new_dists.items()
+                    if key not in ['continuous', 'trigger']
+                )
+
+                # 2. 直接求平均！不要乘 actual_triggers！
+                # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
+                mean_entropy_sub = entropy_sub_actions_raw.mean()
 
                 # ==========================================================
                 # D.3 🌟 灵魂掩码 (Entropy) 🌟：子动作条件均值熵
@@ -2099,11 +2099,11 @@ class PPO_continuous(object):
                 # 这样才能与 Ratio 的掩码逻辑保持严格一致，且避免阈值跳变带来的抖动。
                 # ==========================================================
 
-                # 1. 计算所有子动作的熵 (Raw) -> Shape: [Batch, Seq]
-                entropy_sub_actions_raw = sum(
-                    dist.entropy() for key, dist in new_dists.items()
-                    if key not in ['continuous', 'trigger']
-                )
+                # # 1. 计算所有子动作的熵 (Raw) -> Shape: [Batch, Seq]
+                # entropy_sub_actions_raw = sum(
+                #     dist.entropy() for key, dist in new_dists.items()
+                #     if key not in ['continuous', 'trigger']
+                # )
                 # # 1. 计算所有子动作的熵 (Raw) 并按动作数量求平均 -> Shape: [Batch, Seq]
                 # sub_action_keys = [key for key in new_dists.items() if key[0] not in ['continuous', 'trigger']]
                 # num_sub_actions = len(sub_action_keys)  # 当前为 3 (salvo_size, num_groups, inter_interval)
@@ -2127,11 +2127,11 @@ class PPO_continuous(object):
                 # else:
                 #     mean_entropy_sub = torch.tensor(0.0, device=ACTOR_PARA.device)
 
-                # 3. 🌟 灵魂掩码 (Entropy) 🌟：改为全局平均
-                # 逻辑：(子动作熵 * 真实开火掩码).mean()
-                # 效果：不开火的时候熵贡献为0，分母为总步数 (Batch * Seq)。
-                # 结果：如果开火很稀疏，这个值会非常小（这是正常的）。
-                mean_entropy_sub = (entropy_sub_actions_raw * actual_triggers).mean()
+                # # 3. 🌟 灵魂掩码 (Entropy) 🌟：改为全局平均
+                # # 逻辑：(子动作熵 * 真实开火掩码).mean()
+                # # 效果：不开火的时候熵贡献为0，分母为总步数 (Batch * Seq)。
+                # # 结果：如果开火很稀疏，这个值会非常小（这是正常的）。
+                # mean_entropy_sub = (entropy_sub_actions_raw * actual_triggers).mean()
 
                 # D.4 加权总熵 Bonus
                 # COEF_CONT = 1.0   # 连续动作主导

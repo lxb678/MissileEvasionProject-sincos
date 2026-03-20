@@ -18,8 +18,8 @@ class RewardCalculator:
         # --- 在这里集中定义所有奖励相关的超参数 ---
 
         # [稀疏奖励参数]
-        self.W = 8 #6 #5 #10 #20 #50  # 成功奖励基准
-        self.U = -10#-8 #-10 #-20  # 失败固定惩罚
+        self.W = 6  #6 #5 #10 #20 #50  # 成功奖励基准
+        self.U = -8 #-8 #-10 #-20  # 失败固定惩罚
 
         # [高度惩罚参数]
         self.SAFE_ALTITUDE_M = 3000.0
@@ -84,6 +84,8 @@ class RewardCalculator:
         self.prev_energy = None  # <<< 新增：记录上一时刻的能量
         self.survival_steps = 0
         self.prev_speed = None
+        self.prev_missile_energy = None
+        self.prev_zem_norm = None
 
     def reset(self):
             """为新回合重置状态变量。"""
@@ -111,6 +113,9 @@ class RewardCalculator:
 
             self.prev_speed = None
 
+            self.prev_missile_energy = None
+
+            self.prev_zem_norm = None
 
 
 
@@ -196,15 +201,15 @@ class RewardCalculator:
         # <<< 核心修正 >>> ---
         # 将提取出的 flare_trigger_action 传递给资源惩罚函数
         reward_resource = 2.0 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
-        reward_roll_penalty = 0.5 * self._penalty_for_roll_rate_magnitude(aircraft)  #1.14修改，原来是0.5  1.15号，感觉0.1好像不太行
+        reward_roll_penalty = 1.0 * self._penalty_for_roll_rate_magnitude(aircraft)  #1.14修改，原来是0.5  1.15号，感觉0.1好像不太行
         # reward_speed_penalty = 0.5 * self._penalty_for_dropping_below_speed_floor(aircraft)  #1.0速度惩罚还可以再大点感觉，或者加一个速度奖励
-        reward_survivaltime = 0.5 #0.4 #0.2 #0.5 #0.2  # 每步存活奖励
+        reward_survivaltime = 0.4 #0.4 #0.2 #0.5 #0.2  # 每步存活奖励
         # 调用纯存活奖励
         # reward_survivaltime = 1.0 * self._reward_for_scaling_survival()
         # reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
         # reward_dive = self._reward_for_tactical_dive_smooth(aircraft, missile)
         # reward_coordinated_turn = 0.5 * self._reward_for_coordinated_turn(aircraft, 0.2)
-        reward_punish_push_down = 0.5 * self._reward_for_punish_push_down(aircraft)
+        reward_punish_push_down = 1.0 * self._reward_for_punish_push_down(aircraft)
         # reward_dive = self._reward_for_optimal_dive_angle(aircraft, missile)
         # reward_dive = 0.0
 
@@ -237,13 +242,13 @@ class RewardCalculator:
         reward_high_g = 1.0 * self._reward_for_high_g_maneuver(aircraft)
 
         # 1. 视线角速率奖励独立结算（它是规避的核心）
-        w_los_rate = 0.5
-        final_los_rate_reward = w_los_rate * reward_los_rate
+        # w_los_rate = 0.5
+        # final_los_rate_reward = w_los_rate * reward_los_rate
 
         # 2. 高G奖励作为“有效规避”的额外加成
         # 只有当 LOS Rate 达到一定水平（说明机动方向是对的），拉高G才有意义。
         # 如果 LOS Rate 极低（比如正迎头或正尾追），拉再高的G也是白费能量，不给加成。
-        w_high_g_bonus = 0.5
+        w_high_g_bonus = 1.0 #0.5
         final_high_g_reward = w_high_g_bonus * (reward_high_g * reward_los_rate)
 
         # # 在主函数 calculate_dense_reward 中
@@ -255,8 +260,18 @@ class RewardCalculator:
         # <<< 新增：能量保持奖励 >>>
         # 建议权重：0.2 到 0.5。
         # 不需要太高，因为生存才是第一位的。它主要用于区分"也是躲开了，但是能量耗尽"和"完美躲开且能量充沛"这两种情况。
-        # reward_energy_maintain = 20.0 * self._reward_for_energy_rate_simple(aircraft)
+        reward_energy_maintain = 20.0 * self._reward_for_energy_rate_simple(aircraft)
         # reward_speed_maintain = 20.0 * self._reward_for_speed_rate_simple(aircraft)
+
+        # <<< 新增：导弹能量损耗奖励 >>>
+        w_missile_bleed = 0.5
+        reward_missile_bleed = w_missile_bleed * self._reward_for_missile_energy_bleed(missile)
+
+        # 1. 零控脱靶量扩大奖励 (权重建议 1.0 - 2.0)
+        w_zem_rate = 0.5
+        reward_zem = w_zem_rate * self._reward_for_zem_rate(aircraft, missile)
+
+        # 将 reward_missile_bleed 加入到 final_dense_reward 的加和中
 
 
         # # <<< 新增 >>> 调用新的分离速度奖励函数，权重可以设高一些，因为它代表了核心生存策略
@@ -276,7 +291,7 @@ class RewardCalculator:
                 reward_altitude +
                 reward_resource +
                 reward_roll_penalty +  # 惩罚项权重应为负数, reward_F_roll_penalty基准是正的   #去掉看效果   还是很有必要的
-                final_los_rate_reward +
+                # final_los_rate_reward +
                 # reward_speed_penalty  # reward_for_optimal_speed基准是负的   #速度暂时不需要了
                 + reward_survivaltime
                 # + reward_los
@@ -295,18 +310,22 @@ class RewardCalculator:
                 # + reward_high_g  # <<< 新增：将高G奖励加入总和 >>>
                 + final_high_g_reward
             # + reward_speed_maintain
-           # + reward_energy_maintain
+           + reward_energy_maintain
+            + reward_missile_bleed
+                + reward_zem
         )
         # print(
         #     # f"reward_posture: {reward_posture:.2f}",
         #      #f"reward_head_on_penalty: {reward_head_on_penalty:.2f}",
-        #     # f"reward_energy_maintain: {reward_energy_maintain:.3f} "
+        #     f"reward_energy_maintain: {reward_energy_maintain:.3f} "
+        #     f"reward_missile_bleed: {reward_missile_bleed:.3f} "
+        #     f"reward_zem: {reward_zem:.3f} "
         #     # f"reward_speed_maintain: {reward_speed_maintain:.3f} "
         #       f"reward_altitude: {reward_altitude:.2f}",
         #       f"reward_resource: {reward_resource:.2f}",
         #       f"reward_roll_penalty: {reward_roll_penalty:.2f}",
         #       # f"reward_speed_penalty: {reward_speed_penalty:.2f}",
-        #         f"reward_survivaltime: {reward_survivaltime:.2f}",
+        #       #   f"reward_survivaltime: {reward_survivaltime:.2f}",
         #       #   f"reward_los: {reward_los:.2f}",
         #       #   f"reward_dive: {reward_dive:.2f}",
         #       #   f"reward_coordinated_turn: {reward_coordinated_turn:.2f}",
@@ -323,10 +342,117 @@ class RewardCalculator:
         #     f"reward_high_g: {reward_high_g:.2f}",
         #     # f"reward_speed: {reward_speed:.2f}",
         #     f"final_high_g_reward: {final_high_g_reward:.2f}",
-        #      f"final_los_rate_reward: {final_los_rate_reward:.2f}",
+        #      # f"final_los_rate_reward: {final_los_rate_reward:.2f}",
         #       f"final_dense_reward: {final_dense_reward:.2f}")
 
         return final_dense_reward
+
+    def _reward_for_zem_rate(self, aircraft: Aircraft, missile: Missile) -> float:
+        """
+        (纯物理/数学驱动) 奖励零控脱靶量 (ZEM) 的增加。
+        物理意义：假设双方立即放弃机动，按当前速度匀速飞行，未来的最近交汇距离。
+        目标：迫使智能体不断扩大这个“预计脱靶量”。
+        """
+        # 1. 提取基础相对运动向量
+        r_vec = aircraft.pos - missile.pos
+        v_rel_vec = aircraft.get_velocity_vector() - missile.get_velocity_vector()
+
+        r_norm = np.linalg.norm(r_vec)
+        v_rel_sq = np.dot(v_rel_vec, v_rel_vec)
+
+        missile_v_vec = missile.get_velocity_vector()
+        norm_v_m = np.linalg.norm(missile_v_vec)
+
+        # 2. 异常值保护与极近距离/极低速门控
+        if r_norm < 1.0 or v_rel_sq < 1e-6 or norm_v_m < 1e-6:
+            self.prev_zem_norm = None
+            return 0.0
+
+        # 3. 后半球安全门控 (威胁解除判断)
+        # cos_ata < 0 表示飞机在导弹后半球，导弹正在远离
+        cos_ata = np.dot(r_vec, missile_v_vec) / (r_norm * norm_v_m)
+        if cos_ata < 0:
+            self.prev_zem_norm = None  # 状态重置
+            return 0.0  # 威胁解除，由存活奖励主导，这里不干涉
+
+        # 4. 计算剩余飞行时间 (Time-to-go, t_go)
+        # 公式: t_go = - (r · v_rel) / |v_rel|^2
+        r_dot_v = np.dot(r_vec, v_rel_vec)
+        t_go = -r_dot_v / (v_rel_sq + 1e-6)
+
+        # 如果 t_go < 0，说明相对距离正在扩大 (已经在互相远离)
+        if t_go < 0:
+            self.prev_zem_norm = None
+            return 0.0
+
+        # 5. 计算当前零控脱靶量 (ZEM) 的矢量与模长
+        # 公式: ZEM_vec = r + v_rel * t_go
+        zem_vec = r_vec + v_rel_vec * t_go
+        current_zem_norm = float(np.linalg.norm(zem_vec))
+
+        # 6. 奖励计算逻辑
+        reward = 0.0
+        if getattr(self, "prev_zem_norm", None) is not None:
+            # 核心：计算 ZEM 的增量
+            delta_zem = current_zem_norm - self.prev_zem_norm
+
+            # 缩放因子：假设 dt=0.5s，ZEM 增加 10 米是非常好的机动
+            # 调整这个系数，使得良好的规避动作能获得适中 (如 0.5~0.8) 的奖励
+            SCALING_FACTOR = 0.05
+
+            # 使用 tanh 进行平滑映射，防止梯度爆炸
+            # 注意：如果 delta_zem 为负 (ZEM在缩小，说明导弹正在修正逼近)，
+            # 这里也会给出负奖励，这符合零和博弈逻辑。
+            reward = float(np.tanh(delta_zem * SCALING_FACTOR))
+
+        # 7. 更新历史状态
+        self.prev_zem_norm = current_zem_norm
+
+        return reward
+
+    def _reward_for_missile_energy_bleed(self, missile: Missile) -> float:
+        """
+        (纯物理/数学驱动) 奖励诱导敌方导弹能量耗散。
+        评估标准：导弹的单位质量总机械能（比能量）下降。
+        """
+        # 1. 提取基础物理量
+        g = 9.81
+        h_m = float(missile.pos[1]) if missile.pos[1] > 0 else 0.0
+        v_m_vec = missile.get_velocity_vector()
+        v_m = float(np.linalg.norm(v_m_vec))
+
+        # 2. 计算当前比能量 (Specific Energy, 单位: J/kg)
+        # 公式: E_s = g * h + 0.5 * v^2
+        current_energy = g * h_m + 0.5 * (v_m ** 2)
+
+        # 3. 初始化历史状态
+        if getattr(self, "prev_missile_energy", None) is None:
+            self.prev_missile_energy = current_energy
+            return 0.0
+
+        # 4. 计算能量变化率
+        delta_energy = current_energy - self.prev_missile_energy
+
+        # 更新记录以备下一步使用
+        self.prev_missile_energy = current_energy
+
+        # 5. 门控逻辑：我们只奖励导弹能量的“损耗”
+        if delta_energy >= 0:
+            # 此时 delta_energy >= 0，说明导弹处于动力飞行段（发动机点火中），
+            # 或者是平滑俯冲将势能完美转化为动能。飞机不应为此获得奖励。
+            return 0.0
+
+        # 提取能量损耗的绝对值 (此时一定为正)
+        energy_bleed = -delta_energy
+
+        # 6. 奖励映射 (缩放与截断)
+        # 导弹在进行高G机动时，由于诱导阻力，能量会急剧下降。
+        # SCALING_FACTOR 需要根据你的仿真步长 (dt) 和导弹气动模型微调。
+        # 假设一拍掉 50 J/kg 算是不错的损耗，我们希望拿到大概 0.5 的奖励
+        SCALING_FACTOR = 0.0001
+        reward = float(np.tanh(energy_bleed * SCALING_FACTOR))
+
+        return reward
 
     def _reward_for_speed_rate_simple(self, aircraft: Aircraft) -> float:
         """

@@ -444,7 +444,7 @@ class Actor_PostAttentionGRU(Module):
 
         # 强行把均值限制在 [-2, 2] 或 [-3, 3] 之间
         # 只要不让它跑到 10 这种离谱的值就行
-        mu = torch.clamp(mu, -3.0, 3.0)
+        mu = torch.clamp(mu, -2.0, 2.0)
 
         all_disc_logits = self.discrete_head(discrete_features)
 
@@ -1425,26 +1425,26 @@ class PPO_continuous(object):
                 # 1. Trigger 熵 (无条件)
                 entropy_trigger = new_dists['trigger'].entropy()
 
-                # # ==========================================================
-                # # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
-                # # ==========================================================
-                #
-                # # 1. 计算所有子动作的原始熵 (Raw)
-                # entropy_sub_actions_raw = sum(
-                #     dist.entropy() for key, dist in new_dists.items()
-                #     if key not in ['continuous', 'trigger']
-                # )
-                #
-                # # 2. 直接求平均！不要乘 actual_triggers！
-                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
-                # mean_entropy_sub = entropy_sub_actions_raw.mean()
+                # ==========================================================
+                # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
+                # ==========================================================
 
-                # 2. 子动作熵 (原始)
-                entropy_sub_raw = (
-                        new_dists['salvo_size'].entropy() +
-                        new_dists['num_groups'].entropy() +
-                        new_dists['inter_interval'].entropy()
+                # 1. 计算所有子动作的原始熵 (Raw)
+                entropy_sub_actions_raw = sum(
+                    dist.entropy() for key, dist in new_dists.items()
+                    if key not in ['continuous', 'trigger']
                 )
+
+                # 2. 直接求平均！不要乘 actual_triggers！
+                # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
+                mean_entropy_sub = entropy_sub_actions_raw.mean()
+
+                # # 2. 子动作熵 (原始)
+                # entropy_sub_raw = (
+                #         new_dists['salvo_size'].entropy() +
+                #         new_dists['num_groups'].entropy() +
+                #         new_dists['inter_interval'].entropy()
+                # )
                 # # 1. 计算所有子动作的熵 (Raw) 并按动作数量求平均 -> Shape: [Batch, Seq]
                 # sub_action_keys = [key for key in new_dists.items() if key[0] not in ['continuous', 'trigger']]
                 # num_sub_actions = len(sub_action_keys)  # 当前为 3 (salvo_size, num_groups, inter_interval)
@@ -1463,11 +1463,11 @@ class PPO_continuous(object):
                 # else:
                 #     mean_entropy_sub = torch.tensor(0.0).to(**ACTOR_PARA.tpdv)
 
-                # 3. 🌟 灵魂掩码 (Entropy) 🌟：改为全局平均
-                # 逻辑：(子动作熵 * 真实开火掩码).mean()
-                # 效果：不开火的时候熵贡献为0，分母为总步数 (Batch * Seq)。
-                # 结果：如果开火很稀疏，这个值会非常小（这是正常的）。
-                mean_entropy_sub = (entropy_sub_raw * actual_triggers).mean()
+                # # 3. 🌟 灵魂掩码 (Entropy) 🌟：改为全局平均
+                # # 逻辑：(子动作熵 * 真实开火掩码).mean()
+                # # 效果：不开火的时候熵贡献为0，分母为总步数 (Batch * Seq)。
+                # # 结果：如果开火很稀疏，这个值会非常小（这是正常的）。
+                # mean_entropy_sub = (entropy_sub_raw * actual_triggers).mean()
 
                 # ================= [修改结束] =================
 

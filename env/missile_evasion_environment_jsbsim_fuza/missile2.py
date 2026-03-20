@@ -449,9 +449,9 @@ class Missile:
 
         # --- 过载限幅 ---
         n_total_cmd = np.sqrt(ny ** 2 + nz ** 2)
-        available_g_load = self._calculate_available_g_load(V, rho)
-        n_limit = min(self.max_g_load, available_g_load)
-        # n_limit = self.max_g_load
+        # available_g_load = self._calculate_available_g_load(V, rho)
+        # n_limit = min(self.max_g_load, available_g_load)
+        n_limit = self.max_g_load
         # print("n_limit", n_limit)
         # 记录实际拉出的过载大小 (用于后续计算诱导阻力)
         n_actual = n_total_cmd

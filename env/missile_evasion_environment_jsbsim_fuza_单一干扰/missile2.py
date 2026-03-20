@@ -444,9 +444,9 @@ class Missile:
         Ma = V / 340.0
         # --- 过载限幅 ---
         n_total_cmd = np.sqrt(ny ** 2 + nz ** 2)
-        available_g_load = self._calculate_available_g_load(V, rho)
-        n_limit = min(self.max_g_load, available_g_load)
-        # n_limit = self.max_g_load
+        # available_g_load = self._calculate_available_g_load(V, rho)
+        # n_limit = min(self.max_g_load, available_g_load)
+        n_limit = self.max_g_load
         if n_total_cmd > n_limit:
             scale = n_limit / n_total_cmd
             ny *= scale

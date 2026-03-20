@@ -18,8 +18,8 @@ class RewardCalculator:
 
     def __init__(self):
         # --- 所有超参数保持不变 ---
-        self.W = 8 #5 #6 #5 #10 #20
-        self.U = -10 #-10 #-20
+        self.W = 6 #5 #6 #5 #10 #20
+        self.U = -8 #-10 #-20
 
         # <<< 新增 >>>: 单枚导弹成功规避的补偿奖励
         # 即使任务失败，每躲过一枚导弹，惩罚减少 5.0
@@ -354,18 +354,116 @@ class RewardCalculator:
         # final_high_g_reward = 1.0 * reward_high_g * reward_los_rate
         # 1. 视线角速率奖励独立结算（它是规避的核心）
         w_los_rate = 0.5
-        final_los_rate_reward = w_los_rate * reward_los_rate
+        # final_los_rate_reward = w_los_rate * reward_los_rate
 
         # 2. 高G奖励作为“有效规避”的额外加成
         # 只有当 LOS Rate 达到一定水平（说明机动方向是对的），拉高G才有意义。
         # 如果 LOS Rate 极低（比如正迎头或正尾追），拉再高的G也是白费能量，不给加成。
-        w_high_g_bonus = 0.5
+        w_high_g_bonus = 1.0
         final_high_g_reward = w_high_g_bonus * (reward_high_g * reward_los_rate)
+        # <<< 新增：导弹能量损耗奖励 >>>
+        w_missile_bleed = 0.5
+        reward_missile_bleed = w_missile_bleed * self._reward_for_missile_energy_bleed(missile)
+
+        # 1. 零控脱靶量扩大奖励 (权重建议 1.0 - 2.0)
+        w_zem_rate = 0.5
+        reward_zem = w_zem_rate * self._reward_for_zem_rate(aircraft, missile)
+
+
 
         # # <<< 新增：调用分离加速度奖励 >>>
         # reward_separation_accel = 0.5 * self._reward_for_separation_acceleration(aircraft, missile)
 
-        return final_high_g_reward + final_los_rate_reward #+ reward_closing_velocity#+ reward_posture #+ reward_los_rate
+        return final_high_g_reward + reward_missile_bleed + reward_zem#+ reward_closing_velocity#+ final_los_rate_reward #+ reward_closing_velocity#+ reward_posture #+ reward_los_rate
+
+    def _reward_for_zem_rate(self, aircraft: Aircraft, missile: Missile) -> float:
+        """
+        (多导弹适配版) 奖励零控脱靶量 (ZEM) 的增加。
+        """
+        # 1. 获取专属历史记录
+        missile_hist = self._get_missile_history(missile.id)
+
+        r_vec = aircraft.pos - missile.pos
+        v_rel_vec = aircraft.get_velocity_vector() - missile.get_velocity_vector()
+
+        r_norm = np.linalg.norm(r_vec)
+        v_rel_sq = np.dot(v_rel_vec, v_rel_vec)
+
+        missile_v_vec = missile.get_velocity_vector()
+        norm_v_m = np.linalg.norm(missile_v_vec)
+
+        # 异常值保护
+        if r_norm < 1.0 or v_rel_sq < 1e-6 or norm_v_m < 1e-6:
+            missile_hist['prev_zem_norm'] = None
+            return 0.0
+
+        # 后半球安全门控
+        cos_ata = np.dot(r_vec, missile_v_vec) / (r_norm * norm_v_m)
+        if cos_ata < 0:
+            missile_hist['prev_zem_norm'] = None
+            return 0.0
+
+            # 计算 Time-to-go
+        r_dot_v = np.dot(r_vec, v_rel_vec)
+        t_go = -r_dot_v / (v_rel_sq + 1e-6)
+
+        if t_go < 0:
+            missile_hist['prev_zem_norm'] = None
+            return 0.0
+
+        # 计算 ZEM 模长
+        zem_vec = r_vec + v_rel_vec * t_go
+        current_zem_norm = float(np.linalg.norm(zem_vec))
+
+        # 奖励计算逻辑
+        reward = 0.0
+        prev_zem = missile_hist['prev_zem_norm']
+        if prev_zem is not None:
+            delta_zem = current_zem_norm - prev_zem
+            SCALING_FACTOR = 0.05
+            reward = float(np.tanh(delta_zem * SCALING_FACTOR))
+
+        # 更新历史状态
+        missile_hist['prev_zem_norm'] = current_zem_norm
+
+        return reward
+    def _reward_for_missile_energy_bleed(self, missile: Missile) -> float:
+        """
+        (多导弹适配版) 奖励诱导敌方导弹能量耗散。
+        """
+        # 1. 获取专属历史记录
+        missile_hist = self._get_missile_history(missile.id)
+
+        g = 9.81
+        h_m = float(missile.pos[1]) if missile.pos[1] > 0 else 0.0
+        v_m_vec = missile.get_velocity_vector()
+        v_m = float(np.linalg.norm(v_m_vec))
+
+        # 计算当前比能量
+        current_energy = g * h_m + 0.5 * (v_m ** 2)
+
+        # 读取历史状态
+        prev_energy = missile_hist['prev_missile_energy']
+        if prev_energy is None:
+            missile_hist['prev_missile_energy'] = current_energy
+            return 0.0
+
+        delta_energy = current_energy - prev_energy
+
+        # 更新记录以备下一步使用
+        missile_hist['prev_missile_energy'] = current_energy
+
+        if delta_energy >= 0:
+            return 0.0
+
+        energy_bleed = -delta_energy
+
+        # 我注意到你把 SCALING_FACTOR 改成了 0.0001，这个改动非常有洞察力！
+        # 因为 v^2/2 的量级很大，0.0001 是一个非常合适的缩放比例。
+        SCALING_FACTOR = 0.0001
+        reward = float(np.tanh(energy_bleed * SCALING_FACTOR))
+
+        return reward
 
     def _calculate_general_rewards(self, aircraft: Aircraft, flare_trigger_action: float,
                                    remaining_flares: int, total_flares: int,
@@ -373,16 +471,16 @@ class RewardCalculator:
         """计算与特定导弹无关的通用奖励/惩罚。"""
         reward_altitude = 0.5 * self._compute_altitude_reward(aircraft)  #0.5
         reward_resource = 2.0 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares)
-        reward_roll_penalty = 0.5 * self._penalty_for_roll_rate_magnitude(aircraft) #0.5
+        reward_roll_penalty = 1.0 * self._penalty_for_roll_rate_magnitude(aircraft) #0.5
         # reward_coordinated_turn = 0.5 * self._reward_for_coordinated_turn(aircraft, 0.2)  # 降低权重
-        reward_punish_push_down = 0.5 * self._reward_for_punish_push_down(aircraft)
+        reward_punish_push_down = 1.0 * self._reward_for_punish_push_down(aircraft)
         # reward_speed = 0.5 * self._reward_for_maintaining_speed(aircraft)
-        reward_survivaltime = 0.5 #0.2 #0.5 #0.2  # 每步存活奖励
+        reward_survivaltime = 0.4 #0.2 #0.5 #0.2  # 每步存活奖励
         # reward_survivaltime = 1.0 * self._reward_for_scaling_survival()
         # <<< 新增：能量保持奖励 >>>
         # 权重建议：0.5。
         # 如果飞机能量掉得太快（例如做完机动就失速坠毁），可以将权重提高到 1.0
-        # reward_energy_maintain = 20.0 * self._reward_for_energy_rate_simple(aircraft)
+        reward_energy_maintain = 20.0 * self._reward_for_energy_rate_simple(aircraft)
         # reward_speed_maintain = 20.0 * self._reward_for_speed_rate_simple(aircraft)
 
         return (
@@ -394,7 +492,7 @@ class RewardCalculator:
                 reward_punish_push_down +
                 # reward_speed +
                 reward_survivaltime
-                # reward_energy_maintain  # <--- 加入总和
+                 + reward_energy_maintain  # <--- 加入总和
             # + reward_speed_maintain
         )
 
@@ -1181,6 +1279,9 @@ class RewardCalculator:
                 # --- V4.1 新增状态 ---
                 'prev_los_vec': None,  # 记录上一帧视线矢量
                 'los_safe_latch': False,  # 记录是否已判定为安全（防止反复刷分）
+                # <<< 新增：注册 ZEM 和能量的历史状态 >>>
+                'prev_zem_norm': None,
+                'prev_missile_energy': None,
             }
         return self.history[missile_id]
 
