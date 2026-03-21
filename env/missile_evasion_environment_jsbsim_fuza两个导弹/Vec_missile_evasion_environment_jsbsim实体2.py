@@ -108,7 +108,7 @@ class AirCombatEnv(gym.Env):
         self.dt_small = dt #0.02 #dt
         self.dt_flare = dt
         self.R_switch = 400
-        self.dt_dec = 0.4 #0.2 #0.4 #0.3 #0.2
+        self.dt_dec = 0.5 #0.4 #0.2 #0.4 #0.3 #0.2
         self.D_max = 30000.0
         self.Angle_IR_rad = np.deg2rad(90)
         self.omega_max_rad_s = np.deg2rad(90.0)#12.0 #np.deg2rad(100.0) #12.0

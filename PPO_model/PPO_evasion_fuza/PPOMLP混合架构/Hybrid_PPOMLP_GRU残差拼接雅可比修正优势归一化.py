@@ -49,7 +49,7 @@ DISCRETE_ACTION_MAP = {
     # 'intra_interval': [0.05, 0.1, 0.15],
     # 'intra_interval': [0.02, 0.04, 0.06],
     'num_groups': [2, 3, 4],
-    'inter_interval': [0.2, 0.4, 0.6]
+    'inter_interval': [0.2, 0.6, 1.0] #[0.2, 0.4, 0.6]
 }
 # 连续动作的物理范围，用于将网络输出 (-1, 1) 缩放到实际范围
 ACTION_RANGES = {
@@ -2089,9 +2089,18 @@ class PPO_continuous(object):
                     if key not in ['continuous', 'trigger']
                 )
 
-                # 2. 直接求平均！不要乘 actual_triggers！
-                # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
-                mean_entropy_sub = entropy_sub_actions_raw.mean()
+                # # 2. 直接求平均！不要乘 actual_triggers！
+                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
+                # mean_entropy_sub = entropy_sub_actions_raw.mean()
+
+                # 1. 算出有真实开火记录的动作数量
+                valid_trigger_count = actual_triggers.sum()
+
+                if valid_trigger_count > 0:
+                    # 2. 重点：只除以开火的次数 (valid_trigger_count)，而不是整个 Batch 的长度
+                    mean_entropy_sub = (entropy_sub_actions_raw * actual_triggers).sum() / valid_trigger_count
+                else:
+                    mean_entropy_sub = torch.tensor(0.0, device=ACTOR_PARA.device)
 
                 # ==========================================================
                 # D.3 🌟 灵魂掩码 (Entropy) 🌟：子动作条件均值熵

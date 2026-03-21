@@ -58,7 +58,7 @@ DISCRETE_ACTION_MAP = {
     # 'intra_interval': [0.05, 0.1, 0.15],
     # 'intra_interval': [0.02, 0.04, 0.06],
     'num_groups': [2, 3, 4],
-    'inter_interval': [0.2, 0.4, 0.6]
+    'inter_interval': [0.2, 0.6, 1.0] #[0.2, 0.6, 1.0] #[0.2, 0.4, 0.6]
 }
 # <<< 新增 >>> 定义固定的组内投放间隔
 # FIXED_INTRA_INTERVAL = 0.05

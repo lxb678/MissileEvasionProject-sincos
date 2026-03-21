@@ -91,7 +91,7 @@ global_step = 0
 success_num = 0
 MAX_EXE_NUM = 20000 #20000
 MAX_STEP = 10000
-UPDATE_CYCLE = 25 # 建议使用稍大的更新周期
+UPDATE_CYCLE = 50 #25 # 建议使用稍大的更新周期
 
 eval_reward_buffer = []
 eval_success_buffer =[]  # <<< 新增：用于存储评估回合的胜负记录

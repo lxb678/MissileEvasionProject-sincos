@@ -86,6 +86,7 @@ class RewardCalculator:
         self.prev_speed = None
         self.prev_missile_energy = None
         self.prev_zem_norm = None
+        self.los_safe_latch = False  # 新增：单导弹后半球锁存
 
     def reset(self):
             """为新回合重置状态变量。"""
@@ -116,6 +117,8 @@ class RewardCalculator:
             self.prev_missile_energy = None
 
             self.prev_zem_norm = None
+
+            self.los_safe_latch = False  # 新增：单导弹后半球锁存 # 新增：回合重置
 
 
 
@@ -203,7 +206,7 @@ class RewardCalculator:
         reward_resource = 2.0 * self._compute_resource_penalty(flare_trigger_action, remaining_flares, total_flares) #感觉0.2有点大，智能体很小心的投放
         reward_roll_penalty = 1.0 * self._penalty_for_roll_rate_magnitude(aircraft)  #1.14修改，原来是0.5  1.15号，感觉0.1好像不太行
         # reward_speed_penalty = 0.5 * self._penalty_for_dropping_below_speed_floor(aircraft)  #1.0速度惩罚还可以再大点感觉，或者加一个速度奖励
-        reward_survivaltime = 0.4 #0.4 #0.2 #0.5 #0.2  # 每步存活奖励
+        reward_survivaltime = 0.5 #0.4 #0.2 #0.5 #0.2  # 每步存活奖励
         # 调用纯存活奖励
         # reward_survivaltime = 1.0 * self._reward_for_scaling_survival()
         # reward_los = self._reward_for_los_rate(aircraft, missile, 0.2)  # LOS变化率奖励
@@ -500,9 +503,40 @@ class RewardCalculator:
         current_reward = 0.5 + (self.survival_steps * scaling_factor)
 
         return current_reward
+    # def _reward_for_energy_rate_simple(self, aircraft: Aircraft) -> float:
+    #     """
+    #     极简版能量奖励：(当前能量 - 上一时刻能量) / 上一时刻能量
+    #     """
+    #     g = 9.81
+    #     altitude = max(0.0, aircraft.pos[1])  # 限制下限防bug
+    #     velocity = aircraft.velocity
+    #
+    #     # 计算当前能量 (单位: J/kg)
+    #     current_energy = g * altitude + 0.5 * (velocity ** 2)
+    #
+    #     # 1. 如果是回合第一步，记录能量并返回 0
+    #     if self.prev_energy is None:
+    #         self.prev_energy = current_energy
+    #         return 0.0
+    #
+    #     # 2. 防御性检查：防止极低空低速时除以 0
+    #     if self.prev_energy < 1.0:
+    #         self.prev_energy = current_energy
+    #         return 0.0
+    #
+    #     # 3. 核心计算：(当前 - 之前) / 之前
+    #     energy_ratio = (current_energy - self.prev_energy) / self.prev_energy
+    #
+    #     # 4. 更新记录以备下一步使用
+    #     self.prev_energy = current_energy
+    #
+    #     return energy_ratio
+
     def _reward_for_energy_rate_simple(self, aircraft: Aircraft) -> float:
         """
-        极简版能量奖励：(当前能量 - 上一时刻能量) / 上一时刻能量
+        (纯惩罚版) 极简版能量奖励：只惩罚能量衰减，不奖励能量增加。
+        计算公式：如果能量下降，返回 (当前能量 - 上一时刻能量) / 上一时刻能量；
+                  如果能量上升或保持，返回 0.0。
         """
         g = 9.81
         altitude = max(0.0, aircraft.pos[1])  # 限制下限防bug
@@ -522,11 +556,20 @@ class RewardCalculator:
             return 0.0
 
         # 3. 核心计算：(当前 - 之前) / 之前
+        # 如果能量增加，energy_ratio 为正；如果能量减少，energy_ratio 为负。
         energy_ratio = (current_energy - self.prev_energy) / self.prev_energy
 
         # 4. 更新记录以备下一步使用
         self.prev_energy = current_energy
 
+        # # --- 5. 纯惩罚门控逻辑 ---
+        # if energy_ratio >= 0.0:
+        #     # 能量增加或持平，不给任何正向奖励，杜绝刷分
+        #     return 0.0
+        # else:
+        #     # 能量下降，返回负数作为惩罚
+        #     # 由于你偏好不使用生硬的 Hard Clipping 截断极值，
+        #     # 我们直接返回这个实际的衰减比例，让底层保持连续的梯度
         return energy_ratio
 
     def _reward_for_initial_energy_maintenance(self, aircraft: Aircraft) -> float:
@@ -629,48 +672,44 @@ class RewardCalculator:
 
         return reward
 
-    def _reward_for_los_rate(self, aircraft: Aircraft, missile: Missile, dt: float):
+    def _reward_for_los_rate(self, aircraft: Aircraft, missile: Missile, dt: float) -> float:
         """
-        (V3 - 解析法 + 线性截断) 奖励视线矢量的角速度。
-        使用物理公式 |r x v| / r^2 直接计算，无需历史状态。
+        (单导弹 V6 解析平滑版)
+        特点：纯解析法 + 锁存机制 + Tanh平滑
         """
         # 1. 基础向量获取
         r_vec = aircraft.pos - missile.pos
-        # 相对速度 = 飞机速度 - 导弹速度
         v_rel = aircraft.get_velocity_vector() - missile.get_velocity_vector()
 
-        # 距离平方 (r^2)
-        r_sq = np.dot(r_vec, r_vec)
-        r_norm = np.sqrt(r_sq)
+        r_sq = float(np.dot(r_vec, r_vec))
+        r_norm = math.sqrt(r_sq)
 
-        # 2. 基础数据准备 & 门控
         missile_v_vec = missile.get_velocity_vector()
-        norm_missile_v = np.linalg.norm(missile_v_vec)
+        norm_missile_v = float(np.linalg.norm(missile_v_vec))
 
-        # 避免除零错误 (距离过近或导弹静止)
+        # 2. 异常值保护
         if r_sq < 1.0 or norm_missile_v < 0.1:
+            self.los_safe_latch = False
             return 0.0
 
-        # --- 核心门控：后半球直接给满分 (1.0) ---
-        # 计算 ATA 余弦
-        cos_ata = np.dot(r_vec, missile_v_vec) / (r_norm * norm_missile_v)
+        # --- 3. 核心门控：单导弹 Latch 机制 ---
+        cos_ata = float(np.dot(r_vec, missile_v_vec) / (r_norm * norm_missile_v))
 
         if cos_ata < 0:
-            return 0.0  # 安全状态，威胁解除 0.5
+            if self.los_safe_latch is False:
+                # 刚甩掉导弹，给一次性大奖
+                self.los_safe_latch = True
+                return 0.0 #1.0
+            else:
+                # 已经甩掉了，保持安静
+                return 0.0
+        else:
+            self.los_safe_latch = False
 
-        # --- 3. 解析法核心计算 ---
-        # 公式: Omega = |r x v_rel| / r^2
-        # 计算叉积
+        # --- 4. 解析法核心计算 ---
         cross_prod = np.cross(r_vec, v_rel)
-        # 计算叉积的模长
-        cross_norm = np.linalg.norm(cross_prod)
-
-        # 得到瞬时视线角速率 (rad/s)
+        cross_norm = float(np.linalg.norm(cross_prod))
         los_rate = cross_norm / r_sq
-
-        # --- 4. 线性截断归一化 ---
-        # 设定目标阈值 (0.2 rad/s ≈ 11.5 deg/s)
-        TARGET_LOS_RATE = 0.2
 
         # 线性映射
         normalized_reward = 2.0 * los_rate #/ TARGET_LOS_RATE
@@ -679,7 +718,75 @@ class RewardCalculator:
         # reward = los_rate #np.clip(normalized_reward, 0.0, 1.0)
         reward = np.clip(normalized_reward, 0.0, 1.0)
 
+        # # --- 5. Tanh 平滑映射 ---
+        # SENSITIVITY = 4.0
+        # # SENSITIVITY = 4.0 意味着:
+        # #     # 0.2 rad/s (良好机动) -> tanh(0.8) ≈ 0.66 分
+        # #     # 0.5 rad/s (极限机动) -> tanh(2.0) ≈ 0.96 分
+        # #     # 既保留了高分，又没有切断极限探索的梯度
+        # reward = float(np.tanh(los_rate * SENSITIVITY))
+
         return reward
+
+    # def _reward_for_los_rate(self, aircraft: Aircraft, missile: Missile, dt: float):
+    #     """
+    #     (V3 - 解析法 + 线性截断) 奖励视线矢量的角速度。
+    #     使用物理公式 |r x v| / r^2 直接计算，无需历史状态。
+    #     """
+    #     # 1. 基础向量获取
+    #     r_vec = aircraft.pos - missile.pos
+    #     # 相对速度 = 飞机速度 - 导弹速度
+    #     v_rel = aircraft.get_velocity_vector() - missile.get_velocity_vector()
+    #
+    #     # 距离平方 (r^2)
+    #     r_sq = np.dot(r_vec, r_vec)
+    #     r_norm = np.sqrt(r_sq)
+    #
+    #     # 2. 基础数据准备 & 门控
+    #     missile_v_vec = missile.get_velocity_vector()
+    #     norm_missile_v = np.linalg.norm(missile_v_vec)
+    #
+    #     # 避免除零错误 (距离过近或导弹静止)
+    #     if r_sq < 1.0 or norm_missile_v < 0.1:
+    #         return 0.0
+    #
+    #     # --- 核心门控：后半球直接给满分 (1.0) ---
+    #     # 计算 ATA 余弦
+    #     cos_ata = np.dot(r_vec, missile_v_vec) / (r_norm * norm_missile_v)
+    #
+    #     if cos_ata < 0:
+    #         return 0.0  # 安全状态，威胁解除 0.5
+    #
+    #     # --- 3. 解析法核心计算 ---
+    #     # 公式: Omega = |r x v_rel| / r^2
+    #     # 计算叉积
+    #     cross_prod = np.cross(r_vec, v_rel)
+    #     # 计算叉积的模长
+    #     cross_norm = np.linalg.norm(cross_prod)
+    #
+    #     # 得到瞬时视线角速率 (rad/s)
+    #     los_rate = cross_norm / r_sq
+    #
+    #     # # --- 4. 线性截断归一化 ---
+    #     # # 设定目标阈值 (0.2 rad/s ≈ 11.5 deg/s)
+    #     # TARGET_LOS_RATE = 0.2
+    #
+    #     # # 线性映射
+    #     # normalized_reward = 2.0 * los_rate #/ TARGET_LOS_RATE
+    #     #
+    #     # # 截断到 [0, 1]
+    #     # # reward = los_rate #np.clip(normalized_reward, 0.0, 1.0)
+    #     # reward = np.clip(normalized_reward, 0.0, 1.0)
+    #
+    #     # --- 6. Tanh 平滑映射 (替代你之前的 np.clip) ---
+    #     # SENSITIVITY = 4.0 意味着:
+    #     # 0.2 rad/s (良好机动) -> tanh(0.8) ≈ 0.66 分
+    #     # 0.5 rad/s (极限机动) -> tanh(2.0) ≈ 0.96 分
+    #     # 既保留了高分，又没有切断极限探索的梯度
+    #     SENSITIVITY = 4.0
+    #     reward = float(np.tanh(los_rate * SENSITIVITY))
+    #
+    #     return reward
 
     # def _reward_for_los_rate(self, aircraft: Aircraft, missile: Missile, dt: float):
     #     """
@@ -1903,7 +2010,7 @@ class RewardCalculator:
         #     return 0.0
 
         # 3. 归一化 (Mapping 1.0 ~ Max_G -> 0.0 ~ 1.0)
-        min_g_threshold = 0.0 #1.0
+        min_g_threshold = 1.0 #0.0 #1.0
 
         # 防止分母为0或负数
         if self.AIRCRAFT_MAX_G <= min_g_threshold:

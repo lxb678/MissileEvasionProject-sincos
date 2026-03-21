@@ -59,7 +59,7 @@ DISCRETE_ACTION_MAP = {
     # 'intra_interval': [0.05, 0.1, 0.15],
     # 'intra_interval': [0.02, 0.04, 0.06],
     'num_groups': [2, 3, 4],
-    'inter_interval': [0.2, 0.4, 0.6]
+    'inter_interval': [0.2, 0.6, 1.0] #[0.2, 0.4, 0.6]
 }
 # <<< 新增 >>> 定义固定的组内投放间隔
 # FIXED_INTRA_INTERVAL = 0.05
@@ -1046,19 +1046,30 @@ class PPO_continuous(object):
                 entropy_trigger = new_dists['trigger'].entropy()
                 mean_entropy_trigger = entropy_trigger.mean()
 
-                # ==========================================================
-                # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
-                # ==========================================================
-
+                # # ==========================================================
+                # # D.3 🌟 移除子动作的熵掩码，强制保持后台探索欲 🌟
+                # # ==========================================================
+                #
                 # 1. 计算所有子动作的原始熵 (Raw)
                 entropy_sub_actions_raw = sum(
                     dist.entropy() for key, dist in new_dists.items()
                     if key not in ['continuous', 'trigger']
                 )
 
-                # 2. 直接求平均！不要乘 actual_triggers！
-                # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
-                mean_entropy_sub = entropy_sub_actions_raw.mean()
+                # # 2. 直接求平均！不要乘 actual_triggers！
+                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
+                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不打算投放干扰弹。
+                # # 这样当 trigger 被触发时，子动作依然有足够的随机性去探索不同策略。
+                # mean_entropy_sub = entropy_sub_actions_raw.mean()
+
+                # 1. 算出有真实开火记录的动作数量
+                valid_trigger_count = actual_triggers.sum()
+
+                if valid_trigger_count > 0:
+                    # 2. 重点：只除以开火的次数 (valid_trigger_count)，而不是整个 Batch 的长度
+                    mean_entropy_sub = (entropy_sub_actions_raw * actual_triggers).sum() / valid_trigger_count
+                else:
+                    mean_entropy_sub = torch.tensor(0.0, device=ACTOR_PARA.device)
 
                 # # 3. 🌟 灵魂掩码：子动作熵 🌟
                 # entropy_sub_actions_raw = sum(
@@ -1074,7 +1085,7 @@ class PPO_continuous(object):
                 # ) / num_sub_actions
 
                 # num_triggered = actual_triggers.sum()
-                #
+                # #
                 # if num_triggered > 0:
                 #     # 只有真实开火的样本，才把它的子动作熵提取出来算平均
                 #     valid_sub_entropy = entropy_sub_actions_raw * actual_triggers

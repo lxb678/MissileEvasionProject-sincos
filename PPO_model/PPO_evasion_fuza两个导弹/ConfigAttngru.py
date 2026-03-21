@@ -68,8 +68,8 @@ ACTOR_PARA.model_layer_dim =  [128,128,128]#[128,256,128,64]#[128,128,128]#[256,
 ACTOR_PARA.output_dim = AGENTPARA.ACTION_DIM   #多维的动作 每一维的动作输出0/1
 
 ACTOR_PARA.lr = 3e-4 #1e-4 # 3e-4 #3e-4 #5e-4 #3e-4  #1e-5  # << 注意！修改了网络结构后，学习率通常需要重新调整，从一个小的值开始
-ACTOR_PARA.gru_lr = 3e-4 #5e-5 #3e-4 #5e-4 #3e-4 #1e-4 #3e-4 #5e-5  # 3e-4 #3e-4#5e-5#1e-4      # GRU 层的专属学习率 (通常可以设得小一些)
-ACTOR_PARA.attention_lr = 3e-4 #1e-2 # Attention 层的专属学习率 (可以尝试设得大一些)
+ACTOR_PARA.gru_lr = 5e-4 #5e-5 #3e-4 #5e-4 #3e-4 #1e-4 #3e-4 #5e-5  # 3e-4 #3e-4#5e-5#1e-4      # GRU 层的专属学习率 (通常可以设得小一些)
+ACTOR_PARA.attention_lr = 5e-4 #1e-2 # Attention 层的专属学习率 (可以尝试设得大一些)
 
 CRITIC_PARA = MODELPARA()
 CRITIC_PARA.input_dim = AGENTPARA.OBS_DIM
@@ -80,5 +80,5 @@ CRITIC_PARA.model_layer_dim = [128,128,128]#[128,256,128,64]#[128,128,128]#[256,
 CRITIC_PARA.output_dim = 1
 
 CRITIC_PARA.lr = 1e-4 #1e-3 #5e-4
-CRITIC_PARA.gru_lr = 1e-4 #1e-3 #5e-4 #5e-4 #1e-3 #5e-4 #1e-3 #1e-4 #5e-4 #1e-3 #1e-4 #1e-3 # 5e-5#1e-4
-CRITIC_PARA.attention_lr = 1e-4 #1e-3 #5e-4 #1e-3 #1e-2
+CRITIC_PARA.gru_lr = 3e-4 #1e-3 #5e-4 #5e-4 #1e-3 #5e-4 #1e-3 #1e-4 #5e-4 #1e-3 #1e-4 #1e-3 # 5e-5#1e-4
+CRITIC_PARA.attention_lr = 3e-4 #1e-3 #5e-4 #1e-3 #1e-2

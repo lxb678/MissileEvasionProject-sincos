@@ -83,7 +83,7 @@ set_seed(env)
 # 2. 指定模型路径
 # <<< 请修改这里的路径为你训练好的 GRU 模型文件夹路径 >>>
 # model_path = r"D:\code\规避导弹项目sincos\Interference_code\test\test_evade_fuza两个导弹"
-model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-03-19_23-01-14"#"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-01-27_17-37-39"  #"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-01-27_18-32-25"
+model_path = r"D:\code\规避导弹项目sincos\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-03-21_17-52-46"#"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-01-27_17-37-39"  #"D:\code\save\save_evade_fuza两个导弹\PPO_PostAttnGRU_2026-01-27_18-32-25"
 print(f"--- 正在加载 交叉注意力+GRU 模型: {model_path} ---")
 
 # 3. 初始化 Agent

@@ -14,7 +14,7 @@ USE_RNN_MODEL = True  # 保持开启 RNN
 TACVIEW_ENABLED_DURING_TRAINING = False
 
 # <<< 新增配置: 每隔多少个回合更新一次 >>>
-UPDATE_CYCLE = 25
+UPDATE_CYCLE = 50 #25
 
 
 # def set_seed(env, seed=AGENTPARA.RANDOM_SEED):

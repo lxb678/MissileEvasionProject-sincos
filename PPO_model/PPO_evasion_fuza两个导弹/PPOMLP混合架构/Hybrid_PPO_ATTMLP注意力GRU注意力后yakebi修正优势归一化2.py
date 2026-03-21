@@ -30,7 +30,7 @@ TOTAL_ACTION_DIM_BUFFER = CONTINUOUS_DIM + len(DISCRETE_DIMS)
 DISCRETE_ACTION_MAP = {
     'salvo_size': [2, 3, 4],
     'num_groups': [2, 3, 4],
-    'inter_interval': [0.2, 0.4, 0.6]
+    'inter_interval': [0.2, 0.6, 1.0] #[0.2, 0.4, 0.6]
 }
 ACTION_RANGES = {
     'throttle': {'low': 0.0, 'high': 1.0},
@@ -1435,9 +1435,18 @@ class PPO_continuous(object):
                     if key not in ['continuous', 'trigger']
                 )
 
-                # 2. 直接求平均！不要乘 actual_triggers！
-                # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
-                mean_entropy_sub = entropy_sub_actions_raw.mean()
+                # # 2. 直接求平均！不要乘 actual_triggers！
+                # # 让网络始终保持对子动作选项的好奇心，哪怕它当前不想按 Trigger。
+                # mean_entropy_sub = entropy_sub_actions_raw.mean()
+
+                # 1. 算出有真实开火记录的动作数量
+                valid_trigger_count = actual_triggers.sum()
+
+                if valid_trigger_count > 0:
+                    # 2. 重点：只除以开火的次数 (valid_trigger_count)，而不是整个 Batch 的长度
+                    mean_entropy_sub = (entropy_sub_actions_raw * actual_triggers).sum() / valid_trigger_count
+                else:
+                    mean_entropy_sub = torch.tensor(0.0, device=ACTOR_PARA.device)
 
                 # # 2. 子动作熵 (原始)
                 # entropy_sub_raw = (
@@ -1467,7 +1476,7 @@ class PPO_continuous(object):
                 # # 逻辑：(子动作熵 * 真实开火掩码).mean()
                 # # 效果：不开火的时候熵贡献为0，分母为总步数 (Batch * Seq)。
                 # # 结果：如果开火很稀疏，这个值会非常小（这是正常的）。
-                # mean_entropy_sub = (entropy_sub_raw * actual_triggers).mean()
+                # mean_entropy_sub = (entropy_sub_actions_raw * actual_triggers).mean()
 
                 # ================= [修改结束] =================
 
@@ -1506,7 +1515,7 @@ class PPO_continuous(object):
 
                 surr1 = ratio * advantage_squeezed
                 surr2 = torch.clamp(ratio, 1.0 - AGENTPARA.epsilon, 1.0 + AGENTPARA.epsilon) * advantage_squeezed
-                actor_loss = -torch.min(surr1, surr2).mean() - (AGENTPARA.con_entropy * mean_entropy_cont + AGENTPARA.dis_entropy * (1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub))#AGENTPARA.entropy * (mean_entropy_cont + 1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub) #AGENTPARA.entropy * total_entropy
+                actor_loss = -torch.min(surr1, surr2).mean() - (AGENTPARA.con_entropy * mean_entropy_cont + AGENTPARA.dis_entropy * (1.0 * mean_entropy_trigger + 1.0 *  mean_entropy_sub))#AGENTPARA.entropy * (mean_entropy_cont + 1.0 * mean_entropy_trigger + 1.0 * mean_entropy_sub) #AGENTPARA.entropy * total_entropy
 
                 # 更新 Actor
                 self.Actor.optim.zero_grad()
